@@ -1,0 +1,260 @@
+"""Apply DDL to a fresh DuckDB / SQLCipher pair and seed `user_preferences`.
+
+`init_databases()` is idempotent: if either DB already exists it is left untouched.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Final
+
+import duckdb
+import structlog
+
+from genome.config import get_settings
+from genome.db.duckdb_conn import duckdb_connection
+from genome.db.sqlite_conn import sqlcipher_connection
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from duckdb import DuckDBPyConnection
+
+logger = structlog.get_logger(__name__)
+
+REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[4]
+DDL_DIR: Final[Path] = REPO_ROOT / "ddl"
+
+DUCKDB_DDL_FILES: Final[tuple[str, ...]] = (
+    "group_1_genotype.sql",
+    "group_2_annotations.sql",
+    "group_3_derived.sql",
+    "group_4_insights.sql",
+)
+DUCKDB_ALTERS_FILE: Final[str] = "alters_cross_group.sql"
+SQLITE_DDL_FILE: Final[str] = "group_5_app_state.sql"
+
+# Suggested seed values for `user_preferences` (per group 5 schema doc).
+USER_PREFERENCES_SEED: Final[tuple[tuple[str, str, str, str], ...]] = (
+    ("current_profile_id", "1", "number", "Active profile"),
+    ("default_audience", "layperson", "string", "Insight rendering: eli5 / layperson / clinical"),
+    ("imputation_r2_threshold", "0.3", "number", "Minimum R^2 to use imputed variants"),
+    ("theme", "system", "string", "UI theme: light / dark / system"),
+    ("llm_model", "claude-opus-4-7", "string", "Model for NL queries"),
+    ("audit_retention_days", "365", "number", "How long to keep audit logs"),
+    ("external_calls_enabled", "true", "boolean", "Master switch for any network egress"),
+    ("pubmed_enrichment_enabled", "false", "boolean", "Auto-fetch PubMed for variants"),
+    ("auto_snapshot_cadence", "90d", "string", "Auto snapshots every N days ('' = off)"),
+    ("prs_min_coverage_pct", "80", "number", "Hide PGS results below this coverage"),
+    ("font_size", "medium", "string", "UI font size"),
+    ("cite_in_responses", "true", "boolean", "Include citations in LLM-generated text"),
+)
+
+# DuckDB does not support partial indexes (CREATE INDEX ... WHERE ...) or
+# ALTER TABLE ... ADD CONSTRAINT. A handful of CREATE VIEW statements in the
+# schema docs also trip the DuckDB binder (e.g. ambiguous USING (variant_id)
+# with a SELECT a.* on a table that also exposes variant_id). The schema doc is
+# the source of truth and the DDL is extracted verbatim, so we log + skip these
+# rather than modify the SQL.
+_PARTIAL_INDEX_RE: Final[re.Pattern[str]] = re.compile(
+    r"^\s*CREATE\s+INDEX\b.*?\bWHERE\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_ADD_CONSTRAINT_RE: Final[re.Pattern[str]] = re.compile(
+    r"^\s*ALTER\s+TABLE\b.*?\bADD\s+CONSTRAINT\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_CREATE_VIEW_RE: Final[re.Pattern[str]] = re.compile(
+    r"^\s*CREATE\s+(OR\s+REPLACE\s+)?VIEW\b",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class InitResult:
+    """Summary of what `init_databases` did on this invocation."""
+
+    duckdb_created: bool
+    sqlite_created: bool
+    duckdb_path: Path
+    sqlite_path: Path
+
+
+@dataclass
+class _SplitState:
+    """Mutable parser state for `_split_sql`."""
+
+    in_single: bool = False
+    in_line_comment: bool = False
+    in_block_comment: bool = False
+
+
+def _consume_one(  # noqa: C901, PLR0911 — explicit branches per parser mode read more clearly than nested ones
+    state: _SplitState,
+    buf: list[str],
+    c: str,
+    nxt: str,
+) -> int:
+    """Append one character (or two) to ``buf`` and advance the cursor accordingly."""
+    if state.in_line_comment:
+        buf.append(c)
+        if c == "\n":
+            state.in_line_comment = False
+        return 1
+    if state.in_block_comment:
+        buf.append(c)
+        if c == "*" and nxt == "/":
+            buf.append(nxt)
+            state.in_block_comment = False
+            return 2
+        return 1
+    if state.in_single:
+        buf.append(c)
+        if c == "'":
+            if nxt == "'":  # escaped quote
+                buf.append(nxt)
+                return 2
+            state.in_single = False
+        return 1
+    if c == "-" and nxt == "-":
+        buf.append(c)
+        state.in_line_comment = True
+        return 1
+    if c == "/" and nxt == "*":
+        buf.append(c)
+        state.in_block_comment = True
+        return 1
+    if c == "'":
+        buf.append(c)
+        state.in_single = True
+        return 1
+    buf.append(c)
+    return 1
+
+
+def _split_sql(content: str) -> list[str]:
+    """Split a DDL script into individual statements, respecting strings and comments."""
+    statements: list[str] = []
+    buf: list[str] = []
+    state = _SplitState()
+    i, n = 0, len(content)
+    while i < n:
+        c = content[i]
+        nxt = content[i + 1] if i + 1 < n else ""
+        # Statement terminator outside any string/comment: flush.
+        if (
+            c == ";"
+            and not state.in_single
+            and not state.in_line_comment
+            and not state.in_block_comment
+        ):
+            stmt = "".join(buf).strip()
+            if _strip_comments(stmt):
+                statements.append(stmt)
+            buf = []
+            i += 1
+            continue
+        i += _consume_one(state, buf, c, nxt)
+
+    tail = "".join(buf).strip()
+    if _strip_comments(tail):
+        statements.append(tail)
+    return statements
+
+
+def _strip_comments(stmt: str) -> str:
+    """Return the statement with line comments and whitespace removed (for emptiness check)."""
+    lines = [line for line in stmt.split("\n") if not line.lstrip().startswith("--")]
+    return "\n".join(lines).strip()
+
+
+def _is_unsupported_in_duckdb(stmt: str) -> bool:
+    body = _strip_comments(stmt)
+    if not body:
+        return True  # all-comments / placeholder
+    return bool(
+        _PARTIAL_INDEX_RE.match(body)
+        or _ADD_CONSTRAINT_RE.match(body)
+        or _CREATE_VIEW_RE.match(body),
+    )
+
+
+def _apply_duckdb_ddl(
+    conn: DuckDBPyConnection,
+    files: Iterable[Path],
+    *,
+    tolerate_unsupported: bool = False,
+) -> None:
+    for path in files:
+        log = logger.bind(file=path.name)
+        log.info("applying duckdb ddl")
+        for stmt in _split_sql(path.read_text(encoding="utf-8")):
+            try:
+                conn.execute(stmt)
+            except duckdb.Error as e:
+                if tolerate_unsupported or _is_unsupported_in_duckdb(stmt):
+                    log.warning(
+                        "skipping unsupported statement",
+                        reason=str(e).splitlines()[0][:200],
+                        statement=stmt[:120].replace("\n", " "),
+                    )
+                    continue
+                log.exception("ddl statement failed", statement=stmt[:200])
+                raise
+
+
+def _seed_user_preferences(conn: object) -> None:
+    """Insert the canonical user_preferences seed rows. Idempotent via INSERT OR IGNORE."""
+    conn.executemany(  # type: ignore[attr-defined]
+        "INSERT OR IGNORE INTO user_preferences (pref_key, pref_value, value_type, description)"
+        " VALUES (?, ?, ?, ?)",
+        list(USER_PREFERENCES_SEED),
+    )
+
+
+def init_databases() -> InitResult:
+    """Create both databases on first run, skip on subsequent runs.
+
+    On first DuckDB creation, applies group 1-4 DDL in order and then the
+    cross-group ALTERs. On first SQLite creation, applies group 5 DDL
+    (which already inserts the seed `profiles` row) and then seeds
+    `user_preferences`.
+    """
+    settings = get_settings()
+    settings.genome_duckdb_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.app_db_path.parent.mkdir(parents=True, exist_ok=True)
+    settings.archive_path.mkdir(parents=True, exist_ok=True)
+
+    duckdb_existed = settings.genome_duckdb_path.exists()
+    sqlite_existed = settings.app_db_path.exists()
+
+    if duckdb_existed:
+        logger.info("duckdb already present; skipping", path=str(settings.genome_duckdb_path))
+    else:
+        logger.info("creating duckdb", path=str(settings.genome_duckdb_path))
+        with duckdb_connection() as conn:
+            _apply_duckdb_ddl(conn, [DDL_DIR / f for f in DUCKDB_DDL_FILES])
+            _apply_duckdb_ddl(
+                conn,
+                [DDL_DIR / DUCKDB_ALTERS_FILE],
+                tolerate_unsupported=True,
+            )
+
+    if sqlite_existed:
+        logger.info("app.db already present; skipping", path=str(settings.app_db_path))
+    else:
+        logger.info("creating app.db", path=str(settings.app_db_path))
+        with sqlcipher_connection() as conn:
+            sql = (DDL_DIR / SQLITE_DDL_FILE).read_text(encoding="utf-8")
+            conn.executescript(sql)
+            _seed_user_preferences(conn)
+            conn.commit()
+
+    return InitResult(
+        duckdb_created=not duckdb_existed,
+        sqlite_created=not sqlite_existed,
+        duckdb_path=settings.genome_duckdb_path,
+        sqlite_path=settings.app_db_path,
+    )
