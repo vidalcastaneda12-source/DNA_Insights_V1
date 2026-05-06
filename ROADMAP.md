@@ -1,195 +1,108 @@
-# Roadmap
+# Build Roadmap
 
-This file defines the phased build plan for the DNA Insights app. Each phase has a clear scope; do not pull work from later phases into the current one.
+Phases are sequential. Do not start phase N+1 until phase N's verification passes.
 
-When in doubt, the schema documents in `docs/schemas/` and the locked decisions in `CLAUDE.md` are authoritative. This file is the build sequence.
-
----
-
-## Phase 1 — Foundation (this phase)
-
-Goal: a working repo with both databases initialized, schema applied from the extracted DDL, and a CLI that proves it.
-
-Scope:
-- Repo layout with empty stubs for ingest / annotate / analyze / insights / jobs / api.
-- `ddl/*.sql` extracted verbatim from `docs/schemas/`.
-- `backend/src/genome/config.py` loading env from `.env`.
-- `backend/src/genome/db/duckdb_conn.py`, `sqlite_conn.py`, `init_schema.py`.
-- `backend/src/genome/cli.py` exposing `genome init | status | version`.
-- `backend/tests/` covering config, schema init, and connections.
-- `pyproject.toml`, `.env.example`, `.gitignore`, `README.md`, `CLAUDE.md`, `ROADMAP.md`.
-
-Out of scope (deferred):
-- Any ingestion logic.
-- Any annotation download.
-- Any analysis pipeline (PRS, PGx, carrier, ACMG SF, HLA, ROH, haplogroup, ancestry).
-- Insight generation or rendering.
-- The FastAPI app and the Next.js frontend.
-- External HTTP calls.
-
-Done when:
-- `genome init` succeeds on a clean checkout and creates both DBs idempotently.
-- `genome status` reports table counts, profile presence, and schema readiness.
-- `pytest` is green; `ruff check` and `mypy --strict backend/src` pass.
-
----
+## Phase 1 — Foundation (this is the bootstrap)
+Project layout, DDL extraction, DB initialization, config, CLI, basic tests. **Verification:** `genome init` works on a clean checkout; `pytest` green; `mypy --strict` clean.
 
 ## Phase 2 — Ingestion
+- Parse 23andMe and Ancestry raw exports
+- Normalize to GRCh38 (lift-over via `pyliftover` or chain files)
+- Strand resolution (with palindrome flagging)
+- Multi-allelic split
+- Populate `variants_master`, `genotype_calls`, `ingestion_runs`
+- Compute `sample_qc`
+- CLI: `genome ingest --source 23andme path/to/file.txt`
 
-Goal: parse a 23andMe and an Ancestry export end-to-end into `variants_master`, `genotype_calls`, `consensus_genotypes`, `discrepancies`, `ingestion_runs`, and `sample_qc`.
+**Verification:** ingest both fixture files; `variants_master` populated; `sample_qc` row produced; tests cover format edge cases.
 
-Scope:
-- File parsers (23andMe and Ancestry text exports) with strand handling.
-- Multi-allelic split during ingest.
-- Lift-over GRCh37→GRCh38 (chain file pinned and tracked in `archive/`).
-- Variant matching strategy from group 1 (primary key, rsID, fuzzy with palindrome handling).
-- Discrepancy detection rules (group 1 table).
-- Consensus rules (`consensus_v1`).
-- Per-ingestion QC: call rate, het rate, sex check, optional concordance.
-- CLI: `genome ingest <file> --source 23andme|ancestry`.
+## Phase 3 — Merge & discrepancy detection
+- Variant matching via three-tier strategy (chr:pos:ref:alt → rsid → fuzzy with strand)
+- Compute `consensus_genotypes` via `consensus_v1` rule
+- Detect and catalog discrepancies (six types, four severity levels)
+- CLI: `genome merge`
 
-Out of scope:
-- Imputation (phase 3).
-- Annotation joins (phase 4).
+**Verification:** known mismatches in fixture data are correctly flagged; concordance rate computed; per-source counts match the Venn-diagram view.
 
-Done when a full 23andMe + Ancestry pair ingests, merges, and reports concordance and discrepancy counts; sample QC writes a row.
+## Phase 4 — Imputation roundtrip
+- Export merged calls to VCF
+- Manual upload to TopMed Imputation Server (documented runbook in `docs/runbooks/`)
+- `imputation_monitor` job polls for completion
+- Download, parse, integrate imputed variants with `imputation_r2` per call
+- CLI: `genome imputation submit | status | import`
 
----
+**Verification:** end-to-end roundtrip works on a small chromosome subset; `is_imputed` flags correct; R² distribution looks sane.
 
-## Phase 3 — Imputation
+## Phase 5 — Reference annotation loaders
+- Per-source downloaders (ClinVar, GWAS Catalog, PharmGKB, CPIC, PGS Catalog metadata, gnomAD filtered, dbSNP filtered, genes, traits, pathways)
+- Each writes to `annotation_source_versions` and the per-source table
+- VEP runs locally on user variants
+- Refresh `variant_annotations_index`
+- CLI: `genome annotate refresh [--source ...]`
 
-Goal: closed-loop TopMed imputation roundtrip.
+**Verification:** all sources loaded; `variant_annotations_index` populated; queries against `variant_full_v` view return joined annotations.
 
-Scope:
-- Build TopMed-ready VCF from current consensus.
-- Submit / monitor / download via background jobs (`imputation_upload`, `imputation_monitor`, `imputation_download`).
-- Ingest imputed variants into `variants_master` + `genotype_calls` with `is_imputed = TRUE` and `imputation_r2`.
-- Re-derive `consensus_genotypes` to consume imputed calls per `imputation_r2_threshold`.
-- Update `imputation_runs` with volumes and quality stats.
+## Phase 6 — Analysis pipelines
+- PRS computation against PGS Catalog (overlapping-only weights)
+- PharmCAT integration → `derived_pgx_phenotypes`
+- Carrier detection rules
+- ACMG SF detection
+- HIBAG → `derived_hla_typing`
+- ROH via plink2
+- Y/mtDNA haplogroup assignment
+- Global ancestry (RFMix or admixture)
+- ROH summary, genome QC
+- Each writes an `analysis_runs` row capturing source versions used
+- CLI: `genome analyze [pgs|pgx|carrier|acmg|hla|roh|haplogroup|ancestry|qc|all]`
 
-Out of scope:
-- Replacing the manual TopMed handoff with a programmatic API (still v1 manual roundtrip per locked stack).
+**Verification:** each pipeline produces non-zero output on the merged+imputed dataset; supersession works on re-run.
 
-Done when an imputed VCF flows in, consensus updates, and `mean_imputation_r2` reports sensibly.
+## Phase 7 — Insight generation
+- Per-analysis-type insight generators in `genome.insights.*`
+- Versioned tier mapping functions
+- Confidence rollup
+- Materialized `summary_dashboard` refresh job
+- Audience rendering (eli5/layperson/clinical) lazily generated
+- CLI: `genome insights regenerate [--type ...]`
 
----
+**Verification:** an end-to-end run produces insights for every analysis type; every insight has at least one evidence row; tier rollup is consistent.
 
-## Phase 4 — Reference annotations
+## Phase 8 — Backend API
+- FastAPI app under `genome.api`
+- Endpoints: summary dashboard, drill-downs (gene / pathway / trait / variant), discrepancy view, PGx medication checker, ACMG SF dashboard, snapshot list, audit dashboard
+- Natural-language query endpoint (Claude tool-use loop over the schemas)
+- Job worker process (`genome jobs run-worker`)
+- Audit log middleware on every request
 
-Goal: bulk-load the curated knowledge layer and refresh the per-variant rollup.
+**Verification:** OpenAPI spec covers all groups; integration tests exercise the worker; NL query produces correct DuckDB queries on fixture questions.
 
-Scope:
-- `annotation_source_versions` registry; per-source ingest jobs.
-- Full bulk load: ClinVar, GWAS Catalog, PharmGKB, CPIC, PGS Catalog (scores metadata), genes, traits, pathways.
-- Overlapping-only: PGS weights, gnomAD, dbSNP. Build the (user ∪ ClinVar ∪ GWAS ∪ PGS) filter set first.
-- Compute VEP locally; capture into `vep_consequences`.
-- Refresh job for `variant_annotations_index` (the per-variant rollup).
-- CLI: `genome refresh-annotations [--source clinvar|...]`.
+## Phase 9 — Frontend
+- Next.js scaffold
+- Home dashboard (the rollup)
+- Gene drill-down
+- Trait drill-down with Manhattan plot
+- Variant detail page
+- Discrepancy view
+- Karyogram (D3) with notable variants
+- Chronotype/nutrition/PGx pages
+- Chat/query interface
+- Doctor-ready PDF export
 
-Out of scope:
-- Derived analyses (phase 5).
-- Insight generation (phase 6).
+**Verification:** clickable end-to-end demo from dashboard to SNP detail to evidence citations.
 
-Done when a snapshot capture lists current versions for every source and `variant_annotations_index` is fresh.
+## Phase 10 — Privacy hardening, polish, snapshots
+- External call audit dashboard
+- Sanitized export modes
+- Snapshot create / restore / diff (the "what changed" feed)
+- ClinVar-update notifications
+- Performance pass on `variant_annotations_index` refresh
+- Optional: `age`-encrypted backup script
 
----
+**Verification:** privacy dashboard accurate; snapshot restore reproduces a prior state; backup script roundtrips.
 
-## Phase 5 — Derived analyses
-
-Goal: every derived pipeline runs, writes provenance, and supports supersession.
-
-Scope:
-- `analysis_runs` table populated for each pipeline.
-- PGS via internal calculator over `pgs_score_weights` ∩ user variants.
-- PGx via PharmCAT subprocess; write `derived_pgx_phenotypes`.
-- Carrier screening (rule-based over genes + ClinVar P/LP).
-- ACMG SF over `genes.is_acmg_sf`.
-- HLA via HIBAG (R subprocess or rpy2).
-- ROH via plink2.
-- Haplogroups (Y, mtDNA) via haplogrep (or comparable).
-- Global / local / archaic ancestry; genetic distance.
-- Compound heterozygosity per gene over P/LP variants.
-- Genome-wide QC summary in `derived_genome_qc`.
-
-Out of scope:
-- The user-facing insights surface (phase 6).
-
-Done when `derived_summary_v` shows non-zero counts across the expected pipelines.
-
----
-
-## Phase 6 — Insights & evidence
-
-Goal: every derived row that matters becomes an `insights` row with `evidence` rows and full provenance.
-
-Scope:
-- Versioned tier-mapping functions per source (`clinvar_to_unified_v1`, `cpic_to_unified_v1`, `gwas_to_unified_v1`, …).
-- Confidence rollup function (`compute_confidence`) that respects conflicting evidence.
-- Insight generators per type: `pgx`, `prs`, `carrier`, `clinvar`, `acmg_sf`, `trait`, `hla`, plus the cross-cutting `pleiotropy`, `compound`, `pathway`.
-- Supersession workflow on every regenerate.
-- `summary_dashboard` refresh job.
-- Audience rendering cache (`eli5` / `layperson` / `clinical`) populated lazily.
-
-Out of scope:
-- LLM synthesis beyond audience rendering (phase 8).
-
-Done when starring an insight, marking it reviewed, and re-running its generator produces an INSERT-then-supersede sequence — never an UPDATE of active content.
-
----
-
-## Phase 7 — API and frontend MVP
-
-Goal: a usable local UI over the insights model.
-
-Scope:
-- FastAPI app: insights list/detail, gene drill-down, variant detail, PGx checker over medications, snapshots.
-- Next.js + Tailwind + shadcn/ui frontend.
-- Recharts for standard plots; D3 for karyogram and Manhattan.
-- Notes / bookmarks / observations CRUD against `app.db`.
-- Audit log viewer.
-- Privacy dashboard fed by `external_call_summary_v`.
-
-Out of scope:
-- Mobile.
-- Multi-user.
-
-Done when a fresh checkout — after `genome init` and a sample run — boots the UI and the home dashboard renders insight counts.
-
----
-
-## Phase 8 — LLM-assisted features
-
-Goal: NL queries and rich audience rendering.
-
-Scope:
-- NL → SQL / NL → tool-chain via Anthropic SDK (`claude-opus-4-7`).
-- `saved_queries` with auto-rerun and change detection (`last_result_hash`).
-- LLM-driven audience rendering for insights (`eli5` / `layperson` / `clinical`), cached.
-- Every LLM call gated by `external_calls_enabled` and audit-logged.
-
-Out of scope:
-- Letting the LLM mutate state directly. It can suggest; the worker writes.
-
-Done when an NL query can be saved, replayed on cadence, and surfaces a "result changed" notification when `last_result_hash` shifts.
-
----
-
-## Phase 9 — Multi-profile + snapshots polish
-
-Goal: support family profiles and reproducible snapshots end-to-end.
-
-Scope:
-- Adding profiles, switching profiles, per-profile DuckDB connection pool.
-- Snapshot capture / restore against `archive/snapshots/<uuid>.json.zst`.
-- Snapshot diff view ("what changed since snapshot X").
-- Auto-snapshot cadence per `auto_snapshot_cadence`.
-
-Done when two profiles coexist with isolated DBs and the snapshot diff view lights up after an annotation refresh.
-
----
-
-## Cross-cutting tracks (active during all phases)
-
-- Audit & privacy: every external call passes through the audited client; `external_call_summary_v` is the truth.
-- Versioning: every source/method bump increments `*_version` strings — never silently overwrite.
-- Tests: each phase ships with unit + integration tests; integration tests run offline against fixtures, never live external services.
+## Out of scope for v1
+- Multi-profile UI (schema is ready; UI deferred)
+- Whole-genome sequencing input
+- Drug-drug interaction modeling (DrugBank)
+- Cloud sync / sharing
+- Mobile native app
