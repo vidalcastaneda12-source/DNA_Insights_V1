@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dna-insights.example.com/schemas/insight.schema.json",
+  "title": "Insight",
+  "description": "A computed insight derived from a user's variants (e.g., trait, ancestry, carrier status, polygenic score).",
+  "type": "object",
+  "required": ["id", "userId", "sampleId", "category", "title", "generatedAt"],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "userId": { "type": "string", "format": "uuid" },
+    "sampleId": { "type": "string", "format": "uuid" },
+    "category": {
+      "type": "string",
+      "enum": ["trait", "ancestry", "carrier-status", "pharmacogenomics", "polygenic-score", "wellness"]
+    },
+    "title": { "type": "string", "maxLength": 200 },
+    "summary": { "type": "string" },
+    "result": {
+      "type": "object",
+      "description": "Category-specific result payload.",
+      "additionalProperties": true
+    },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["variantId"],
+        "properties": {
+          "variantId": { "type": "string", "format": "uuid" },
+          "weight": { "type": "number" },
+          "source": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "model": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "type": "string" }
+      },
+      "required": ["name", "version"],
+      "additionalProperties": false
+    },
+    "generatedAt": { "type": "string", "format": "date-time" }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dna-insights.example.com/schemas/user.schema.json",
+  "title": "User",
+  "type": "object",
+  "required": ["id", "email", "createdAt"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "email": {
+      "type": "string",
+      "format": "email"
+    },
+    "displayName": {
+      "type": "string",
+      "maxLength": 200
+    },
+    "dateOfBirth": {
+      "type": "string",
+      "format": "date"
+    },
+    "biologicalSex": {
+      "type": "string",
+      "enum": ["female", "male", "intersex", "unknown"]
+    },
+    "consent": {
+      "type": "object",
+      "properties": {
+        "research": { "type": "boolean" },
+        "dataSharing": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" }
+  },
+  "additionalProperties": false
+}

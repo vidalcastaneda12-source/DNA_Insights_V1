@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dna-insights.example.com/schemas/sample.schema.json",
+  "title": "Sample",
+  "description": "A DNA sample submitted by a user for sequencing or genotyping.",
+  "type": "object",
+  "required": ["id", "userId", "kind", "status", "collectedAt"],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "userId": { "type": "string", "format": "uuid" },
+    "barcode": { "type": "string" },
+    "kind": {
+      "type": "string",
+      "enum": ["saliva", "buccal-swab", "blood", "tissue", "other"]
+    },
+    "assay": {
+      "type": "string",
+      "enum": ["wgs", "wes", "genotyping-array", "targeted-panel"]
+    },
+    "referenceGenome": {
+      "type": "string",
+      "enum": ["GRCh37", "GRCh38", "T2T-CHM13"]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "registered",
+        "received",
+        "processing",
+        "sequenced",
+        "analyzed",
+        "failed",
+        "archived"
+      ]
+    },
+    "collectedAt": { "type": "string", "format": "date-time" },
+    "receivedAt": { "type": "string", "format": "date-time" },
+    "processedAt": { "type": "string", "format": "date-time" },
+    "qc": {
+      "type": "object",
+      "properties": {
+        "callRate": { "type": "number", "minimum": 0, "maximum": 1 },
+        "meanCoverage": { "type": "number", "minimum": 0 },
+        "contamination": { "type": "number", "minimum": 0, "maximum": 1 },
+        "passed": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

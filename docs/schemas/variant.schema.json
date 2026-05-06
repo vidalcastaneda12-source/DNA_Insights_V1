@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dna-insights.example.com/schemas/variant.schema.json",
+  "title": "Variant",
+  "description": "A single genetic variant call associated with a sample.",
+  "type": "object",
+  "required": ["id", "sampleId", "chromosome", "position", "referenceAllele", "alternateAllele", "genotype"],
+  "properties": {
+    "id": { "type": "string", "format": "uuid" },
+    "sampleId": { "type": "string", "format": "uuid" },
+    "rsid": {
+      "type": "string",
+      "pattern": "^rs[0-9]+$"
+    },
+    "chromosome": {
+      "type": "string",
+      "pattern": "^(chr)?([1-9]|1[0-9]|2[0-2]|X|Y|M|MT)$"
+    },
+    "position": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "referenceAllele": {
+      "type": "string",
+      "pattern": "^[ACGTN]+$"
+    },
+    "alternateAllele": {
+      "type": "string",
+      "pattern": "^[ACGTN]+$"
+    },
+    "genotype": {
+      "type": "string",
+      "pattern": "^[0-9.](\\||/)[0-9.]$"
+    },
+    "zygosity": {
+      "type": "string",
+      "enum": ["homozygous-reference", "heterozygous", "homozygous-alternate", "hemizygous", "unknown"]
+    },
+    "quality": { "type": "number", "minimum": 0 },
+    "depth": { "type": "integer", "minimum": 0 },
+    "alleleFrequency": { "type": "number", "minimum": 0, "maximum": 1 },
+    "gene": { "type": "string" },
+    "consequence": {
+      "type": "string",
+      "description": "VEP-style consequence term (e.g., missense_variant)."
+    },
+    "clinicalSignificance": {
+      "type": "string",
+      "enum": [
+        "benign",
+        "likely-benign",
+        "uncertain",
+        "likely-pathogenic",
+        "pathogenic",
+        "not-provided"
+      ]
+    }
+  },
+  "additionalProperties": false
+}
