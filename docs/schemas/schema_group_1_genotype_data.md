@@ -278,6 +278,9 @@ CREATE TABLE ingestion_runs (
   variants_called       INTEGER,
   variants_no_call      INTEGER,
   variants_imputed      INTEGER,                -- 0 for raw 23andMe/Ancestry uploads
+  variants_dropped_alt_contig INTEGER DEFAULT 0, -- variants on GRCh38 alt contigs
+                                                -- (e.g. 8_KI270821v1_alt) filtered
+                                                -- at parse time; not in chromosome_enum
 
   -- Status
   status                ingestion_status_enum NOT NULL DEFAULT 'pending',
@@ -476,6 +479,15 @@ Severity escalates to `critical` for any of the above when the variant is in an 
 4. **Denormalized booleans** (`has_genotyped_call`, `has_imputed_call` on `variants_master`) are maintained by app logic on call insert/deactivate.
 
 5. **Sex check / phenotype expectations** require user input or family data; sex_expected can be NULL until provided.
+
+6. **Alt-contig filtering at parse time.** 23andMe v5 and some AncestryDNA exports include
+   variants on GRCh38 alt contigs (e.g. `8_KI270821v1_alt`, `19_KI270938v1_alt`). These
+   chromosome labels are not members of `chromosome_enum` (the enum covers `1..22, X, Y, MT`
+   only). The parser drops these rows before the row reaches DuckDB, logs each drop at
+   `debug` level with its chrom value, emits a single `info` summary at end-of-parse, and
+   the per-run total lands in `ingestion_runs.variants_dropped_alt_contig`. This is
+   intentional and matches standard clinical bioinformatics practice — alt contigs are
+   excluded from the canonical reference space used for variant calling and annotation.
 
 ---
 

@@ -13,7 +13,14 @@ from genome.config import get_settings
 from genome.db.duckdb_conn import duckdb_connection
 from genome.ingest import parsers
 from genome.ingest.liftover import IdentityLiftover, make_liftover
-from genome.ingest.models import IngestResult, NormalizedCall, RawCall, RawFileMeta, Source
+from genome.ingest.models import (
+    IngestResult,
+    NormalizedCall,
+    ParseStats,
+    RawCall,
+    RawFileMeta,
+    Source,
+)
 from genome.ingest.normalize import normalize_calls
 from genome.ingest.qc import compute_sample_qc
 from genome.ingest.writer import (
@@ -28,7 +35,7 @@ if TYPE_CHECKING:
 
     from genome.ingest.liftover import Liftover
 
-    _RawParser = Callable[[Path], tuple[RawFileMeta, Iterator[RawCall]]]
+    _RawParser = Callable[[Path], tuple[RawFileMeta, Iterator[RawCall], ParseStats]]
 
 logger = structlog.get_logger(__name__)
 
@@ -78,7 +85,7 @@ def _archive_file(
 def _open_parser(
     source: Source,
     path: Path,
-) -> tuple[RawFileMeta, Iterator[RawCall]]:
+) -> tuple[RawFileMeta, Iterator[RawCall], ParseStats]:
     parser = _PARSERS.get(source)
     if parser is None:
         msg = f"unsupported source for raw ingest: {source!r}"
@@ -130,7 +137,7 @@ def ingest_file(  # noqa: PLR0913 — five overrides + path/source is the user-f
 
     archived = _archive_file(path, archive_root, source, file_hash)
 
-    meta, raw_iter = _open_parser(source, path)
+    meta, raw_iter, parse_stats = _open_parser(source, path)
     log = log.bind(native_build=meta.native_build, chip_version=meta.chip_version)
 
     if liftover is None:
@@ -143,7 +150,11 @@ def ingest_file(  # noqa: PLR0913 — five overrides + path/source is the user-f
     normalized: list[NormalizedCall] = list(
         normalize_calls(raw_iter, native_build=meta.native_build, liftover=liftover),
     )
-    log.info("ingest.normalized", count=len(normalized))
+    log.info(
+        "ingest.normalized",
+        count=len(normalized),
+        dropped_alt_contig=parse_stats.dropped_alt_contig,
+    )
 
     qc = compute_sample_qc(normalized)
 
@@ -163,6 +174,7 @@ def ingest_file(  # noqa: PLR0913 — five overrides + path/source is the user-f
                 variants_called=qc.variants_called,
                 variants_no_call=qc.variants_no_call,
                 variants_imputed=0,
+                variants_dropped_alt_contig=parse_stats.dropped_alt_contig,
             )
             new_variants, deactivated = write_calls(
                 conn,
@@ -191,6 +203,7 @@ def ingest_file(  # noqa: PLR0913 — five overrides + path/source is the user-f
         variants_called=qc.variants_called,
         variants_no_call=qc.variants_no_call,
         variants_imputed=0,
+        variants_dropped_alt_contig=parse_stats.dropped_alt_contig,
         new_variants_master_rows=new_variants,
         deactivated_prior_calls=deactivated,
         qc_status=qc.qc_status,
@@ -206,6 +219,7 @@ def ingest_file(  # noqa: PLR0913 — five overrides + path/source is the user-f
         qc_id=qc_id,
         variants_total=result.variants_total,
         variants_called=result.variants_called,
+        variants_dropped_alt_contig=result.variants_dropped_alt_contig,
         new_variants=new_variants,
         qc_status=qc.qc_status,
     )
