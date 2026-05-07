@@ -39,6 +39,7 @@ A local-first personal DNA insights application that ingests 23andMe + Ancestry 
 - Style: ruff defaults plus `--select=ALL --ignore=D,ANN101,ANN102`. Type-annotate everything.
 - 23andMe and Ancestry exports may include variants on non-canonical GRCh38 contigs (alt, random, unplaced, decoy). These are filtered at parse time and counted in `ingestion_runs.variants_dropped_non_canonical`. Only canonical chromosomes (1-22, X, Y, MT) are stored. This matches standard clinical bioinformatics practice.
 - Lift-over (`pyliftover`) can also produce non-canonical contigs — a canonical GRCh37 coordinate may map to e.g. `4_GL000008v2_random` on GRCh38. The normalize step re-runs `normalize_chrom` on the post-lift chromosome, drops the row when the result is `None`, and counts it in `ingestion_runs.variants_dropped_lift_to_non_canonical`. The same positive-rule filter is applied at both parse time and normalize time, so the writer's `chromosome_enum` cast never sees a non-canonical label regardless of where it originated.
+- Every PR that changes behavior, schema, dependencies, or build steps should add an entry to `CHANGELOG.md` under the `[Unreleased]` section. The entry should be one or two sentences describing what changed and why, with a PR reference. Roll up `[Unreleased]` into a versioned release section when phase milestones land.
 
 ## Environment requirements
 
