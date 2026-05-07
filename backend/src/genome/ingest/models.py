@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -29,6 +29,36 @@ VALID_CHROMS: frozenset[str] = frozenset(
     {*(str(i) for i in range(1, 23)), "X", "Y", "MT"},
 )
 
+# Numeric / alias chromosome translations seen in real exports.
+_CHROM_ALIASES: Final[dict[str, str]] = {
+    "23": "X",
+    "24": "Y",
+    "25": "X",  # PAR — collapse into X
+    "26": "MT",
+    "M": "MT",
+}
+
+
+def normalize_chrom(value: str) -> str | None:
+    """Map a raw chromosome label to the schema's ``chromosome_enum``.
+
+    Positive-rule filter: returns the canonical label only when it lands in
+    ``VALID_CHROMS`` (``1..22, X, Y, MT``) after the alias remap. Anything
+    else — ``'0'``, GRCh38 alt contigs (``'8_KI270821v1_alt'``), unlocalized
+    contigs (``'4_GL000008v2_random'``), unplaced contigs (``'Un_GL000226v1'``,
+    ``'chrUn_GL000226v1'``), decoy sequences (``'*_decoy'``), arbitrary
+    scaffolds — returns ``None`` so the caller can drop or quality-flag the row.
+
+    Used at parse time on raw chromosome labels from the export, and at
+    normalize time on post-lift chromosomes (pyliftover can land a canonical
+    GRCh37 coordinate on a non-canonical GRCh38 contig).
+    """
+    raw = value.strip().upper().removeprefix("CHR")
+    raw = _CHROM_ALIASES.get(raw, raw)
+    if raw in VALID_CHROMS:
+        return raw
+    return None
+
 
 @dataclass(frozen=True, slots=True)
 class RawFileMeta:
@@ -42,14 +72,17 @@ class RawFileMeta:
 
 @dataclass(slots=True)
 class ParseStats:
-    """Mutable counters populated by the parser as it streams a raw export.
+    """Mutable counters populated as a raw export streams through the pipeline.
 
-    The parser returns this alongside the row iterator; the caller reads it
-    after the iterator is exhausted to record per-run drop counts on
+    The parser returns this alongside the row iterator; the normalize stage
+    receives the same instance and can mutate ``lifted_to_non_canonical`` when
+    a lift-over lands on a non-canonical GRCh38 contig. The caller reads it
+    after iteration completes to record per-run drop counts on
     ``ingestion_runs``.
     """
 
     dropped_non_canonical: int = 0
+    lifted_to_non_canonical: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +144,7 @@ class IngestResult:
     variants_no_call: int
     variants_imputed: int
     variants_dropped_non_canonical: int
+    variants_dropped_lift_to_non_canonical: int
     new_variants_master_rows: int
     deactivated_prior_calls: int
     qc_status: Literal["pass", "warn", "fail"]

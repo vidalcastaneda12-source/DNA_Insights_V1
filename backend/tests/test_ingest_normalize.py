@@ -7,7 +7,7 @@ from dataclasses import replace
 import pytest
 
 from genome.ingest.liftover import IdentityLiftover, make_liftover
-from genome.ingest.models import RawCall
+from genome.ingest.models import ParseStats, RawCall
 from genome.ingest.normalize import (
     classify_palindrome,
     classify_variant_type,
@@ -151,6 +151,76 @@ def test_normalize_lift_to_other_chrom_marked_with_warning():
     assert n.pos_grch38 == 1500
     assert n.pos_grch37 == 500
     assert n.liftover_status == "lifted_with_warning"
+
+
+class _NonCanonicalLiftover:
+    """Lift-over that always lands on a non-canonical GRCh38 contig.
+
+    Reproduces the failure mode where pyliftover maps a canonical GRCh37
+    coordinate (e.g. chr4:N) to an unlocalized contig (e.g.
+    ``4_GL000008v2_random:M``). Without the post-lift re-validation, the
+    chromosome_enum cast in the writer would explode at ingest time.
+    """
+
+    chain_label = "non_canonical"
+
+    def lift(self, chrom: str, pos: int) -> tuple[str, int]:  # noqa: ARG002
+        return ("4_GL000008v2_random", pos + 42)
+
+
+def test_normalize_drops_lift_to_non_canonical_and_counts_it():
+    stats = ParseStats()
+    out = list(
+        normalize_calls(
+            [_raw(chrom="4", pos=500)],
+            native_build="GRCh37",
+            liftover=_NonCanonicalLiftover(),
+            stats=stats,
+        ),
+    )
+    assert out == []
+    assert stats.lifted_to_non_canonical == 1
+    assert stats.dropped_non_canonical == 0
+
+
+def test_normalize_drops_lift_to_non_canonical_keeps_canonical_neighbors():
+    """Canonical lifts pass through untouched while a non-canonical row is dropped."""
+    canonical_call = _raw(rsid="rs_canonical", chrom="1", pos=100)
+    bad_call = _raw(rsid="rs_bad", chrom="4", pos=200)
+
+    class _MixedLiftover:
+        chain_label = "mixed"
+
+        def lift(self, chrom: str, pos: int) -> tuple[str, int]:
+            if chrom == "4":
+                return ("4_GL000008v2_random", pos + 1)
+            return (chrom, pos + 10)
+
+    stats = ParseStats()
+    out = list(
+        normalize_calls(
+            [canonical_call, bad_call],
+            native_build="GRCh37",
+            liftover=_MixedLiftover(),
+            stats=stats,
+        ),
+    )
+    assert [c.rsid for c in out] == ["rs_canonical"]
+    assert out[0].chrom == "1"
+    assert out[0].pos_grch38 == 110
+    assert stats.lifted_to_non_canonical == 1
+
+
+def test_normalize_lift_to_non_canonical_without_stats_still_drops():
+    """When no stats container is supplied the row is still dropped silently."""
+    out = list(
+        normalize_calls(
+            [_raw(chrom="4", pos=500)],
+            native_build="GRCh37",
+            liftover=_NonCanonicalLiftover(),
+        ),
+    )
+    assert out == []
 
 
 def test_make_liftover_grch37_requires_chain_file():

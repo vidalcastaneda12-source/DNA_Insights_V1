@@ -199,6 +199,70 @@ def test_ingest_grch37_without_chain_file_errors(
         ingest_file(source="ancestry", path=ANCESTRY)
 
 
+def test_ingest_drops_lift_to_non_canonical_and_records_count(
+    isolated_settings: dict[str, str],
+    tmp_path: Path,
+) -> None:
+    """A GRCh37 file whose lift sometimes lands on a non-canonical contig
+    ingests cleanly, drops the offending rows, and records the count on
+    ``ingestion_runs.variants_dropped_lift_to_non_canonical``.
+
+    Reproduces the failure mode the user hit: pyliftover returns a non-canonical
+    GRCh38 contig (e.g. ``4_GL000008v2_random``) for a canonical GRCh37
+    coordinate. Without the post-lift re-validation in ``normalize_calls`` the
+    writer's ``chromosome_enum`` cast blows up with
+    ``Could not convert string '4_GL000008v2_random' to UINT8``.
+    """
+    init_databases()
+
+    p = tmp_path / "ancestry_lift_non_canonical.txt"
+    p.write_text(ANCESTRY.read_text())
+
+    class _PartialLiftover:
+        chain_label = "hg19_to_hg38"
+
+        def lift(self, chrom: str, pos: int) -> tuple[str, int]:
+            # Redirect two specific positions from the fixture to non-canonical
+            # GRCh38 contigs; everything else is identity-lifted.
+            if (chrom, pos) == ("1", 854250):  # rs7537756
+                return ("4_GL000008v2_random", 12345)
+            if (chrom, pos) == ("1", 861808):  # rs13302982
+                return ("Un_GL000226v1", 67890)
+            return (chrom, pos)
+
+    result = ingest_file(
+        source="ancestry",
+        path=p,
+        liftover=_PartialLiftover(),
+    )
+
+    assert result.variants_dropped_lift_to_non_canonical == 2
+    assert result.variants_dropped_non_canonical == 0
+    assert result.variants_total == 18  # 20 in fixture, 2 dropped at normalize
+    assert result.qc_status in {"pass", "warn", "fail"}
+
+    with duckdb_connection(_duckdb_path(isolated_settings), read_only=True) as conn:
+        run = conn.execute(
+            "SELECT variants_total, variants_dropped_non_canonical,"
+            " variants_dropped_lift_to_non_canonical"
+            " FROM ingestion_runs WHERE run_id = ?",
+            [result.run_id],
+        ).fetchone()
+        leaked = conn.execute(
+            "SELECT COUNT(*) FROM variants_master vm"
+            " WHERE CAST(vm.chrom AS VARCHAR) NOT IN"
+            " ('1','2','3','4','5','6','7','8','9','10',"
+            "  '11','12','13','14','15','16','17','18','19','20',"
+            "  '21','22','X','Y','MT')",
+        ).fetchone()
+        leaked_rsids = conn.execute(
+            "SELECT COUNT(*) FROM variants_master WHERE rsid IN ('rs7537756', 'rs13302982')",
+        ).fetchone()
+    assert run == (18, 0, 2)
+    assert leaked == (0,)
+    assert leaked_rsids == (0,)
+
+
 def test_ingest_records_non_canonical_contig_drops(
     isolated_settings: dict[str, str],
     tmp_path: Path,

@@ -284,6 +284,15 @@ CREATE TABLE ingestion_runs (
                                                 -- unplaced Un_*/chrUn_*; *_decoy)
                                                 -- filtered at parse time; not in
                                                 -- chromosome_enum
+  variants_dropped_lift_to_non_canonical INTEGER DEFAULT 0,
+                                                -- canonical GRCh37 coordinates
+                                                -- whose pyliftover result landed
+                                                -- on a non-canonical GRCh38
+                                                -- contig (e.g. chr4:N →
+                                                -- 4_GL000008v2_random:M);
+                                                -- dropped at the normalize step
+                                                -- via the same positive-rule
+                                                -- chromosome_enum filter
 
   -- Status
   status                ingestion_status_enum NOT NULL DEFAULT 'pending',
@@ -495,6 +504,16 @@ Severity escalates to `critical` for any of the above when the variant is in an 
    `ingestion_runs.variants_dropped_non_canonical`. This is intentional and matches
    standard clinical bioinformatics practice — non-canonical contigs are excluded from the
    canonical reference space used for variant calling and annotation.
+
+7. **Non-canonical contig filtering after lift-over.** Even when the parser emits only
+   canonical chromosomes, `pyliftover` can land a canonical GRCh37 coordinate on a
+   non-canonical GRCh38 contig (e.g. `chr4:N` → `4_GL000008v2_random:M`). The normalize
+   step re-runs the same positive-rule filter (`normalize_chrom`) on the post-lift
+   chromosome; rows whose result is `None` are dropped exactly like a `lift_failed`,
+   logged at `debug` level (`normalize.lifted_to_non_canonical`), and counted in
+   `ingestion_runs.variants_dropped_lift_to_non_canonical`. The `chromosome_enum` cast in
+   the writer therefore never sees a non-canonical label, regardless of whether it
+   originated in the file or in the lift-over output.
 
 ---
 

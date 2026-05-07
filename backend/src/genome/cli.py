@@ -150,6 +150,7 @@ def ingest(
         f"variants={result.variants_total} called={result.variants_called} "
         f"no_call={result.variants_no_call} "
         f"dropped_non_canonical={result.variants_dropped_non_canonical} "
+        f"dropped_lift_to_non_canonical={result.variants_dropped_lift_to_non_canonical} "
         f"new_master_rows={result.new_variants_master_rows} "
         f"deactivated_prior={result.deactivated_prior_calls} "
         f"call_rate={result.call_rate:.4f} sex={result.sex_inferred} "
