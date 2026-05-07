@@ -4,6 +4,66 @@ A local-first personal DNA insights application. Ingests 23andMe and Ancestry ra
 
 All data stays on the device. Network egress is opt-in and audited.
 
+## Prerequisites
+
+The encrypted notes table (`notes_fts`) is an FTS5 virtual table. Most distro
+packages of SQLCipher (including `libsqlcipher-dev` 4.5.6 on Ubuntu 24.04) ship
+with FTS3/FTS4 but **without FTS5**, so the schema cannot be applied against
+those builds. You must build SQLCipher from source with `--enable-fts5` and
+then build `pysqlcipher3` against that custom library.
+
+The exact commands used to bootstrap this checkout:
+
+```bash
+# 1. System build deps for SQLCipher (FTS5 requires Tcl + OpenSSL headers)
+sudo apt-get install -y build-essential tcl-dev libssl-dev
+
+# 2. Build SQLCipher 4.5.6 with FTS5 enabled
+cd /tmp
+wget https://github.com/sqlcipher/sqlcipher/archive/refs/tags/v4.5.6.tar.gz
+tar xzf v4.5.6.tar.gz
+cd sqlcipher-4.5.6
+./configure \
+  --prefix=/usr/local \
+  --enable-tempstore=yes \
+  --enable-fts5 \
+  CFLAGS="-DSQLITE_HAS_CODEC -DSQLITE_ENABLE_FTS5" \
+  LDFLAGS="-lcrypto"
+make -j"$(nproc)"
+sudo make install
+sudo ldconfig
+
+# 3. Confirm FTS5 is in the new build
+echo "PRAGMA compile_options;" | /usr/local/bin/sqlcipher | grep ENABLE_FTS5
+# expected: ENABLE_FTS5
+
+# 4. Reinstall pysqlcipher3 against the custom SQLCipher
+#    (uv sync alone will fail without these flags because pip/uv would otherwise
+#    link against the system libsqlcipher that lacks FTS5)
+uv venv --python 3.12 --clear .venv
+uv pip install --python .venv/bin/python setuptools wheel
+CFLAGS="-I/usr/local/include/sqlcipher -DSQLITE_HAS_CODEC" \
+LDFLAGS="-L/usr/local/lib -Wl,-rpath,/usr/local/lib -lsqlcipher" \
+uv pip install \
+  --python .venv/bin/python \
+  --no-binary :all: \
+  --no-build-isolation \
+  pysqlcipher3==1.2.0
+
+# 5. Install the rest of the project
+uv pip install --python .venv/bin/python -e ".[dev]"
+
+# 6. Smoke-test FTS5 in pysqlcipher3
+.venv/bin/python -c "from pysqlcipher3 import dbapi2 as s; \
+  c = s.connect(':memory:'); c.execute(\"PRAGMA key = 'x';\"); \
+  c.execute('CREATE VIRTUAL TABLE t USING fts5(a);'); print('FTS5 OK')"
+```
+
+If `genome init` ever fails inside the SQLite step with `no such module: fts5`,
+the SQLCipher build the Python extension is linked against does not have FTS5.
+**Do not "fix" this by removing the `notes_fts` virtual table from the schema** —
+rebuild SQLCipher with `--enable-fts5` per the steps above instead.
+
 ## Architecture at a glance
 
 - `genome.duckdb` — analytical store (variants, annotations, derived analyses, insights).

@@ -588,8 +588,8 @@ SELECT
   vai.has_pgx, vai.pgx_drug_count,
   vai.is_acmg_sf
 FROM variants_master vm
-LEFT JOIN consensus_genotypes        cg  USING (variant_id)
-LEFT JOIN variant_annotations_index  vai USING (variant_id);
+LEFT JOIN consensus_genotypes        cg  ON cg.variant_id  = vm.variant_id
+LEFT JOIN variant_annotations_index  vai ON vai.variant_id = vm.variant_id;
 
 -- Per-gene clinically-flagged variant rollup
 CREATE VIEW gene_variant_summary_v AS
@@ -608,7 +608,7 @@ FROM genes g
 LEFT JOIN variants_master vm
   ON vm.chrom = g.chrom
  AND vm.pos_grch38 BETWEEN g.start_grch38 AND g.end_grch38
-LEFT JOIN variant_annotations_index vai USING (variant_id)
+LEFT JOIN variant_annotations_index vai ON vai.variant_id = vm.variant_id
 GROUP BY g.gene_symbol, g.is_acmg_sf;
 
 -- All PGx-relevant variants in user's data with current call
@@ -620,7 +620,7 @@ SELECT DISTINCT
   ARRAY_AGG(DISTINCT pa.drug_name) AS affected_drugs,
   MIN(pa.evidence_level) AS strongest_evidence
 FROM variants_master vm
-JOIN consensus_genotypes cg USING (variant_id)
+JOIN consensus_genotypes cg ON cg.variant_id = vm.variant_id
 JOIN pharmgkb_annotations pa
   ON pa.rsid = vm.rsid
  AND pa.is_active
@@ -657,30 +657,16 @@ GROUP BY vm.variant_id, vm.rsid, vm.chrom, vm.pos_grch38,
 
 ---
 
-## ALTER statements — wire up FKs across groups
+## Cross-group references — application-validated
 
-Now that groups 1, 2, and 4 all have their core tables, add the deferred constraints:
+DuckDB does not support `ALTER TABLE ... ADD CONSTRAINT`, so the following links across
+groups are validated in application code rather than enforced by the database — consistent
+with the SQLite (group 5) pattern where cross-DB references are also application-validated:
 
-```sql
--- group 4 → group 1
-ALTER TABLE insight_variants
-  ADD CONSTRAINT fk_iv_variant
-  FOREIGN KEY (variant_id) REFERENCES variants_master(variant_id);
-
--- group 4 → group 2
-ALTER TABLE insight_genes
-  ADD CONSTRAINT fk_ig_gene
-  FOREIGN KEY (gene_symbol) REFERENCES genes(gene_symbol);
-
-ALTER TABLE insight_traits
-  ADD CONSTRAINT fk_it_trait
-  FOREIGN KEY (trait_id) REFERENCES traits(trait_id);
-
--- group 1 → group 2 (VEP)
-ALTER TABLE vep_consequences
-  ADD CONSTRAINT fk_vep_variant
-  FOREIGN KEY (variant_id) REFERENCES variants_master(variant_id);
-```
+- `insight_variants.variant_id` → `variants_master.variant_id` (group 4 → group 1)
+- `insight_genes.gene_symbol` → `genes.gene_symbol` (group 4 → group 2)
+- `insight_traits.trait_id` → `traits.trait_id` (group 4 → group 2)
+- `vep_consequences.variant_id` → `variants_master.variant_id` (group 2 → group 1)
 
 The polymorphic `insights.subject_id` remains application-validated; no DB-level FK.
 

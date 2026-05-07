@@ -102,7 +102,7 @@ CREATE TABLE variants_master (
 CREATE INDEX idx_vm_rsid          ON variants_master(rsid);
 CREATE INDEX idx_vm_pos38         ON variants_master(chrom, pos_grch38);
 CREATE INDEX idx_vm_pos37         ON variants_master(chrom, pos_grch37);
-CREATE INDEX idx_vm_acmg_sf       ON variants_master(is_acmg_sf) WHERE is_acmg_sf = TRUE;
+CREATE INDEX idx_vm_acmg_sf       ON variants_master(is_acmg_sf);
 
 -- genotype_calls
 
@@ -209,7 +209,7 @@ CREATE TABLE discrepancies (
 CREATE INDEX idx_disc_variant     ON discrepancies(variant_id);
 CREATE INDEX idx_disc_type        ON discrepancies(discrepancy_type);
 CREATE INDEX idx_disc_severity    ON discrepancies(severity);
-CREATE INDEX idx_disc_unresolved  ON discrepancies(resolution) WHERE resolution IS NULL;
+CREATE INDEX idx_disc_unresolved  ON discrepancies(resolution);
 
 -- ingestion_runs
 
@@ -346,7 +346,7 @@ SELECT
   BOOL_OR(gc.source = 'ancestry'      AND gc.is_active) AS in_ancestry,
   BOOL_OR(gc.source = 'topmed_imputed' AND gc.is_active) AS in_imputed
 FROM variants_master vm
-LEFT JOIN genotype_calls gc USING (variant_id)
+LEFT JOIN genotype_calls gc ON gc.variant_id = vm.variant_id
 GROUP BY vm.variant_id, vm.rsid, vm.chrom;
 
 -- Detailed per-variant call comparison (the discrepancy detail row)

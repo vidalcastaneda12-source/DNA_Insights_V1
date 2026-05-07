@@ -129,8 +129,7 @@ CREATE TABLE derived_pgs (
 
 CREATE INDEX idx_dpgs_pgs     ON derived_pgs(pgs_id);
 CREATE INDEX idx_dpgs_active  ON derived_pgs(is_active);
-CREATE INDEX idx_dpgs_high    ON derived_pgs(percentile)
-  WHERE percentile >= 90 OR percentile <= 10;   -- pre-index extremes
+CREATE INDEX idx_dpgs_high    ON derived_pgs(percentile);   -- extremes filtered at query time
 ```
 
 ### `derived_pgx_phenotypes` — pharmacogenomic calls
@@ -573,21 +572,21 @@ SELECT
   vai.clinvar_star_rating
 FROM derived_acmg_sf_findings a
 JOIN variants_master vm ON vm.variant_id = a.variant_id
-LEFT JOIN consensus_genotypes cg USING (variant_id)
-LEFT JOIN variant_annotations_index vai USING (variant_id)
+LEFT JOIN consensus_genotypes cg ON cg.variant_id = vm.variant_id
+LEFT JOIN variant_annotations_index vai ON vai.variant_id = vm.variant_id
 WHERE a.is_active;
 
 -- High-percentile PGS dashboard (top/bottom 10%)
 CREATE VIEW pgs_extremes_v AS
 SELECT
   p.derived_pgs_id, p.pgs_id, s.trait_reported, s.trait_category,
-  p.percentile, p.z_score, p.coverage_pct, p.confidence,
+  p.percentile, p.z_score, p.coverage_pct, p.low_coverage,
   CASE
     WHEN p.percentile >= 90 THEN 'high_risk'
     WHEN p.percentile <= 10 THEN 'low_risk'
   END AS bucket
 FROM derived_pgs p
-JOIN pgs_catalog_scores s USING (pgs_id)
+JOIN pgs_catalog_scores s ON s.pgs_id = p.pgs_id
 WHERE p.is_active
   AND (p.percentile >= 90 OR p.percentile <= 10)
   AND NOT p.low_coverage;
@@ -666,22 +665,14 @@ UNION ALL SELECT 'compound_het',  COUNT(*) FROM derived_compound_het     WHERE i
 
 ---
 
-## ALTER statements — apply now
+## Cross-group references — application-validated
 
-```sql
--- The remaining group 4 → group 3 polymorphic linkage is application-level (no FK).
+DuckDB does not support `ALTER TABLE ... ADD CONSTRAINT`, so the following group-3 → group-1
+links are validated in application code rather than enforced by the database — consistent
+with the SQLite (group 5) pattern where cross-DB references are also application-validated:
 
--- Wire up derived_acmg_sf to its variant
-ALTER TABLE derived_acmg_sf_findings
-  ADD CONSTRAINT fk_acmg_variant
-  FOREIGN KEY (variant_id) REFERENCES variants_master(variant_id);
+- `derived_acmg_sf_findings.variant_id` → `variants_master.variant_id`
+- `derived_compound_het.variant_id_1` → `variants_master.variant_id`
+- `derived_compound_het.variant_id_2` → `variants_master.variant_id`
 
--- Wire up compound_het to its two variants
-ALTER TABLE derived_compound_het
-  ADD CONSTRAINT fk_ch_variant_1
-  FOREIGN KEY (variant_id_1) REFERENCES variants_master(variant_id);
-
-ALTER TABLE derived_compound_het
-  ADD CONSTRAINT fk_ch_variant_2
-  FOREIGN KEY (variant_id_2) REFERENCES variants_master(variant_id);
-```
+The remaining group 4 → group 3 polymorphic linkage is also application-level (no FK).

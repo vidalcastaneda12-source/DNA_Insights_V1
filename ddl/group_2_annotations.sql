@@ -506,8 +506,8 @@ SELECT
   vai.has_pgx, vai.pgx_drug_count,
   vai.is_acmg_sf
 FROM variants_master vm
-LEFT JOIN consensus_genotypes        cg  USING (variant_id)
-LEFT JOIN variant_annotations_index  vai USING (variant_id);
+LEFT JOIN consensus_genotypes        cg  ON cg.variant_id  = vm.variant_id
+LEFT JOIN variant_annotations_index  vai ON vai.variant_id = vm.variant_id;
 
 -- Per-gene clinically-flagged variant rollup
 CREATE VIEW gene_variant_summary_v AS
@@ -526,7 +526,7 @@ FROM genes g
 LEFT JOIN variants_master vm
   ON vm.chrom = g.chrom
  AND vm.pos_grch38 BETWEEN g.start_grch38 AND g.end_grch38
-LEFT JOIN variant_annotations_index vai USING (variant_id)
+LEFT JOIN variant_annotations_index vai ON vai.variant_id = vm.variant_id
 GROUP BY g.gene_symbol, g.is_acmg_sf;
 
 -- All PGx-relevant variants in user's data with current call
@@ -538,7 +538,7 @@ SELECT DISTINCT
   ARRAY_AGG(DISTINCT pa.drug_name) AS affected_drugs,
   MIN(pa.evidence_level) AS strongest_evidence
 FROM variants_master vm
-JOIN consensus_genotypes cg USING (variant_id)
+JOIN consensus_genotypes cg ON cg.variant_id = vm.variant_id
 JOIN pharmgkb_annotations pa
   ON pa.rsid = vm.rsid
  AND pa.is_active
