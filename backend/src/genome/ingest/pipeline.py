@@ -148,12 +148,18 @@ def ingest_file(  # noqa: PLR0913 — five overrides + path/source is the user-f
         )
 
     normalized: list[NormalizedCall] = list(
-        normalize_calls(raw_iter, native_build=meta.native_build, liftover=liftover),
+        normalize_calls(
+            raw_iter,
+            native_build=meta.native_build,
+            liftover=liftover,
+            stats=parse_stats,
+        ),
     )
     log.info(
         "ingest.normalized",
         count=len(normalized),
         dropped_non_canonical=parse_stats.dropped_non_canonical,
+        lifted_to_non_canonical=parse_stats.lifted_to_non_canonical,
     )
 
     qc = compute_sample_qc(normalized)
@@ -175,6 +181,7 @@ def ingest_file(  # noqa: PLR0913 — five overrides + path/source is the user-f
                 variants_no_call=qc.variants_no_call,
                 variants_imputed=0,
                 variants_dropped_non_canonical=parse_stats.dropped_non_canonical,
+                variants_dropped_lift_to_non_canonical=parse_stats.lifted_to_non_canonical,
             )
             new_variants, deactivated = write_calls(
                 conn,
@@ -204,6 +211,7 @@ def ingest_file(  # noqa: PLR0913 — five overrides + path/source is the user-f
         variants_no_call=qc.variants_no_call,
         variants_imputed=0,
         variants_dropped_non_canonical=parse_stats.dropped_non_canonical,
+        variants_dropped_lift_to_non_canonical=parse_stats.lifted_to_non_canonical,
         new_variants_master_rows=new_variants,
         deactivated_prior_calls=deactivated,
         qc_status=qc.qc_status,
@@ -220,6 +228,7 @@ def ingest_file(  # noqa: PLR0913 — five overrides + path/source is the user-f
         variants_total=result.variants_total,
         variants_called=result.variants_called,
         variants_dropped_non_canonical=result.variants_dropped_non_canonical,
+        variants_dropped_lift_to_non_canonical=result.variants_dropped_lift_to_non_canonical,
         new_variants=new_variants,
         qc_status=qc.qc_status,
     )

@@ -11,18 +11,24 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import structlog
+
 from genome.ingest.models import (
     LiftoverStatus,
     NormalizedCall,
+    ParseStats,
     RawCall,
     StrandStatus,
     VariantType,
+    normalize_chrom,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
     from genome.ingest.liftover import Liftover
+
+logger = structlog.get_logger(__name__)
 
 _PALINDROME_PAIRS: frozenset[frozenset[str]] = frozenset(
     {frozenset({"A", "T"}), frozenset({"C", "G"})},
@@ -89,13 +95,18 @@ def normalize_calls(
     *,
     native_build: str,
     liftover: Liftover,
+    stats: ParseStats | None = None,
 ) -> Iterator[NormalizedCall]:
     """Stream-normalize raw calls into ``NormalizedCall`` rows.
 
-    Drops rows whose lift-over fails outright (tracked via
-    ``quality_flags`` / counts on the writer side); palindromic SNVs are kept
-    with ``strand_status='ambiguous_palindrome'`` so the merge step can decide
-    what to do.
+    Drops rows whose lift-over fails outright and rows whose lift lands on a
+    non-canonical GRCh38 contig (alt / random / unplaced / decoy — pyliftover
+    can map a canonical GRCh37 coordinate to one of these). Both kinds of drop
+    are silent on the row stream; if ``stats`` is supplied, the
+    ``lifted_to_non_canonical`` counter is incremented for the second kind so
+    the count surfaces on ``ingestion_runs``. Palindromic SNVs are kept with
+    ``strand_status='ambiguous_palindrome'`` so the merge step can decide what
+    to do.
     """
     for call in calls:
         variant_type = classify_variant_type(call.allele_1, call.allele_2)
@@ -120,12 +131,25 @@ def normalize_calls(
                 # pos_grch38 would violate the schema (NOT NULL).
                 continue
             assert lifted is not None  # noqa: S101 — narrowed by status check
+            # pyliftover can land a canonical GRCh37 coordinate on a
+            # non-canonical GRCh38 contig (e.g. chr4:N → 4_GL000008v2_random).
+            # Re-validate so the writer never sees a value that's not in
+            # chromosome_enum.
+            chrom_post = normalize_chrom(lifted[0])
+            if chrom_post is None:
+                if stats is not None:
+                    stats.lifted_to_non_canonical += 1
+                logger.debug(
+                    "normalize.lifted_to_non_canonical",
+                    rsid=call.rsid,
+                    src_chrom=call.chrom,
+                    src_pos=call.pos,
+                    lifted_chrom=lifted[0],
+                    lifted_pos=lifted[1],
+                )
+                continue
             pos_grch38 = lifted[1]
             pos_grch37 = call.pos
-            # If the lift moved us to a different chromosome, follow it; the
-            # call.chrom we keep as the post-lift chromosome since variant
-            # identity lives in GRCh38 space.
-            chrom_post = lifted[0]
             yield NormalizedCall(
                 rsid=call.rsid,
                 chrom=chrom_post,

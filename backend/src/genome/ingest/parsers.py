@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
-from genome.ingest.models import VALID_CHROMS, ParseStats, RawCall, RawFileMeta
+from genome.ingest.models import ParseStats, RawCall, RawFileMeta, normalize_chrom
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -32,15 +32,6 @@ _CHIP_ANCESTRY = re.compile(
     re.IGNORECASE,
 )
 
-# Numeric / alias chromosome translations seen in real exports.
-_CHROM_ALIASES: Final[dict[str, str]] = {
-    "23": "X",
-    "24": "Y",
-    "25": "X",  # PAR — collapse into X
-    "26": "MT",
-    "M": "MT",
-}
-
 _TWENTYTHREE_COLS: Final[int] = 4
 _ANCESTRY_COLS: Final[int] = 5
 
@@ -58,23 +49,6 @@ def detect_build(header_lines: list[str]) -> str:
             if pat.search(line):
                 return "GRCh37"
     return "GRCh37"
-
-
-def normalize_chrom(value: str) -> str | None:
-    """Map a raw chromosome label to the schema's ``chromosome_enum``.
-
-    Positive-rule filter: returns the canonical label only when it lands in
-    ``VALID_CHROMS`` (``1..22, X, Y, MT``) after the alias remap. Anything
-    else — ``'0'``, GRCh38 alt contigs (``'8_KI270821v1_alt'``), unlocalized
-    contigs (``'4_GL000008v2_random'``), unplaced contigs (``'Un_GL000226v1'``,
-    ``'chrUn_GL000226v1'``), decoy sequences (``'*_decoy'``), arbitrary
-    scaffolds — returns ``None`` so the caller can drop or quality-flag the row.
-    """
-    raw = value.strip().upper().removeprefix("CHR")
-    raw = _CHROM_ALIASES.get(raw, raw)
-    if raw in VALID_CHROMS:
-        return raw
-    return None
 
 
 def _detect_chip(header_lines: list[str], pattern: re.Pattern[str]) -> str | None:

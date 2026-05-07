@@ -235,6 +235,15 @@ CREATE TABLE ingestion_runs (
                                                 -- unplaced Un_*/chrUn_*; *_decoy)
                                                 -- filtered at parse time; not in
                                                 -- chromosome_enum
+  variants_dropped_lift_to_non_canonical INTEGER DEFAULT 0,
+                                                -- canonical GRCh37 coordinates
+                                                -- whose pyliftover result landed
+                                                -- on a non-canonical GRCh38
+                                                -- contig (e.g. chr4:N →
+                                                -- 4_GL000008v2_random:M);
+                                                -- dropped at the normalize step
+                                                -- via the same positive-rule
+                                                -- chromosome_enum filter
 
   -- Status
   status                ingestion_status_enum NOT NULL DEFAULT 'pending',
