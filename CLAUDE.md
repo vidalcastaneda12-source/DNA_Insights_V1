@@ -37,7 +37,7 @@ A local-first personal DNA insights application that ingests 23andMe + Ancestry 
 - All external calls go through a single audited HTTP client (`genome.privacy.external_client`).
 - Logging: structlog with JSON output. No `print()`.
 - Style: ruff defaults plus `--select=ALL --ignore=D,ANN101,ANN102`. Type-annotate everything.
-- 23andMe and Ancestry exports may include variants on GRCh38 alt contigs. These are filtered at parse time and counted in `ingestion_runs.variants_dropped_alt_contig`. This is intentional and matches standard clinical bioinformatics practice.
+- 23andMe and Ancestry exports may include variants on non-canonical GRCh38 contigs (alt, random, unplaced, decoy). These are filtered at parse time and counted in `ingestion_runs.variants_dropped_non_canonical`. Only canonical chromosomes (1-22, X, Y, MT) are stored. This matches standard clinical bioinformatics practice.
 
 ## Environment requirements
 

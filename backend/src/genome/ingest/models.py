@@ -49,7 +49,7 @@ class ParseStats:
     ``ingestion_runs``.
     """
 
-    dropped_alt_contig: int = 0
+    dropped_non_canonical: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,7 +110,7 @@ class IngestResult:
     variants_called: int
     variants_no_call: int
     variants_imputed: int
-    variants_dropped_alt_contig: int
+    variants_dropped_non_canonical: int
     new_variants_master_rows: int
     deactivated_prior_calls: int
     qc_status: Literal["pass", "warn", "fail"]

@@ -229,9 +229,12 @@ CREATE TABLE ingestion_runs (
   variants_called       INTEGER,
   variants_no_call      INTEGER,
   variants_imputed      INTEGER,                -- 0 for raw 23andMe/Ancestry uploads
-  variants_dropped_alt_contig INTEGER DEFAULT 0, -- variants on GRCh38 alt contigs
-                                                -- (e.g. 8_KI270821v1_alt) filtered
-                                                -- at parse time; not in chromosome_enum
+  variants_dropped_non_canonical INTEGER DEFAULT 0, -- variants on non-canonical GRCh38
+                                                -- contigs (alt e.g. 8_KI270821v1_alt;
+                                                -- random e.g. 4_GL000008v2_random;
+                                                -- unplaced Un_*/chrUn_*; *_decoy)
+                                                -- filtered at parse time; not in
+                                                -- chromosome_enum
 
   -- Status
   status                ingestion_status_enum NOT NULL DEFAULT 'pending',

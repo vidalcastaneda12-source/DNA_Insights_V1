@@ -153,7 +153,7 @@ def ingest_file(  # noqa: PLR0913 — five overrides + path/source is the user-f
     log.info(
         "ingest.normalized",
         count=len(normalized),
-        dropped_alt_contig=parse_stats.dropped_alt_contig,
+        dropped_non_canonical=parse_stats.dropped_non_canonical,
     )
 
     qc = compute_sample_qc(normalized)
@@ -174,7 +174,7 @@ def ingest_file(  # noqa: PLR0913 — five overrides + path/source is the user-f
                 variants_called=qc.variants_called,
                 variants_no_call=qc.variants_no_call,
                 variants_imputed=0,
-                variants_dropped_alt_contig=parse_stats.dropped_alt_contig,
+                variants_dropped_non_canonical=parse_stats.dropped_non_canonical,
             )
             new_variants, deactivated = write_calls(
                 conn,
@@ -203,7 +203,7 @@ def ingest_file(  # noqa: PLR0913 — five overrides + path/source is the user-f
         variants_called=qc.variants_called,
         variants_no_call=qc.variants_no_call,
         variants_imputed=0,
-        variants_dropped_alt_contig=parse_stats.dropped_alt_contig,
+        variants_dropped_non_canonical=parse_stats.dropped_non_canonical,
         new_variants_master_rows=new_variants,
         deactivated_prior_calls=deactivated,
         qc_status=qc.qc_status,
@@ -219,7 +219,7 @@ def ingest_file(  # noqa: PLR0913 — five overrides + path/source is the user-f
         qc_id=qc_id,
         variants_total=result.variants_total,
         variants_called=result.variants_called,
-        variants_dropped_alt_contig=result.variants_dropped_alt_contig,
+        variants_dropped_non_canonical=result.variants_dropped_non_canonical,
         new_variants=new_variants,
         qc_status=qc.qc_status,
     )

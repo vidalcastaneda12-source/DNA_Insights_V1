@@ -76,7 +76,7 @@ def test_parse_23andme_meta_and_call_count():
     assert meta.source == "23andme"
     assert meta.native_build == "GRCh38"
     assert len(rows) == 30
-    assert stats.dropped_alt_contig == 0
+    assert stats.dropped_non_canonical == 0
     # The data row count must equal what's in the fixture (excludes comments).
 
 
@@ -107,7 +107,7 @@ def test_parse_ancestry_meta_and_call_count():
     assert meta.native_build == "GRCh37"
     assert meta.chip_version == "V2.0"
     assert len(rows) == 20
-    assert stats.dropped_alt_contig == 0
+    assert stats.dropped_non_canonical == 0
 
 
 def test_parse_ancestry_chrom_aliases_resolved():
@@ -141,7 +141,7 @@ def test_parse_skips_short_or_malformed_rows(tmp_path):
         "# rsid\tchromosome\tposition\tgenotype\n"
         "rs1\t1\t100\tAA\n"
         "rs2\t1\tnot-a-number\tAG\n"  # bad pos: dropped
-        "rs3\tscaffold\t300\tGG\n"  # alt-contig drop: counted in stats
+        "rs3\tscaffold\t300\tGG\n"  # non-canonical drop: counted in stats
         "rs4\t1\t400\n"  # short row: dropped
         "\n"  # blank: skipped
         "rs5\t1\t500\tCT\n",
@@ -149,37 +149,49 @@ def test_parse_skips_short_or_malformed_rows(tmp_path):
     _, calls, stats = parsers.parse_23andme(p)
     rsids = [c.rsid for c in calls]
     assert rsids == ["rs1", "rs5"]
-    assert stats.dropped_alt_contig == 1
+    assert stats.dropped_non_canonical == 1
 
 
-def test_parse_23andme_drops_grch38_alt_contigs(tmp_path):
-    """Real 23andMe v5 exports ship rows on alt contigs; they must be filtered."""
-    p = tmp_path / "alt_contig_23andme.txt"
+def test_parse_23andme_drops_non_canonical_contigs(tmp_path):
+    """Real 23andMe v5 exports ship rows on every flavor of non-canonical contig.
+
+    Covers all four categories the positive-rule filter must reject:
+    alt (`*_alt`), unlocalized (`*_random`), unplaced (`Un_*` and `chrUn_*`),
+    and decoy (`*_decoy`). Canonical rows around them must still ingest cleanly.
+    """
+    p = tmp_path / "non_canonical_23andme.txt"
     p.write_text(
         "# build 38\n"
         "# rsid\tchromosome\tposition\tgenotype\n"
         "rs1\t1\t100\tAA\n"
         "i6045465\t8_KI270821v1_alt\t12345\tAG\n"
         "i6045466\t19_KI270938v1_alt\t67890\tCT\n"
+        "i6045467\t4_GL000008v2_random\t11111\tAG\n"
+        "i6045468\tUn_GL000226v1\t22222\tGG\n"
+        "i6045469\tchrUn_KI270442v1\t33333\tCC\n"
+        "i6045470\ths38d1_decoy\t44444\tTT\n"
         "rs2\t1\t200\tGG\n",
     )
     _, calls, stats = parsers.parse_23andme(p)
     rsids = [c.rsid for c in calls]
     assert rsids == ["rs1", "rs2"]
-    assert stats.dropped_alt_contig == 2
+    assert stats.dropped_non_canonical == 6
 
 
-def test_parse_ancestry_drops_grch38_alt_contigs(tmp_path):
-    """Same alt-contig filter applies on the AncestryDNA side."""
-    p = tmp_path / "alt_contig_ancestry.txt"
+def test_parse_ancestry_drops_non_canonical_contigs(tmp_path):
+    """Same positive-rule filter applies on the AncestryDNA side."""
+    p = tmp_path / "non_canonical_ancestry.txt"
     p.write_text(
         "#AncestryDNA raw data download\n"
         "rsid\tchromosome\tposition\tallele1\tallele2\n"
         "rs1\t1\t100\tA\tA\n"
         "i6045465\t8_KI270821v1_alt\t12345\tA\tG\n"
+        "i6045466\t4_GL000008v2_random\t11111\tA\tG\n"
+        "i6045467\tUn_GL000226v1\t22222\tG\tG\n"
+        "i6045468\ths38d1_decoy\t44444\tT\tT\n"
         "rs2\t1\t200\tG\tG\n",
     )
     _, calls, stats = parsers.parse_ancestry(p)
     rsids = [c.rsid for c in calls]
     assert rsids == ["rs1", "rs2"]
-    assert stats.dropped_alt_contig == 1
+    assert stats.dropped_non_canonical == 4
