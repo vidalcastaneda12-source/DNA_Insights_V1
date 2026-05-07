@@ -193,7 +193,7 @@ SELECT
   MAX(i.confidence_score)                                                 AS max_confidence,
   ARRAY_AGG(DISTINCT i.insight_type)                                      AS insight_types
 FROM insight_genes ig
-JOIN insights i USING (insight_id)
+JOIN insights i ON i.insight_id = ig.insight_id
 WHERE i.is_active = TRUE
 GROUP BY ig.gene_symbol;
 
@@ -205,8 +205,8 @@ SELECT
   ARRAY_AGG(DISTINCT it.trait_id)     AS trait_ids,
   ARRAY_AGG(DISTINCT i.insight_id)    AS insight_ids
 FROM insight_variants iv
-JOIN insights i USING (insight_id)
-JOIN insight_traits it USING (insight_id)
+JOIN insights i ON i.insight_id = iv.insight_id
+JOIN insight_traits it ON it.insight_id = iv.insight_id
 WHERE i.is_active = TRUE
 GROUP BY iv.variant_id
 HAVING COUNT(DISTINCT it.trait_id) > 1;
@@ -222,8 +222,8 @@ SELECT
   COUNT(*) FILTER (WHERE i.effect_direction = 'increased_risk')  AS increase_n,
   COUNT(*) FILTER (WHERE i.effect_direction = 'decreased_risk')  AS decrease_n
 FROM insight_traits it
-JOIN insights i USING (insight_id)
-LEFT JOIN insight_variants iv USING (insight_id)
+JOIN insights i ON i.insight_id = it.insight_id
+LEFT JOIN insight_variants iv ON iv.insight_id = it.insight_id
 WHERE i.is_active = TRUE
 GROUP BY it.trait_id
 HAVING COUNT(DISTINCT i.insight_id) >= 2;

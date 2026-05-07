@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import duckdb
+import pytest
+
 from genome.db import duckdb_connection, init_databases, sqlcipher_connection
+from genome.db.init_schema import _apply_duckdb_ddl
 
 _EXPECTED_DUCKDB_TABLES = {
     # group 1
@@ -56,6 +60,34 @@ _EXPECTED_DUCKDB_TABLES = {
     "summary_dashboard",
 }
 
+_EXPECTED_DUCKDB_VIEWS = {
+    # group 1
+    "concordance_summary_v",
+    "platform_coverage_v",
+    "call_comparison_v",
+    # group 2
+    "variant_full_v",
+    "gene_variant_summary_v",
+    "user_pgx_variants_v",
+    # group 3
+    "pgx_phenotype_drugs_v",
+    "acmg_sf_active_v",
+    "pgs_extremes_v",
+    "carrier_panel_v",
+    "derived_summary_v",
+    # group 4
+    "gene_rollup_v",
+    "pleiotropy_v",
+    "compound_effects_v",
+}
+
+# Indexes that used to be skipped because they were partial (DDL had `WHERE`).
+# Once the schema is DuckDB-clean they should land normally.
+_EXPECTED_DUCKDB_INDEXES = {
+    "idx_vm_acmg_sf",
+    "idx_disc_unresolved",
+}
+
 _EXPECTED_SQLITE_TABLES = {
     "profiles",
     "notes",
@@ -78,6 +110,21 @@ def _duckdb_tables(path: Path) -> set[str]:
             "SELECT table_name FROM information_schema.tables"
             " WHERE table_schema = 'main' AND table_type = 'BASE TABLE'",
         ).fetchall()
+    return {r[0] for r in rows}
+
+
+def _duckdb_views(path: Path) -> set[str]:
+    with duckdb_connection(path, read_only=True) as conn:
+        rows = conn.execute(
+            "SELECT table_name FROM information_schema.tables"
+            " WHERE table_schema = 'main' AND table_type = 'VIEW'",
+        ).fetchall()
+    return {r[0] for r in rows}
+
+
+def _duckdb_indexes(path: Path) -> set[str]:
+    with duckdb_connection(path, read_only=True) as conn:
+        rows = conn.execute("SELECT index_name FROM duckdb_indexes()").fetchall()
     return {r[0] for r in rows}
 
 
@@ -109,6 +156,28 @@ def test_expected_duckdb_tables_present(isolated_settings: dict[str, str]) -> No
     tables = _duckdb_tables(Path(isolated_settings["GENOME_DUCKDB_PATH"]))
     missing = _EXPECTED_DUCKDB_TABLES - tables
     assert not missing, f"missing DuckDB tables: {sorted(missing)}"
+
+
+def test_expected_duckdb_views_present(isolated_settings: dict[str, str]) -> None:
+    init_databases()
+    views = _duckdb_views(Path(isolated_settings["GENOME_DUCKDB_PATH"]))
+    missing = _EXPECTED_DUCKDB_VIEWS - views
+    assert not missing, f"missing DuckDB views: {sorted(missing)}"
+
+
+def test_previously_partial_indexes_present(isolated_settings: dict[str, str]) -> None:
+    init_databases()
+    indexes = _duckdb_indexes(Path(isolated_settings["GENOME_DUCKDB_PATH"]))
+    missing = _EXPECTED_DUCKDB_INDEXES - indexes
+    assert not missing, f"missing DuckDB indexes: {sorted(missing)}"
+
+
+def test_apply_duckdb_ddl_raises_on_failure(tmp_path: Path) -> None:
+    """A bad DDL statement must propagate (no skip-on-fail anymore)."""
+    bad = tmp_path / "bad.sql"
+    bad.write_text("CREATE TABLE not_a_real_thing AS SELECT * FROM nope;")
+    with duckdb.connect(":memory:") as conn, pytest.raises(duckdb.Error):
+        _apply_duckdb_ddl(conn, [bad])
 
 
 def test_expected_sqlite_tables_present(isolated_settings: dict[str, str]) -> None:

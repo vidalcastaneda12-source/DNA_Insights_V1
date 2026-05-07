@@ -104,8 +104,7 @@ CREATE TABLE derived_pgs (
 
 CREATE INDEX idx_dpgs_pgs     ON derived_pgs(pgs_id);
 CREATE INDEX idx_dpgs_active  ON derived_pgs(is_active);
-CREATE INDEX idx_dpgs_high    ON derived_pgs(percentile)
-  WHERE percentile >= 90 OR percentile <= 10;   -- pre-index extremes
+CREATE INDEX idx_dpgs_high    ON derived_pgs(percentile);   -- extremes filtered at query time
 
 -- derived_pgx_phenotypes — pharmacogenomic calls
 
@@ -514,21 +513,21 @@ SELECT
   vai.clinvar_star_rating
 FROM derived_acmg_sf_findings a
 JOIN variants_master vm ON vm.variant_id = a.variant_id
-LEFT JOIN consensus_genotypes cg USING (variant_id)
-LEFT JOIN variant_annotations_index vai USING (variant_id)
+LEFT JOIN consensus_genotypes cg ON cg.variant_id = vm.variant_id
+LEFT JOIN variant_annotations_index vai ON vai.variant_id = vm.variant_id
 WHERE a.is_active;
 
 -- High-percentile PGS dashboard (top/bottom 10%)
 CREATE VIEW pgs_extremes_v AS
 SELECT
   p.derived_pgs_id, p.pgs_id, s.trait_reported, s.trait_category,
-  p.percentile, p.z_score, p.coverage_pct, p.confidence,
+  p.percentile, p.z_score, p.coverage_pct, p.low_coverage,
   CASE
     WHEN p.percentile >= 90 THEN 'high_risk'
     WHEN p.percentile <= 10 THEN 'low_risk'
   END AS bucket
 FROM derived_pgs p
-JOIN pgs_catalog_scores s USING (pgs_id)
+JOIN pgs_catalog_scores s ON s.pgs_id = p.pgs_id
 WHERE p.is_active
   AND (p.percentile >= 90 OR p.percentile <= 10)
   AND NOT p.low_coverage;

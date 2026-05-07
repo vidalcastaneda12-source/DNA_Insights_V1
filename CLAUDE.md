@@ -38,6 +38,22 @@ A local-first personal DNA insights application that ingests 23andMe + Ancestry 
 - Logging: structlog with JSON output. No `print()`.
 - Style: ruff defaults plus `--select=ALL --ignore=D,ANN101,ANN102`. Type-annotate everything.
 
+## Environment requirements
+
+- **SQLCipher must be built with FTS5.** `app.db` includes a `notes_fts` virtual
+  table that uses FTS5. Most distro packages of SQLCipher (e.g. Ubuntu 24.04's
+  `libsqlcipher-dev` 4.5.6) ship without FTS5, so `pysqlcipher3` linked against
+  them will fail at `genome init` with `no such module: fts5`. Rebuild SQLCipher
+  4.5.6 from source with `--enable-fts5` and reinstall `pysqlcipher3` against
+  it; the exact build commands live in `README.md` under "Prerequisites".
+- **Never "fix" an FTS5 install failure by removing the `notes_fts` virtual table
+  (or its triggers) from `docs/schemas/schema_group_5_app_state.md` /
+  `ddl/group_5_app_state.sql`.** Note search is a product requirement; if you
+  hit `no such module: fts5` the answer is to rebuild SQLCipher with FTS5, not
+  to mutilate the schema. Future sessions: heed this. Also relevant: see
+  "Things never to do" — schema files are immutable except via deliberate,
+  documented schema corrections.
+
 ## Common file locations
 
 - DDL: `ddl/*.sql`
