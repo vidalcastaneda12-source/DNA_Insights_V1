@@ -17,8 +17,10 @@ from genome.db.duckdb_conn import duckdb_connection
 from genome.db.init_schema import init_databases
 from genome.db.sqlite_conn import sqlcipher_connection
 from genome.ingest import Source, ingest_file
+from genome.ingest.liftover import LiftoverEngine
 
 _VALID_INGEST_SOURCES: tuple[str, ...] = tuple(s for s in get_args(Source) if s != "topmed_imputed")
+_VALID_LIFTOVER_ENGINES: tuple[str, ...] = tuple(get_args(LiftoverEngine))
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="DNA insights CLI")
 
@@ -129,6 +131,19 @@ def ingest(
             dir_okay=False,
         ),
     ] = None,
+    liftover_engine: Annotated[
+        str,
+        typer.Option(
+            "--liftover-engine",
+            help=(
+                "Lift-over engine for GRCh37 inputs. 'auto' (default) picks the "
+                "`liftover` PyPI package and falls back to `pyliftover` with an "
+                "INFO log. 'liftover' / 'pyliftover' force one engine and raise "
+                "if it isn't installed."
+            ),
+            case_sensitive=False,
+        ),
+    ] = "auto",
 ) -> None:
     """Parse, normalize, lift over, and persist a raw export.
 
@@ -140,10 +155,19 @@ def ingest(
         msg = f"unsupported --source {source!r}; expected one of {sorted(_VALID_INGEST_SOURCES)}"
         raise typer.BadParameter(msg)
 
+    engine = liftover_engine.lower()
+    if engine not in _VALID_LIFTOVER_ENGINES:
+        msg = (
+            f"unsupported --liftover-engine {liftover_engine!r}; "
+            f"expected one of {sorted(_VALID_LIFTOVER_ENGINES)}"
+        )
+        raise typer.BadParameter(msg)
+
     result = ingest_file(
         source=src,  # type: ignore[arg-type]
         path=file,
         chain_file=chain_file,
+        liftover_engine=engine,  # type: ignore[arg-type]
     )
     typer.echo(
         f"run_id={result.run_id} qc_id={result.qc_id} "

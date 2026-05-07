@@ -64,6 +64,20 @@ the SQLCipher build the Python extension is linked against does not have FTS5.
 **Do not "fix" this by removing the `notes_fts` virtual table from the schema** —
 rebuild SQLCipher with `--enable-fts5` per the steps above instead.
 
+### Lift-over engine
+
+GRCh37 inputs (Ancestry, older 23andMe chips) are lifted to GRCh38 using the
+[`liftover`](https://pypi.org/project/liftover/) Python package by default
+(C++/CFFI-backed, ~10–50× faster than `pyliftover`). It's installed as a
+regular runtime dependency via `uv sync`; no system tooling is required. Pass
+a local UCSC chain file with `--chain-file` (auto-download is disabled per the
+local-first privacy policy).
+
+`bcftools` and its `+liftover` plugin are **optional** and used only if you
+already have a working install — the project no longer requires them. If you
+ever want to fall back to the pure-Python implementation, pass
+`--liftover-engine pyliftover`.
+
 ## Architecture at a glance
 
 - `genome.duckdb` — analytical store (variants, annotations, derived analyses, insights).
