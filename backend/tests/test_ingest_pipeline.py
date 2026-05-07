@@ -8,6 +8,7 @@ are present.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -16,7 +17,7 @@ from typer.testing import CliRunner
 from genome.cli import app
 from genome.db import duckdb_connection, init_databases
 from genome.ingest import PIPELINE_VERSION, ingest_file
-from genome.ingest.liftover import IdentityLiftover
+from genome.ingest.liftover import BcftoolsLiftover, IdentityLiftover
 
 FIXTURES = Path(__file__).parent / "fixtures"
 TWENTYTHREE = FIXTURES / "23andme_sample.txt"
@@ -261,6 +262,64 @@ def test_ingest_drops_lift_to_non_canonical_and_records_count(
     assert run == (18, 0, 2)
     assert leaked == (0,)
     assert leaked_rsids == (0,)
+
+
+@pytest.mark.skipif(
+    shutil.which("bcftools") is None,
+    reason="bcftools not on $PATH",
+)
+def test_ingest_ancestry_with_bcftools_liftover_end_to_end(
+    isolated_settings: dict[str, str],
+    tmp_path: Path,
+) -> None:
+    """The bcftools-backed lift-over plugs into the pipeline cleanly.
+
+    Builds an identity chain large enough to cover every coordinate in the
+    Ancestry fixture and runs the same pipeline path the production
+    ``--liftover-engine bcftools`` codepath uses. Verifies the lift batches
+    correctly through the new ``BcftoolsLiftover.prepare()`` step in
+    ``pipeline.ingest_file``.
+    """
+    init_databases()
+    chain = tmp_path / "ancestry_identity.chain"
+    # The Ancestry fixture only covers chr1, X, Y, MT (positions ≤ 22 Mbp);
+    # keep the synthetic chain to those four contigs sized just past the
+    # max fixture coord so the synthetic FASTA stays small (~25 MB).
+    contigs = {
+        "chr1": 25_000_000,
+        "chrX": 5_000_000,
+        "chrY": 25_000_000,
+        "chrM": 16_569,
+    }
+    chain.write_text(
+        "".join(
+            f"chain {size} {name} {size} + 0 {size} {name} {size} + 0 {size} {i}\n{size}\n\n"
+            for i, (name, size) in enumerate(contigs.items(), start=1)
+        ),
+    )
+    bcftools_lo = BcftoolsLiftover(chain, chain_label="ancestry_identity")
+
+    result = ingest_file(
+        source="ancestry",
+        path=ANCESTRY,
+        liftover=bcftools_lo,
+    )
+
+    # Identity chain → every fixture coord lifts cleanly; no drops.
+    assert result.variants_total == 20
+    assert result.variants_dropped_lift_to_non_canonical == 0
+    assert result.variants_dropped_non_canonical == 0
+    assert result.qc_status in {"pass", "warn", "fail"}
+    with duckdb_connection(_duckdb_path(isolated_settings), read_only=True) as conn:
+        master_n = conn.execute("SELECT COUNT(*) FROM variants_master").fetchone()[0]
+        gc_n = conn.execute("SELECT COUNT(*) FROM genotype_calls").fetchone()[0]
+        # liftover_chain on the master row should be the bcftools label.
+        chain_label = conn.execute(
+            "SELECT DISTINCT liftover_chain FROM variants_master",
+        ).fetchone()[0]
+    assert master_n >= 18
+    assert gc_n == 20
+    assert chain_label == "ancestry_identity"
 
 
 def test_ingest_records_non_canonical_contig_drops(

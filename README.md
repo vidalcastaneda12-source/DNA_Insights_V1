@@ -6,6 +6,30 @@ All data stays on the device. Network egress is opt-in and audited.
 
 ## Prerequisites
 
+### bcftools (≥ 1.19)
+
+Phase 2's lift-over and Phase 4's imputation pipeline both shell out to
+`bcftools`. The `+liftover` plugin ships with bcftools 1.19 and later.
+
+```bash
+sudo apt install -y bcftools     # Ubuntu / WSL — apt's 1.19 is fine
+# or, on macOS:
+brew install bcftools
+```
+
+Verify the plugin is available:
+
+```bash
+bcftools +liftover --help | head -1
+# expected: "About: Lift over a VCF from one genome build to another."
+```
+
+If `bcftools` is missing the lift-over step falls back to the pure-Python
+`pyliftover` engine (`--liftover-engine pyliftover`), which is correct but
+~150× slower on a full 23andMe export.
+
+### SQLCipher (with FTS5)
+
 The encrypted notes table (`notes_fts`) is an FTS5 virtual table. Most distro
 packages of SQLCipher (including `libsqlcipher-dev` 4.5.6 on Ubuntu 24.04) ship
 with FTS3/FTS4 but **without FTS5**, so the schema cannot be applied against

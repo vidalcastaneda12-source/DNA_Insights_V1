@@ -12,7 +12,7 @@ import structlog
 from genome.config import get_settings
 from genome.db.duckdb_conn import duckdb_connection
 from genome.ingest import parsers
-from genome.ingest.liftover import IdentityLiftover, make_liftover
+from genome.ingest.liftover import BcftoolsLiftover, IdentityLiftover, make_liftover
 from genome.ingest.models import (
     IngestResult,
     NormalizedCall,
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from pathlib import Path
 
-    from genome.ingest.liftover import Liftover
+    from genome.ingest.liftover import Liftover, LiftoverEngine
 
     _RawParser = Callable[[Path], tuple[RawFileMeta, Iterator[RawCall], ParseStats]]
 
@@ -93,12 +93,13 @@ def _open_parser(
     return parser(path)
 
 
-def ingest_file(  # noqa: PLR0913 — five overrides + path/source is the user-facing surface
+def ingest_file(  # noqa: PLR0913 — six overrides + path/source is the user-facing surface
     *,
     source: Source,
     path: Path,
     chain_file: Path | None = None,
     liftover: Liftover | None = None,
+    liftover_engine: LiftoverEngine = "auto",
     archive_root: Path | None = None,
     duckdb_path: Path | None = None,
 ) -> IngestResult:
@@ -106,16 +107,20 @@ def ingest_file(  # noqa: PLR0913 — five overrides + path/source is the user-f
 
     Parameters
     ----------
-    source       : the raw-export vendor; ``'23andme'`` or ``'ancestry'``.
-    path         : the file on disk to ingest. Must exist.
-    chain_file   : optional UCSC chain file for GRCh37→GRCh38. Required when
-                   the file's native build is GRCh37 and ``liftover`` is not
-                   supplied.
-    liftover     : optional pre-built lift-over (overrides ``chain_file``).
-                   Use :class:`liftover.IdentityLiftover` in tests where the
-                   fixture is already in the target build.
-    archive_root : override the archive directory. Defaults to settings.
-    duckdb_path  : override the DuckDB path. Defaults to settings.
+    source           : raw-export vendor; ``'23andme'`` or ``'ancestry'``.
+    path             : the file on disk to ingest. Must exist.
+    chain_file       : optional UCSC chain file for GRCh37→GRCh38. Required
+                       when the file's native build is GRCh37 and
+                       ``liftover`` is not supplied.
+    liftover         : optional pre-built lift-over (overrides
+                       ``chain_file``/``liftover_engine``). Use
+                       :class:`liftover.IdentityLiftover` in tests where the
+                       fixture is already in the target build.
+    liftover_engine  : ``'auto'`` (default — bcftools when available,
+                       pyliftover otherwise), ``'bcftools'``, or
+                       ``'pyliftover'``. Ignored when ``liftover`` is passed.
+    archive_root     : override the archive directory. Defaults to settings.
+    duckdb_path      : override the DuckDB path. Defaults to settings.
 
     Returns
     -------
@@ -144,12 +149,26 @@ def ingest_file(  # noqa: PLR0913 — five overrides + path/source is the user-f
         liftover = (
             IdentityLiftover(chain_label="native_grch38")
             if meta.native_build == "GRCh38"
-            else make_liftover(meta.native_build, chain_file=chain_file)
+            else make_liftover(
+                meta.native_build,
+                chain_file=chain_file,
+                engine=liftover_engine,
+            )
         )
+
+    # Materialize the raw calls so we can pre-batch coordinates through
+    # bcftools (BcftoolsLiftover answers lift() from a pre-built dict — calling
+    # it per-row without prepare() works but burns a subprocess per row). For
+    # IdentityLiftover and PyLiftover this is a no-op.
+    raw_calls = list(raw_iter)
+    if isinstance(liftover, BcftoolsLiftover) and meta.native_build != "GRCh38":
+        coords = {(c.chrom, c.pos) for c in raw_calls}
+        liftover.prepare(coords)
+        log.info("ingest.bcftools_liftover_prepared", coords=len(coords))
 
     normalized: list[NormalizedCall] = list(
         normalize_calls(
-            raw_iter,
+            iter(raw_calls),
             native_build=meta.native_build,
             liftover=liftover,
             stats=parse_stats,

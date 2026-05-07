@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Phase 2 ingestion: `bcftools +liftover` as the default lift-over engine.
+
+### Added
+- `BcftoolsLiftover` — a `Liftover` Protocol implementation that pipes a
+  batch of source coordinates through `bcftools +liftover` and answers
+  per-variant `lift()` calls from an in-memory cache. Generates a synthetic
+  destination FASTA (all `N`) from the chain file's destination contig
+  sizes so the plugin's REF-match check succeeds on coordinate-only input.
+  ~150× faster than `pyliftover` on a full 23andMe export
+  (~20 minutes → under one minute for 631K variants).
+- `--liftover-engine {auto,bcftools,pyliftover}` CLI flag on `genome ingest`
+  for explicit engine selection; default `auto` picks bcftools when it's on
+  `$PATH` and falls back to pyliftover otherwise.
+- `BcftoolsLiftover.prepare(coords)` batch step in the pipeline, plus a
+  100K-variant benchmark test asserting completion within 60 seconds to
+  catch future regressions to per-variant subprocess invocations.
+- README "Prerequisites" entry for `bcftools` (Ubuntu/WSL:
+  `sudo apt install -y bcftools`, minimum version 1.19).
+- CLAUDE.md convention documenting the new default and the
+  Protocol-abstracted alternatives (`IdentityLiftover`, `PyLiftover`).
+
+### Changed
+- `pipeline.ingest_file` now materializes the parser stream and pre-calls
+  `BcftoolsLiftover.prepare()` once per ingest so the bcftools subprocess
+  cost is amortized across the whole batch.
+- `make_liftover` grew an `engine` keyword; default `auto` picks
+  `BcftoolsLiftover` when bcftools is on `$PATH`, falling back to
+  `PyLiftover` with a warning log otherwise.
+
 ## [0.2.3] — 2026-05-07
 
 Phase 2 ingestion: post-liftover non-canonical contig filter ([PR #6](https://github.com/vidalcastaneda12-source/dna_insights_v1/pull/6)).

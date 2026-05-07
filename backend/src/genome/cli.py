@@ -94,6 +94,9 @@ def status() -> None:
     typer.echo(f"External calls enabled: {settings.external_calls_enabled}")
 
 
+_VALID_LIFTOVER_ENGINES: tuple[str, ...] = ("auto", "bcftools", "pyliftover")
+
+
 @app.command()
 def ingest(
     file: Annotated[
@@ -129,6 +132,18 @@ def ingest(
             dir_okay=False,
         ),
     ] = None,
+    liftover_engine: Annotated[
+        str,
+        typer.Option(
+            "--liftover-engine",
+            help=(
+                "Lift-over engine: 'auto' (default — bcftools when "
+                "available, pyliftover otherwise), 'bcftools', or "
+                "'pyliftover' (slower; for fallback / cross-checking)."
+            ),
+            case_sensitive=False,
+        ),
+    ] = "auto",
 ) -> None:
     """Parse, normalize, lift over, and persist a raw export.
 
@@ -140,10 +155,19 @@ def ingest(
         msg = f"unsupported --source {source!r}; expected one of {sorted(_VALID_INGEST_SOURCES)}"
         raise typer.BadParameter(msg)
 
+    engine = liftover_engine.lower()
+    if engine not in _VALID_LIFTOVER_ENGINES:
+        msg = (
+            f"unsupported --liftover-engine {liftover_engine!r}; "
+            f"expected one of {list(_VALID_LIFTOVER_ENGINES)}"
+        )
+        raise typer.BadParameter(msg)
+
     result = ingest_file(
         source=src,  # type: ignore[arg-type]
         path=file,
         chain_file=chain_file,
+        liftover_engine=engine,  # type: ignore[arg-type]
     )
     typer.echo(
         f"run_id={result.run_id} qc_id={result.qc_id} "
