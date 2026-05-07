@@ -40,6 +40,7 @@ def insert_ingestion_run(  # noqa: PLR0913 — schema fields are not collapsible
     variants_called: int,
     variants_no_call: int,
     variants_imputed: int,
+    variants_dropped_alt_contig: int = 0,
     status: Literal["completed", "failed"] = "completed",
     error_log: str | None = None,
 ) -> int:
@@ -59,8 +60,9 @@ def insert_ingestion_run(  # noqa: PLR0913 — schema fields are not collapsible
             run_id, source, source_chip_version, file_path, file_hash_sha256,
             file_size_bytes, file_native_build,
             variants_total, variants_called, variants_no_call, variants_imputed,
+            variants_dropped_alt_contig,
             status, error_log, pipeline_version, completed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         """,
         [
             run_id,
@@ -74,6 +76,7 @@ def insert_ingestion_run(  # noqa: PLR0913 — schema fields are not collapsible
             variants_called,
             variants_no_call,
             variants_imputed,
+            variants_dropped_alt_contig,
             status,
             error_log,
             pipeline_version,

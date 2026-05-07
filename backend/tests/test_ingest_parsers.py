@@ -71,16 +71,17 @@ def test_split_genotype_23andme_indels():
 
 
 def test_parse_23andme_meta_and_call_count():
-    meta, calls = parsers.parse_23andme(TWENTYTHREE)
+    meta, calls, stats = parsers.parse_23andme(TWENTYTHREE)
     rows = list(calls)
     assert meta.source == "23andme"
     assert meta.native_build == "GRCh38"
     assert len(rows) == 30
+    assert stats.dropped_alt_contig == 0
     # The data row count must equal what's in the fixture (excludes comments).
 
 
 def test_parse_23andme_payload_shape():
-    _, calls = parsers.parse_23andme(TWENTYTHREE)
+    _, calls, _ = parsers.parse_23andme(TWENTYTHREE)
     rows = list(calls)
     by_rsid = {r.rsid: r for r in rows}
     rs7537756 = by_rsid["rs7537756"]
@@ -100,16 +101,17 @@ def test_parse_23andme_payload_shape():
 
 
 def test_parse_ancestry_meta_and_call_count():
-    meta, calls = parsers.parse_ancestry(ANCESTRY)
+    meta, calls, stats = parsers.parse_ancestry(ANCESTRY)
     rows = list(calls)
     assert meta.source == "ancestry"
     assert meta.native_build == "GRCh37"
     assert meta.chip_version == "V2.0"
     assert len(rows) == 20
+    assert stats.dropped_alt_contig == 0
 
 
 def test_parse_ancestry_chrom_aliases_resolved():
-    _, calls = parsers.parse_ancestry(ANCESTRY)
+    _, calls, _ = parsers.parse_ancestry(ANCESTRY)
     rows = list(calls)
     by_rsid = {r.rsid: r for r in rows}
     # Ancestry uses 23/24/26 — the parser must remap to X/Y/MT.
@@ -119,7 +121,7 @@ def test_parse_ancestry_chrom_aliases_resolved():
 
 
 def test_parse_ancestry_no_call_uses_zero_marker():
-    _, calls = parsers.parse_ancestry(ANCESTRY)
+    _, calls, _ = parsers.parse_ancestry(ANCESTRY)
     by_rsid = {r.rsid: r for r in calls}
     no_call = by_rsid["rs5000999"]
     assert no_call.is_no_call is True
@@ -139,11 +141,45 @@ def test_parse_skips_short_or_malformed_rows(tmp_path):
         "# rsid\tchromosome\tposition\tgenotype\n"
         "rs1\t1\t100\tAA\n"
         "rs2\t1\tnot-a-number\tAG\n"  # bad pos: dropped
-        "rs3\tscaffold\t300\tGG\n"  # bad chrom: dropped
+        "rs3\tscaffold\t300\tGG\n"  # alt-contig drop: counted in stats
         "rs4\t1\t400\n"  # short row: dropped
         "\n"  # blank: skipped
         "rs5\t1\t500\tCT\n",
     )
-    _, calls = parsers.parse_23andme(p)
+    _, calls, stats = parsers.parse_23andme(p)
     rsids = [c.rsid for c in calls]
     assert rsids == ["rs1", "rs5"]
+    assert stats.dropped_alt_contig == 1
+
+
+def test_parse_23andme_drops_grch38_alt_contigs(tmp_path):
+    """Real 23andMe v5 exports ship rows on alt contigs; they must be filtered."""
+    p = tmp_path / "alt_contig_23andme.txt"
+    p.write_text(
+        "# build 38\n"
+        "# rsid\tchromosome\tposition\tgenotype\n"
+        "rs1\t1\t100\tAA\n"
+        "i6045465\t8_KI270821v1_alt\t12345\tAG\n"
+        "i6045466\t19_KI270938v1_alt\t67890\tCT\n"
+        "rs2\t1\t200\tGG\n",
+    )
+    _, calls, stats = parsers.parse_23andme(p)
+    rsids = [c.rsid for c in calls]
+    assert rsids == ["rs1", "rs2"]
+    assert stats.dropped_alt_contig == 2
+
+
+def test_parse_ancestry_drops_grch38_alt_contigs(tmp_path):
+    """Same alt-contig filter applies on the AncestryDNA side."""
+    p = tmp_path / "alt_contig_ancestry.txt"
+    p.write_text(
+        "#AncestryDNA raw data download\n"
+        "rsid\tchromosome\tposition\tallele1\tallele2\n"
+        "rs1\t1\t100\tA\tA\n"
+        "i6045465\t8_KI270821v1_alt\t12345\tA\tG\n"
+        "rs2\t1\t200\tG\tG\n",
+    )
+    _, calls, stats = parsers.parse_ancestry(p)
+    rsids = [c.rsid for c in calls]
+    assert rsids == ["rs1", "rs2"]
+    assert stats.dropped_alt_contig == 1

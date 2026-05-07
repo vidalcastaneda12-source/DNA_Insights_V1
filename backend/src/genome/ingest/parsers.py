@@ -5,11 +5,15 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Final
 
-from genome.ingest.models import VALID_CHROMS, RawCall, RawFileMeta
+import structlog
+
+from genome.ingest.models import VALID_CHROMS, ParseStats, RawCall, RawFileMeta
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
+
+logger = structlog.get_logger(__name__)
 
 # Header look-ups.
 _BUILD_38_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
@@ -59,8 +63,9 @@ def detect_build(header_lines: list[str]) -> str:
 def normalize_chrom(value: str) -> str | None:
     """Map a raw chromosome label to the schema's ``chromosome_enum``.
 
-    Returns ``None`` for anything outside the enum (e.g. ``'0'``, contigs,
-    decoy names) so the caller can drop or quality-flag the row.
+    Returns ``None`` for anything outside the enum (e.g. ``'0'``, GRCh38 alt
+    contigs like ``'8_KI270821v1_alt'``, decoy names) so the caller can drop
+    or quality-flag the row.
     """
     raw = value.strip().upper().removeprefix("CHR")
     raw = _CHROM_ALIASES.get(raw, raw)
@@ -125,13 +130,16 @@ def _read_header(
     return header, first_data
 
 
-def parse_23andme(path: Path) -> tuple[RawFileMeta, Iterator[RawCall]]:
-    """Open a 23andMe raw export and return ``(meta, iter_of_calls)``.
+def parse_23andme(
+    path: Path,
+) -> tuple[RawFileMeta, Iterator[RawCall], ParseStats]:
+    """Open a 23andMe raw export and return ``(meta, iter_of_calls, stats)``.
 
     The iterator is a generator tied to the file; iterate it eagerly or wrap
-    the call in a context manager. Format reference: tab-separated ``rsid``,
-    ``chromosome``, ``position``, ``genotype`` columns; comment lines start
-    with ``#``.
+    the call in a context manager. The ``stats`` object is mutated as the
+    iterator runs and is fully populated once iteration completes. Format
+    reference: tab-separated ``rsid``, ``chromosome``, ``position``,
+    ``genotype`` columns; comment lines start with ``#``.
     """
     handle = path.open(encoding="utf-8", errors="replace")
     header, first_data = _read_header(handle, "#")
@@ -141,33 +149,48 @@ def parse_23andme(path: Path) -> tuple[RawFileMeta, Iterator[RawCall]]:
         chip_version=_detect_chip(header, _CHIP_23ANDME),
         raw_header=tuple(header),
     )
-    return meta, _iter_23andme_rows(handle, first_data)
+    stats = ParseStats()
+    return meta, _iter_23andme_rows(handle, first_data, stats), stats
 
 
 def _iter_23andme_rows(
     handle: object,
     first_data: str | None,
+    stats: ParseStats,
 ) -> Iterator[RawCall]:
     try:
         if first_data is not None:
-            yield from _emit_23andme_line(first_data)
+            yield from _emit_23andme_line(first_data, stats)
         for raw in handle:  # type: ignore[attr-defined]
             line = raw.rstrip("\n").rstrip("\r")
             if not line or line.startswith("#"):
                 continue
-            yield from _emit_23andme_line(line)
+            yield from _emit_23andme_line(line, stats)
     finally:
         handle.close()  # type: ignore[attr-defined]
+        logger.info(
+            "parse.alt_contig_summary",
+            source="23andme",
+            dropped_alt_contig=stats.dropped_alt_contig,
+        )
 
 
-def _emit_23andme_line(line: str) -> Iterator[RawCall]:
+def _emit_23andme_line(line: str, stats: ParseStats) -> Iterator[RawCall]:
     parts = line.split("\t")
     if len(parts) < _TWENTYTHREE_COLS:
         return
     if parts[0].lower() == "rsid":  # header row inside data
         return
-    chrom = normalize_chrom(parts[1])
+    chrom_raw = parts[1]
+    chrom = normalize_chrom(chrom_raw)
     if chrom is None:
+        stats.dropped_alt_contig += 1
+        logger.debug(
+            "parse.alt_contig_drop",
+            source="23andme",
+            chrom=chrom_raw,
+            rsid=parts[0],
+        )
         return
     try:
         pos = int(parts[2])
@@ -185,13 +208,16 @@ def _emit_23andme_line(line: str) -> Iterator[RawCall]:
     )
 
 
-def parse_ancestry(path: Path) -> tuple[RawFileMeta, Iterator[RawCall]]:
-    """Open an AncestryDNA raw export and return ``(meta, iter_of_calls)``.
+def parse_ancestry(
+    path: Path,
+) -> tuple[RawFileMeta, Iterator[RawCall], ParseStats]:
+    """Open an AncestryDNA raw export and return ``(meta, iter_of_calls, stats)``.
 
     Format: tab-separated ``rsid``, ``chromosome``, ``position``, ``allele1``,
     ``allele2`` columns. AncestryDNA uses ``0`` (not ``-``) for no-calls and
     encodes chromosomes 1-22 numerically with ``23``=X, ``24``=Y, ``25``=PAR,
-    ``26``=MT in some chip versions.
+    ``26``=MT in some chip versions. The ``stats`` object is mutated as the
+    iterator runs and is fully populated once iteration completes.
     """
     handle = path.open(encoding="utf-8", errors="replace")
     header, first_data = _read_header(handle, "#")
@@ -201,33 +227,48 @@ def parse_ancestry(path: Path) -> tuple[RawFileMeta, Iterator[RawCall]]:
         chip_version=_detect_chip(header, _CHIP_ANCESTRY),
         raw_header=tuple(header),
     )
-    return meta, _iter_ancestry_rows(handle, first_data)
+    stats = ParseStats()
+    return meta, _iter_ancestry_rows(handle, first_data, stats), stats
 
 
 def _iter_ancestry_rows(
     handle: object,
     first_data: str | None,
+    stats: ParseStats,
 ) -> Iterator[RawCall]:
     try:
         if first_data is not None:
-            yield from _emit_ancestry_line(first_data)
+            yield from _emit_ancestry_line(first_data, stats)
         for raw in handle:  # type: ignore[attr-defined]
             line = raw.rstrip("\n").rstrip("\r")
             if not line or line.startswith("#"):
                 continue
-            yield from _emit_ancestry_line(line)
+            yield from _emit_ancestry_line(line, stats)
     finally:
         handle.close()  # type: ignore[attr-defined]
+        logger.info(
+            "parse.alt_contig_summary",
+            source="ancestry",
+            dropped_alt_contig=stats.dropped_alt_contig,
+        )
 
 
-def _emit_ancestry_line(line: str) -> Iterator[RawCall]:
+def _emit_ancestry_line(line: str, stats: ParseStats) -> Iterator[RawCall]:
     parts = line.split("\t")
     if len(parts) < _ANCESTRY_COLS:
         return
     if parts[0].lower() == "rsid":
         return
-    chrom = normalize_chrom(parts[1])
+    chrom_raw = parts[1]
+    chrom = normalize_chrom(chrom_raw)
     if chrom is None:
+        stats.dropped_alt_contig += 1
+        logger.debug(
+            "parse.alt_contig_drop",
+            source="ancestry",
+            chrom=chrom_raw,
+            rsid=parts[0],
+        )
         return
     try:
         pos = int(parts[2])

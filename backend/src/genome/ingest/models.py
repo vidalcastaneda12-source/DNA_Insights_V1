@@ -40,6 +40,18 @@ class RawFileMeta:
     raw_header: tuple[str, ...]
 
 
+@dataclass(slots=True)
+class ParseStats:
+    """Mutable counters populated by the parser as it streams a raw export.
+
+    The parser returns this alongside the row iterator; the caller reads it
+    after the iterator is exhausted to record per-run drop counts on
+    ``ingestion_runs``.
+    """
+
+    dropped_alt_contig: int = 0
+
+
 @dataclass(frozen=True, slots=True)
 class RawCall:
     """A single SNP call as it appeared in the raw export, before normalization.
@@ -98,6 +110,7 @@ class IngestResult:
     variants_called: int
     variants_no_call: int
     variants_imputed: int
+    variants_dropped_alt_contig: int
     new_variants_master_rows: int
     deactivated_prior_calls: int
     qc_status: Literal["pass", "warn", "fail"]
