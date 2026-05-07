@@ -63,9 +63,12 @@ def detect_build(header_lines: list[str]) -> str:
 def normalize_chrom(value: str) -> str | None:
     """Map a raw chromosome label to the schema's ``chromosome_enum``.
 
-    Returns ``None`` for anything outside the enum (e.g. ``'0'``, GRCh38 alt
-    contigs like ``'8_KI270821v1_alt'``, decoy names) so the caller can drop
-    or quality-flag the row.
+    Positive-rule filter: returns the canonical label only when it lands in
+    ``VALID_CHROMS`` (``1..22, X, Y, MT``) after the alias remap. Anything
+    else — ``'0'``, GRCh38 alt contigs (``'8_KI270821v1_alt'``), unlocalized
+    contigs (``'4_GL000008v2_random'``), unplaced contigs (``'Un_GL000226v1'``,
+    ``'chrUn_GL000226v1'``), decoy sequences (``'*_decoy'``), arbitrary
+    scaffolds — returns ``None`` so the caller can drop or quality-flag the row.
     """
     raw = value.strip().upper().removeprefix("CHR")
     raw = _CHROM_ALIASES.get(raw, raw)
@@ -169,9 +172,9 @@ def _iter_23andme_rows(
     finally:
         handle.close()  # type: ignore[attr-defined]
         logger.info(
-            "parse.alt_contig_summary",
+            "parse.non_canonical_summary",
             source="23andme",
-            dropped_alt_contig=stats.dropped_alt_contig,
+            dropped_non_canonical=stats.dropped_non_canonical,
         )
 
 
@@ -184,9 +187,9 @@ def _emit_23andme_line(line: str, stats: ParseStats) -> Iterator[RawCall]:
     chrom_raw = parts[1]
     chrom = normalize_chrom(chrom_raw)
     if chrom is None:
-        stats.dropped_alt_contig += 1
+        stats.dropped_non_canonical += 1
         logger.debug(
-            "parse.alt_contig_drop",
+            "parse.non_canonical_drop",
             source="23andme",
             chrom=chrom_raw,
             rsid=parts[0],
@@ -247,9 +250,9 @@ def _iter_ancestry_rows(
     finally:
         handle.close()  # type: ignore[attr-defined]
         logger.info(
-            "parse.alt_contig_summary",
+            "parse.non_canonical_summary",
             source="ancestry",
-            dropped_alt_contig=stats.dropped_alt_contig,
+            dropped_non_canonical=stats.dropped_non_canonical,
         )
 
 
@@ -262,9 +265,9 @@ def _emit_ancestry_line(line: str, stats: ParseStats) -> Iterator[RawCall]:
     chrom_raw = parts[1]
     chrom = normalize_chrom(chrom_raw)
     if chrom is None:
-        stats.dropped_alt_contig += 1
+        stats.dropped_non_canonical += 1
         logger.debug(
-            "parse.alt_contig_drop",
+            "parse.non_canonical_drop",
             source="ancestry",
             chrom=chrom_raw,
             rsid=parts[0],

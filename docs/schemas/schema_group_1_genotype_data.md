@@ -278,9 +278,12 @@ CREATE TABLE ingestion_runs (
   variants_called       INTEGER,
   variants_no_call      INTEGER,
   variants_imputed      INTEGER,                -- 0 for raw 23andMe/Ancestry uploads
-  variants_dropped_alt_contig INTEGER DEFAULT 0, -- variants on GRCh38 alt contigs
-                                                -- (e.g. 8_KI270821v1_alt) filtered
-                                                -- at parse time; not in chromosome_enum
+  variants_dropped_non_canonical INTEGER DEFAULT 0, -- variants on non-canonical GRCh38
+                                                -- contigs (alt e.g. 8_KI270821v1_alt;
+                                                -- random e.g. 4_GL000008v2_random;
+                                                -- unplaced Un_*/chrUn_*; *_decoy)
+                                                -- filtered at parse time; not in
+                                                -- chromosome_enum
 
   -- Status
   status                ingestion_status_enum NOT NULL DEFAULT 'pending',
@@ -480,14 +483,18 @@ Severity escalates to `critical` for any of the above when the variant is in an 
 
 5. **Sex check / phenotype expectations** require user input or family data; sex_expected can be NULL until provided.
 
-6. **Alt-contig filtering at parse time.** 23andMe v5 and some AncestryDNA exports include
-   variants on GRCh38 alt contigs (e.g. `8_KI270821v1_alt`, `19_KI270938v1_alt`). These
-   chromosome labels are not members of `chromosome_enum` (the enum covers `1..22, X, Y, MT`
-   only). The parser drops these rows before the row reaches DuckDB, logs each drop at
-   `debug` level with its chrom value, emits a single `info` summary at end-of-parse, and
-   the per-run total lands in `ingestion_runs.variants_dropped_alt_contig`. This is
-   intentional and matches standard clinical bioinformatics practice — alt contigs are
-   excluded from the canonical reference space used for variant calling and annotation.
+6. **Non-canonical contig filtering at parse time.** 23andMe v5 and some AncestryDNA
+   exports include variants on non-canonical GRCh38 contigs: alt contigs (`*_alt`, e.g.
+   `8_KI270821v1_alt`), unlocalized contigs (`*_random`, e.g. `4_GL000008v2_random`),
+   unplaced contigs (`Un_*` and `chrUn_*`, e.g. `Un_GL000226v1`), and decoy sequences
+   (`*_decoy`). These chromosome labels are not members of `chromosome_enum` (the enum
+   covers `1..22, X, Y, MT` only). The parser uses a positive-rule filter — only labels
+   that resolve to the canonical set after the `23/24/25/26` alias remap are kept — drops
+   the rest before the row reaches DuckDB, logs each drop at `debug` level with its chrom
+   value, emits a single `info` summary at end-of-parse, and the per-run total lands in
+   `ingestion_runs.variants_dropped_non_canonical`. This is intentional and matches
+   standard clinical bioinformatics practice — non-canonical contigs are excluded from the
+   canonical reference space used for variant calling and annotation.
 
 ---
 

@@ -199,39 +199,50 @@ def test_ingest_grch37_without_chain_file_errors(
         ingest_file(source="ancestry", path=ANCESTRY)
 
 
-def test_ingest_records_alt_contig_drops(
+def test_ingest_records_non_canonical_contig_drops(
     isolated_settings: dict[str, str],
     tmp_path: Path,
 ) -> None:
-    """A 23andMe v5 file with alt-contig rows ingests cleanly with the count recorded.
+    """A 23andMe v5 file with every non-canonical contig flavor ingests cleanly.
 
-    Reproduces the failure mode where ``8_KI270821v1_alt`` reached the DuckDB
-    cast and exploded. After the parser-layer filter, the row never lands in
-    ``variants_master``; the per-run count surfaces on ``ingestion_runs``.
+    Reproduces the failure mode where labels like ``8_KI270821v1_alt`` and
+    ``4_GL000008v2_random`` reached the DuckDB ``chromosome_enum`` cast and
+    exploded. After the parser-layer positive-rule filter, none of the
+    non-canonical rows land in ``variants_master``; the per-run total surfaces
+    on ``ingestion_runs.variants_dropped_non_canonical``.
+
+    Covers all four categories: alt (``*_alt``), unlocalized (``*_random``),
+    unplaced (``Un_*`` and ``chrUn_*``), and decoy (``*_decoy``).
     """
     init_databases()
-    # Build a small file by copying the fixture and inserting alt-contig rows.
+    # Build a small file by copying the fixture and inserting one row from
+    # each non-canonical category.
     body = TWENTYTHREE.read_text()
     augmented = body.rstrip("\n") + (
-        "\ni6045465\t8_KI270821v1_alt\t12345\tAG\ni6045466\t19_KI270938v1_alt\t67890\tCT\n"
+        "\ni6045465\t8_KI270821v1_alt\t12345\tAG"
+        "\ni6045466\t19_KI270938v1_alt\t67890\tCT"
+        "\ni6045467\t4_GL000008v2_random\t11111\tAG"
+        "\ni6045468\tUn_GL000226v1\t22222\tGG"
+        "\ni6045469\tchrUn_KI270442v1\t33333\tCC"
+        "\ni6045470\ths38d1_decoy\t44444\tTT\n"
     )
-    p = tmp_path / "23andme_v5_with_alt.txt"
+    p = tmp_path / "23andme_v5_with_non_canonical.txt"
     p.write_text(augmented)
 
     result = ingest_file(source="23andme", path=p)
 
-    # Two rows filtered at parse time; the rest of the file ingests cleanly.
-    assert result.variants_dropped_alt_contig == 2
+    # Six rows filtered at parse time; the rest of the file ingests cleanly.
+    assert result.variants_dropped_non_canonical == 6
     assert result.variants_total == 30  # original fixture row count
     assert result.qc_status in {"pass", "warn", "fail"}
 
     with duckdb_connection(_duckdb_path(isolated_settings), read_only=True) as conn:
         run = conn.execute(
-            "SELECT variants_total, variants_dropped_alt_contig"
+            "SELECT variants_total, variants_dropped_non_canonical"
             " FROM ingestion_runs WHERE run_id = ?",
             [result.run_id],
         ).fetchone()
-        # No alt-contig variant should have made it to variants_master.
+        # No non-canonical variant should have made it to variants_master.
         leaked = conn.execute(
             "SELECT COUNT(*) FROM variants_master vm"
             " WHERE CAST(vm.chrom AS VARCHAR) NOT IN"
@@ -239,5 +250,5 @@ def test_ingest_records_alt_contig_drops(
             "  '11','12','13','14','15','16','17','18','19','20',"
             "  '21','22','X','Y','MT')",
         ).fetchone()
-    assert run == (30, 2)
+    assert run == (30, 6)
     assert leaked == (0,)
