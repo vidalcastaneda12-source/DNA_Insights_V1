@@ -7,7 +7,9 @@ clean.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Literal
+
+import pyarrow as pa
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -92,7 +94,14 @@ def _stage_calls(
     conn: DuckDBPyConnection,
     calls: list[NormalizedCall],
 ) -> None:
-    """Materialize the call batch into a temp table for set-based joins."""
+    """Materialize the call batch into a temp table for set-based joins.
+
+    The batch is loaded as a single PyArrow Table via ``conn.register()``;
+    DuckDB then streams it columnar into ``_ingest_stage`` in one
+    ``INSERT ... SELECT``. ``executemany`` re-prepares per row in DuckDB and
+    runs in minutes at whole-array (~600K-row) scale; the columnar Arrow path
+    runs in well under a second.
+    """
     conn.execute("DROP TABLE IF EXISTS _ingest_stage")
     conn.execute(
         """
@@ -115,35 +124,53 @@ def _stage_calls(
         )
         """,
     )
-    rows: list[tuple[Any, ...]] = []
-    for i, c in enumerate(calls):
-        rows.append(
-            (
-                i,
-                c.rsid,
-                c.chrom,
-                c.pos_grch38,
-                c.pos_grch37,
-                c.ref_allele,
-                c.alt_allele,
-                c.variant_type,
-                c.allele_1 or None,
-                c.allele_2 or None,
-                c.is_no_call,
-                c.strand_status,
-                c.liftover_chain,
-                c.liftover_status,
-                list(c.quality_flags),
-            ),
-        )
-    if rows:
-        conn.executemany(
-            """
-            INSERT INTO _ingest_stage VALUES
-              (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            rows,
-        )
+    if not calls:
+        return
+
+    arrays = [
+        pa.array(range(len(calls)), type=pa.int64()),
+        pa.array([c.rsid for c in calls], type=pa.string()),
+        pa.array([c.chrom for c in calls], type=pa.string()),
+        pa.array([c.pos_grch38 for c in calls], type=pa.int64()),
+        pa.array([c.pos_grch37 for c in calls], type=pa.int64()),
+        pa.array([c.ref_allele for c in calls], type=pa.string()),
+        pa.array([c.alt_allele for c in calls], type=pa.string()),
+        pa.array([c.variant_type for c in calls], type=pa.string()),
+        pa.array([c.allele_1 or None for c in calls], type=pa.string()),
+        pa.array([c.allele_2 or None for c in calls], type=pa.string()),
+        pa.array([c.is_no_call for c in calls], type=pa.bool_()),
+        pa.array([c.strand_status for c in calls], type=pa.string()),
+        pa.array([c.liftover_chain for c in calls], type=pa.string()),
+        pa.array([c.liftover_status for c in calls], type=pa.string()),
+        pa.array(
+            [list(c.quality_flags) for c in calls],
+            type=pa.list_(pa.string()),
+        ),
+    ]
+    names = [
+        "ord",
+        "rsid",
+        "chrom",
+        "pos_grch38",
+        "pos_grch37",
+        "ref_allele",
+        "alt_allele",
+        "variant_type",
+        "allele_1",
+        "allele_2",
+        "is_no_call",
+        "strand_status",
+        "liftover_chain",
+        "liftover_status",
+        "quality_flags",
+    ]
+    table = pa.Table.from_arrays(arrays, names=names)
+
+    conn.register("_ingest_stage_arrow", table)
+    try:
+        conn.execute("INSERT INTO _ingest_stage SELECT * FROM _ingest_stage_arrow")
+    finally:
+        conn.unregister("_ingest_stage_arrow")
 
 
 def _upsert_variants_master(conn: DuckDBPyConnection) -> int:

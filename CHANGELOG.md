@@ -14,6 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no system tooling. The previous bcftools `+liftover` plugin direction was
   abandoned because building `freeseek/score` against the user's htslib
   required `-fPIC` rebuilds that were environmentally fragile.
+- `_stage_calls` now bulk-loads the normalized batch into the `_ingest_stage`
+  temp table via a PyArrow Table and `conn.register()` +
+  `INSERT INTO _ingest_stage SELECT * FROM <registered>`. The previous
+  `executemany` shape re-prepared and re-executed per row in DuckDB, which
+  ballooned a 631K-variant 23andMe ingest from seconds to ~14 minutes burning
+  100% on a single Python loop. Real-data ingest end-to-end is now under 30
+  seconds; produced rows in `variants_master` / `genotype_calls` /
+  `consensus_genotypes` / `discrepancies` are byte-equivalent to the prior
+  implementation.
 
 ### Added
 - `LiftoverPyLib` engine, the `liftover`-package wrapper. The `Liftover`
@@ -25,6 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicit engine choices raise rather than silently falling back.
 - Engine-selection tests and a 100K-position throughput benchmark
   (`< 60 s` ceiling) in `backend/tests/test_ingest_liftover.py`.
+- `pyarrow>=18.0.0` runtime dependency, used by the writer's bulk-load path.
+- Writer-stage tests in `backend/tests/test_ingest_writer.py`: shape and
+  null-pattern round-trip across the Arrow path, repeat-invocation reset, and
+  a 100K-row staging benchmark with a `< 2 s` ceiling.
 
 ## [0.2.3] — 2026-05-07
 

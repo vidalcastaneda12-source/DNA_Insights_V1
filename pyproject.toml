@@ -21,6 +21,7 @@ dependencies = [
     "httpx>=0.27.0",
     "liftover>=1.4.0",
     "pyliftover>=0.4.1",
+    "pyarrow>=18.0.0",
 ]
 
 [project.optional-dependencies]
@@ -89,7 +90,7 @@ explicit_package_bases = true
 files = ["backend/src/genome"]
 
 [[tool.mypy.overrides]]
-module = ["pysqlcipher3.*", "cyvcf2.*", "duckdb.*", "liftover.*", "pyliftover.*"]
+module = ["pysqlcipher3.*", "cyvcf2.*", "duckdb.*", "liftover.*", "pyliftover.*", "pyarrow.*"]
 ignore_missing_imports = true
 
 [tool.uv]
