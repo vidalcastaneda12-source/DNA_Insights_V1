@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from pathlib import Path
 
-    from genome.ingest.liftover import Liftover
+    from genome.ingest.liftover import Liftover, LiftoverEngine
 
     _RawParser = Callable[[Path], tuple[RawFileMeta, Iterator[RawCall], ParseStats]]
 
@@ -93,12 +93,13 @@ def _open_parser(
     return parser(path)
 
 
-def ingest_file(  # noqa: PLR0913 — five overrides + path/source is the user-facing surface
+def ingest_file(  # noqa: PLR0913 — six overrides + path/source is the user-facing surface
     *,
     source: Source,
     path: Path,
     chain_file: Path | None = None,
     liftover: Liftover | None = None,
+    liftover_engine: LiftoverEngine = "auto",
     archive_root: Path | None = None,
     duckdb_path: Path | None = None,
 ) -> IngestResult:
@@ -106,16 +107,21 @@ def ingest_file(  # noqa: PLR0913 — five overrides + path/source is the user-f
 
     Parameters
     ----------
-    source       : the raw-export vendor; ``'23andme'`` or ``'ancestry'``.
-    path         : the file on disk to ingest. Must exist.
-    chain_file   : optional UCSC chain file for GRCh37→GRCh38. Required when
-                   the file's native build is GRCh37 and ``liftover`` is not
-                   supplied.
-    liftover     : optional pre-built lift-over (overrides ``chain_file``).
-                   Use :class:`liftover.IdentityLiftover` in tests where the
-                   fixture is already in the target build.
-    archive_root : override the archive directory. Defaults to settings.
-    duckdb_path  : override the DuckDB path. Defaults to settings.
+    source          : the raw-export vendor; ``'23andme'`` or ``'ancestry'``.
+    path            : the file on disk to ingest. Must exist.
+    chain_file      : optional UCSC chain file for GRCh37→GRCh38. Required when
+                      the file's native build is GRCh37 and ``liftover`` is not
+                      supplied.
+    liftover        : optional pre-built lift-over (overrides ``chain_file``).
+                      Use :class:`liftover.IdentityLiftover` in tests where the
+                      fixture is already in the target build.
+    liftover_engine : engine to construct when ``liftover`` is not supplied.
+                      ``'auto'`` picks the ``liftover`` PyPI package and falls
+                      back to ``pyliftover`` (loudly, with an INFO log).
+                      ``'liftover'`` and ``'pyliftover'`` raise if the named
+                      package is unavailable.
+    archive_root    : override the archive directory. Defaults to settings.
+    duckdb_path     : override the DuckDB path. Defaults to settings.
 
     Returns
     -------
@@ -144,7 +150,11 @@ def ingest_file(  # noqa: PLR0913 — five overrides + path/source is the user-f
         liftover = (
             IdentityLiftover(chain_label="native_grch38")
             if meta.native_build == "GRCh38"
-            else make_liftover(meta.native_build, chain_file=chain_file)
+            else make_liftover(
+                meta.native_build,
+                chain_file=chain_file,
+                engine=liftover_engine,
+            )
         )
 
     normalized: list[NormalizedCall] = list(

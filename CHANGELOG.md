@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Lift-over now uses the [`liftover`](https://pypi.org/project/liftover/) PyPI
+  package (C++/CFFI-backed) as the default engine. It runs ~10–50× faster than
+  `pyliftover` on whole-array exports and installs cleanly via `uv sync` with
+  no system tooling. The previous bcftools `+liftover` plugin direction was
+  abandoned because building `freeseek/score` against the user's htslib
+  required `-fPIC` rebuilds that were environmentally fragile.
+
+### Added
+- `LiftoverPyLib` engine, the `liftover`-package wrapper. The `Liftover`
+  Protocol is unchanged; `IdentityLiftover` and the renamed
+  `PyLiftoverWrapper` (formerly `PyLiftover`) still satisfy it.
+- `--liftover-engine {auto|liftover|pyliftover}` CLI flag (and matching
+  `liftover_engine=` argument on `ingest_file`). `auto` (default) prefers the
+  `liftover` package and falls back loudly to `pyliftover` with an INFO log;
+  explicit engine choices raise rather than silently falling back.
+- Engine-selection tests and a 100K-position throughput benchmark
+  (`< 60 s` ceiling) in `backend/tests/test_ingest_liftover.py`.
+
 ## [0.2.3] — 2026-05-07
 
 Phase 2 ingestion: post-liftover non-canonical contig filter ([PR #6](https://github.com/vidalcastaneda12-source/dna_insights_v1/pull/6)).
