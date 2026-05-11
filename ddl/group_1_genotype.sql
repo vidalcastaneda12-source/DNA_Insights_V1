@@ -19,7 +19,12 @@ CREATE TYPE consensus_method_enum AS ENUM (
 );
 
 CREATE TYPE discrepancy_type_enum AS ENUM (
-  'genotype_mismatch',         -- both called, different genotypes
+  'genotype_mismatch',         -- both called, different genotypes (no resolution)
+  'strand_flip_resolved',      -- both platforms called the same SNP on opposite
+                               -- strands; reconciled via complement matching, the
+                               -- consensus was produced from the flipped call.
+                               -- This is a SUCCESSFUL resolution recorded for
+                               -- audit; severity is always 'info'.
   'strand_ambiguous',          -- A/T or C/G site; strand cannot be inferred
   'build_mismatch',            -- coordinate disagreement at lift-over
   'no_call_diff',              -- one platform called, the other didn't

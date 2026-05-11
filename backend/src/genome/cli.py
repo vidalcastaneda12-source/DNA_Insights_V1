@@ -18,6 +18,7 @@ from genome.db.init_schema import init_databases
 from genome.db.sqlite_conn import sqlcipher_connection
 from genome.ingest import Source, ingest_file
 from genome.ingest.liftover import LiftoverEngine
+from genome.merge import merge_all
 
 _VALID_INGEST_SOURCES: tuple[str, ...] = tuple(s for s in get_args(Source) if s != "topmed_imputed")
 _VALID_LIFTOVER_ENGINES: tuple[str, ...] = tuple(get_args(LiftoverEngine))
@@ -180,6 +181,35 @@ def ingest(
         f"call_rate={result.call_rate:.4f} sex={result.sex_inferred} "
         f"qc={result.qc_status}",
     )
+
+
+@app.command()
+def merge() -> None:
+    """Compute the consensus across all active genotype calls.
+
+    Rebuilds ``consensus_genotypes`` and ``discrepancies`` from the current
+    state of ``genotype_calls`` using the ``consensus_v1`` rule (documented
+    in ``docs/consensus.md``). Idempotent: re-running after a re-ingest is
+    the supported way to refresh the merged view.
+    """
+    result = merge_all()
+    typer.echo(
+        f"rule={result.resolution_rule} "
+        f"consensus_rows={result.consensus_rows_written} "
+        f"discrepancy_rows={result.discrepancy_rows_written} "
+        f"strand_flips={result.strand_flip_resolutions}",
+    )
+    if result.method_counts:
+        methods = " ".join(f"{k}={v}" for k, v in sorted(result.method_counts.items()))
+        typer.echo(f"consensus_methods: {methods}")
+    if result.discrepancy_type_counts:
+        types = " ".join(f"{k}={v}" for k, v in sorted(result.discrepancy_type_counts.items()))
+        typer.echo(f"discrepancy_types: {types}")
+    if result.severity_counts:
+        sevs = " ".join(f"{k}={v}" for k, v in sorted(result.severity_counts.items()))
+        typer.echo(f"severity: {sevs}")
+    if result.concordance_rate is not None:
+        typer.echo(f"shared-call concordance rate: {result.concordance_rate:.4f}")
 
 
 @app.command()
