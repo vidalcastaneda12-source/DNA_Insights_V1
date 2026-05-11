@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+- Rewrote `writer._stage_calls` to bulk-load via PyArrow Table registration +
+  `INSERT ... SELECT` instead of DuckDB's `executemany`. `executemany` does
+  not batch-bind — it re-prepares and re-executes the statement per row — so
+  staging a 631K-variant 23andMe export took ~14 min on Windows and ~32 min
+  on macOS even though the surrounding set-based joins and lift-over were
+  already optimized. The Arrow path stages the same batch in roughly one
+  second, bringing total wall-clock ingest below the < 60s target while
+  producing byte-identical rows in `variants_master`, `genotype_calls`,
+  `consensus_genotypes`, and `discrepancies`.
+
 ### Changed
 - Lift-over now uses the [`liftover`](https://pypi.org/project/liftover/) PyPI
   package (C++/CFFI-backed) as the default engine. It runs ~10–50× faster than
@@ -25,6 +36,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicit engine choices raise rather than silently falling back.
 - Engine-selection tests and a 100K-position throughput benchmark
   (`< 60 s` ceiling) in `backend/tests/test_ingest_liftover.py`.
+- `pyarrow>=17.0.0` as an explicit runtime dependency (previously transitive
+  via DuckDB) so the writer's bulk-load path keeps working if DuckDB ever
+  drops the implicit dependency.
+- `backend/tests/test_ingest_writer.py` with a `_stage_calls` round-trip
+  correctness test (preserving `ord`, empty-allele → NULL mapping, list
+  columns) and a 100K-row benchmark (< 2 s ceiling) so the bulk-load path
+  cannot regress to `executemany` undetected.
 
 ## [0.2.3] — 2026-05-07
 

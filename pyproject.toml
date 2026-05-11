@@ -8,6 +8,7 @@ license = { text = "Proprietary" }
 
 dependencies = [
     "duckdb>=1.1.0",
+    "pyarrow>=17.0.0",
     "pysqlcipher3>=1.2.0",
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
@@ -89,7 +90,14 @@ explicit_package_bases = true
 files = ["backend/src/genome"]
 
 [[tool.mypy.overrides]]
-module = ["pysqlcipher3.*", "cyvcf2.*", "duckdb.*", "liftover.*", "pyliftover.*"]
+module = [
+    "pysqlcipher3.*",
+    "cyvcf2.*",
+    "duckdb.*",
+    "liftover.*",
+    "pyliftover.*",
+    "pyarrow.*",
+]
 ignore_missing_imports = true
 
 [tool.uv]
