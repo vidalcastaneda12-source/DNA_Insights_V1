@@ -16,6 +16,7 @@ ConsensusMethod = Literal[
 ]
 DiscrepancyType = Literal[
     "genotype_mismatch",
+    "strand_flip_resolved",
     "strand_ambiguous",
     "build_mismatch",
     "no_call_diff",

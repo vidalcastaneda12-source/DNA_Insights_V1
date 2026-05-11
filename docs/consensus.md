@@ -38,11 +38,12 @@ Three lookup keys, applied in order:
    - **Non-palindromic, complement matches:** the two rows are the same
      biological variant on different strand conventions. Both rows are
      rewritten with `consensus_method = 'disagreement_resolved'`,
-     `contributing_calls = [call_a, call_b]`, and a `genotype_mismatch`
+     `contributing_calls = [call_a, call_b]`, and a `strand_flip_resolved`
      discrepancy with `resolution = 'flipped_strand_match'` is recorded
-     on each. The consensus alleles stay in that row's own ref/alt
-     frame, so `dosage` remains self-consistent with
-     `variants_master.alt_allele`.
+     on each (the discrepancy row exists for audit — it captures which two
+     source calls were reconciled, *not* a real disagreement). The consensus
+     alleles stay in that row's own ref/alt frame, so `dosage` remains
+     self-consistent with `variants_master.alt_allele`.
    - **Non-palindromic, complement does not match:** the two rows stay
      as separate `platform_unique` rows; this could be a multi-allelic
      split or a true allele difference that the cross-source data
@@ -63,25 +64,54 @@ For each `variants_master` row, given the (possibly absent) `23andme` and
 | called    | no-call    | Symmetric.                                                                                                    |
 | called    | called, alleles match (after alphabetical sort) | `both_concordant`. No discrepancy.                                                       |
 | called    | called, alleles differ, palindromic site (A/T or C/G) | `unresolvable` no-call. `strand_ambiguous` discrepancy at `minor` severity.        |
-| called    | called, alleles differ, non-palindromic, complement matches | `disagreement_resolved` using the alleles in this row's frame. `genotype_mismatch` discrepancy with `resolution = 'flipped_strand_match'` at `info` severity. |
+| called    | called, alleles differ, non-palindromic, complement matches | `disagreement_resolved` using the alleles in this row's frame. `strand_flip_resolved` discrepancy with `resolution = 'flipped_strand_match'` at `info` severity. The discrepancy row is an audit trail of a successful reconciliation, not a disagreement. |
 | called    | called, alleles differ, non-palindromic, complement does not match | `unresolvable` no-call. `genotype_mismatch` discrepancy at `major` severity. |
 
 After the per-row resolve, a tier-3 pass detects strand-flip partners across
 `variants_master` rows at the same `(chrom, pos_grch38)`. Matched pairs have
 their two `single_source` consensus rows rewritten to
-`disagreement_resolved`, with `genotype_mismatch` discrepancies whose
+`disagreement_resolved`, with `strand_flip_resolved` discrepancies whose
 `resolution = 'flipped_strand_match'`.
+
+## Discrepancy type catalog
+
+| Discrepancy type | Meaning |
+| ---------------- | ------- |
+| `genotype_mismatch`   | Both platforms produced a call, the alleles do not match, and the complement flip does not reconcile them. A true biological disagreement; consensus held as no-call. |
+| `strand_flip_resolved` | Both platforms produced a call on what looked like opposite strands; the complement flip reconciled them. The resolution was *successful* — this row exists for audit so the dashboard can show which two source calls were merged. It is **not** a disagreement. Emitted both by the per-row resolve (same `variants_master` row, both sources called it) and by the tier-3 cross-row pass (two `variants_master` rows at the same `(chrom, pos)` with complementary alleles). |
+| `strand_ambiguous`    | Site is palindromic (A/T or C/G) and the platforms reported different alleles; strand cannot be inferred from genotype alone. Consensus held as no-call. |
+| `no_call_diff`        | One platform produced a call, the other reported `--` (no-call). Consensus takes the called platform. |
+| `platform_unique`     | The variant only has an active call from one platform (the other platform did not report this site at all). |
+| `build_mismatch`      | Lift-over disagreement between platforms. Not emitted in Phase 3. |
+| `multi_allelic_split` | One platform reports the site biallelic, the other multi-allelic. Not emitted in Phase 3. |
+
+## What triggers a discrepancy row
+
+Discrepancy rows are produced in two distinct situations:
+
+- **Successful reconciliations recorded for audit.** `strand_flip_resolved` is
+  emitted alongside a `disagreement_resolved` consensus when the two platforms
+  reported the same SNP on opposite strands and the complement flip reconciled
+  them. The consensus call is clean; the discrepancy row exists so the
+  dashboard can show which two source calls were unified and so the merge is
+  fully auditable. Severity is always `info`.
+- **Real disagreements.** `genotype_mismatch` (alleles differ even after a
+  complement flip), `strand_ambiguous` (palindromic A/T or C/G with
+  disagreement), and `no_call_diff` (one side called, one side did not) all
+  represent actual mismatches between sources. `genotype_mismatch` and
+  `build_mismatch` are `major`; `strand_ambiguous`, `no_call_diff`, and
+  `multi_allelic_split` are `minor`. `platform_unique` is `info`.
 
 ## Severity assignment
 
-| Discrepancy type     | Phase 3 severity |
-| -------------------- | ---------------- |
-| `genotype_mismatch` (raw, non-resolvable)   | `major`         |
-| `genotype_mismatch` (resolved by strand flip) | `info`        |
-| `strand_ambiguous`   | `minor`          |
-| `no_call_diff`       | `minor`          |
-| `platform_unique`    | `info`           |
-| `build_mismatch`     | `major` (not yet emitted in Phase 3) |
+| Discrepancy type      | Phase 3 severity |
+| --------------------- | ---------------- |
+| `genotype_mismatch`   | `major`          |
+| `strand_flip_resolved` | `info` (always — successful reconciliation, never escalates) |
+| `strand_ambiguous`    | `minor`          |
+| `no_call_diff`        | `minor`          |
+| `platform_unique`     | `info`           |
+| `build_mismatch`      | `major` (not yet emitted in Phase 3) |
 | `multi_allelic_split` | `minor` (not yet emitted in Phase 3) |
 
 Severity escalation to `critical` for variants in ACMG SF genes (per the

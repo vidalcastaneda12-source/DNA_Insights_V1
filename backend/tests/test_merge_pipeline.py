@@ -401,6 +401,12 @@ def test_merge_platform_unique_each_source(
 def test_merge_tier3_strand_flip_resolves_across_rows(
     isolated_settings: dict[str, str],
 ) -> None:
+    """Tier-3 cross-row flip writes ``strand_flip_resolved`` + ``disagreement_resolved``.
+
+    The resolution is *successful* — the audit row is the new
+    ``strand_flip_resolved`` type at ``info`` severity, not the misleading
+    ``genotype_mismatch`` that the earlier classification used.
+    """
     init_databases()
     db = _duckdb_path(isolated_settings)
     with duckdb_connection(db) as conn:
@@ -426,9 +432,60 @@ def test_merge_tier3_strand_flip_resolves_across_rows(
         (8, "disagreement_resolved", "C", "T", 2),
     ]
     assert discs == [
-        (7, "genotype_mismatch", "info", "flipped_strand_match"),
-        (8, "genotype_mismatch", "info", "flipped_strand_match"),
+        (7, "strand_flip_resolved", "info", "flipped_strand_match"),
+        (8, "strand_flip_resolved", "info", "flipped_strand_match"),
     ]
+
+
+def test_merge_distinguishes_resolved_flip_from_genuine_mismatch(
+    isolated_settings: dict[str, str],
+) -> None:
+    """A successful strand flip and a genuine mismatch land in different buckets.
+
+    Variant 7+8 in the corpus are the tier-3 cross-row strand-flip pair: their
+    consensus method is ``disagreement_resolved`` and their discrepancy type is
+    ``strand_flip_resolved`` at ``info`` severity. Variant 2 is a non-palindromic
+    site whose complement flip does **not** reconcile the alleles: its consensus
+    method is ``unresolvable`` and the discrepancy is ``genotype_mismatch`` at
+    ``major`` severity. The two cases must never be conflated.
+    """
+    init_databases()
+    db = _duckdb_path(isolated_settings)
+    with duckdb_connection(db) as conn:
+        _seed(conn, CORPUS)
+    merge_all()
+
+    with duckdb_connection(db, read_only=True) as conn:
+        resolved = conn.execute(
+            "SELECT cg.consensus_method, d.discrepancy_type, d.severity, d.resolution"
+            "  FROM consensus_genotypes cg"
+            "  JOIN discrepancies d ON d.variant_id = cg.variant_id"
+            " WHERE cg.variant_id IN (7, 8)"
+            " ORDER BY cg.variant_id",
+        ).fetchall()
+        unresolved = conn.execute(
+            "SELECT cg.consensus_method, cg.is_no_call,"
+            "       d.discrepancy_type, d.severity, d.resolution"
+            "  FROM consensus_genotypes cg"
+            "  JOIN discrepancies d ON d.variant_id = cg.variant_id"
+            " WHERE cg.variant_id = 2",
+        ).fetchone()
+
+    # Successful tier-3 strand-flip resolutions: clean consensus, audit-only
+    # strand_flip_resolved discrepancy at info severity.
+    assert resolved == [
+        ("disagreement_resolved", "strand_flip_resolved", "info", "flipped_strand_match"),
+        ("disagreement_resolved", "strand_flip_resolved", "info", "flipped_strand_match"),
+    ]
+    # Genuine disagreement that the complement flip cannot reconcile: consensus
+    # held as no-call and the discrepancy is a real genotype_mismatch at major.
+    assert unresolved == (
+        "unresolvable",
+        True,
+        "genotype_mismatch",
+        "major",
+        "unresolved",
+    )
 
 
 def test_merge_is_idempotent(isolated_settings: dict[str, str]) -> None:
@@ -467,8 +524,11 @@ def test_merge_result_summary_counts(isolated_settings: dict[str, str]) -> None:
         "single_source": 3,
         "disagreement_resolved": 2,
     }
+    # genotype_mismatch is strictly the unresolved biological disagreement now;
+    # the 2 tier-3 strand-flip rows land in their own strand_flip_resolved bucket.
     assert result.discrepancy_type_counts == {
-        "genotype_mismatch": 3,  # 1 unresolved + 2 strand-flip
+        "genotype_mismatch": 1,
+        "strand_flip_resolved": 2,
         "strand_ambiguous": 1,
         "no_call_diff": 1,
         "platform_unique": 2,
@@ -480,8 +540,9 @@ def test_merge_result_summary_counts(isolated_settings: dict[str, str]) -> None:
     }
     assert result.strand_flip_resolutions == 2
     # Concordance denominator: concordant + flip-resolved shared variants vs
-    # those plus genuine discords (genotype_mismatch and strand_ambiguous,
-    # minus the flip-resolved cases which are not biological discords).
+    # those plus genuine discords (genotype_mismatch and strand_ambiguous).
+    # strand_flip_resolved rows are successful reconciliations and do not
+    # count against concordance.
     assert result.concordance_rate is not None
     assert 0.5 < result.concordance_rate <= 1.0
 

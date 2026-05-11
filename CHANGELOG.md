@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Tier-3 strand-flip resolutions in the merge pipeline were being classified
+  as `genotype_mismatch` discrepancies. They are now recorded as a new
+  `strand_flip_resolved` discrepancy type with severity `info`. The mechanism
+  was already correct — only the classification changed. Real-data
+  verification on the 23andMe + Ancestry corpus found 106 such rows that
+  should not have been logged as mismatches. The new enum value is added to
+  `discrepancy_type_enum` (schema and DDL), the docs/consensus.md catalog
+  and severity table are updated, and the merge concordance computation no
+  longer needs to subtract resolved flips from the discordant total because
+  they now live in their own bucket.
+
 ### Added
 - **Phase 3 — merge & discrepancy detection.** New `genome.merge` package
   computes `consensus_genotypes` and populates `discrepancies` from the

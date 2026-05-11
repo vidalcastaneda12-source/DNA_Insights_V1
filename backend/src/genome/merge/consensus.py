@@ -203,7 +203,7 @@ def _resolve_both_called(
             ),
             _discrepancy(
                 variant_id=pair.variant_id,
-                dtype="genotype_mismatch",
+                dtype="strand_flip_resolved",
                 severity="info",
                 source_a=a.source,
                 call_a=a,

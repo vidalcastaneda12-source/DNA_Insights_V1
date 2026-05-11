@@ -249,7 +249,7 @@ def _strand_flip_discrepancy(
 ) -> DiscrepancyRow:
     return DiscrepancyRow(
         variant_id=pair.variant_id,
-        discrepancy_type="genotype_mismatch",
+        discrepancy_type="strand_flip_resolved",
         severity="info",
         source_a=self_call.source,
         call_a_id=self_call.call_id,
@@ -463,12 +463,10 @@ def _summarize(
         sev_counts[d.severity] += 1
 
     shared = method_counts["both_concordant"] + method_counts["disagreement_resolved"]
-    discordant = (
-        type_counts["genotype_mismatch"]
-        + type_counts["strand_ambiguous"]
-        - strand_flip_resolutions  # flipped-resolutions are not biological discords
-    )
-    denom = shared + max(discordant, 0)
+    # genotype_mismatch is now strictly unresolved biological disagreement;
+    # successful strand-flip resolutions land in their own discrepancy type.
+    discordant = type_counts["genotype_mismatch"] + type_counts["strand_ambiguous"]
+    denom = shared + discordant
     concordance = float(shared) / float(denom) if denom else None
 
     return MergeResult(

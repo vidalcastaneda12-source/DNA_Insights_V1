@@ -40,7 +40,12 @@ CREATE TYPE consensus_method_enum AS ENUM (
 );
 
 CREATE TYPE discrepancy_type_enum AS ENUM (
-  'genotype_mismatch',         -- both called, different genotypes
+  'genotype_mismatch',         -- both called, different genotypes (no resolution)
+  'strand_flip_resolved',      -- both platforms called the same SNP on opposite
+                               -- strands; reconciled via complement matching, the
+                               -- consensus was produced from the flipped call.
+                               -- This is a SUCCESSFUL resolution recorded for
+                               -- audit; severity is always 'info'.
   'strand_ambiguous',          -- A/T or C/G site; strand cannot be inferred
   'build_mismatch',            -- coordinate disagreement at lift-over
   'no_call_diff',              -- one platform called, the other didn't
@@ -469,14 +474,22 @@ Run during merge, populating `discrepancies`:
 
 | Rule | Type | Severity |
 |---|---|---|
-| Both platforms call, alleles differ (after strand resolution) | `genotype_mismatch` | `major` |
+| Both platforms call, alleles differ, and the complement flip does NOT reconcile them | `genotype_mismatch` | `major` |
+| Both platforms call the same SNP on opposite strands; complement flip reconciles them | `strand_flip_resolved` | `info` (always) |
 | Site is A/T or C/G, alleles match neither strand cleanly | `strand_ambiguous` | `minor` |
 | Lift-over disagrees between platforms | `build_mismatch` | `major` |
 | One platform calls, other reports `--` | `no_call_diff` | `minor` |
 | Variant present on only one chip | `platform_unique` | `info` |
 | One platform reports biallelic, other multi-allelic | `multi_allelic_split` | `minor` |
 
-Severity escalates to `critical` for any of the above when the variant is in an ACMG SF gene (resolved via `variants_master.is_acmg_sf` once group 2 lands).
+`strand_flip_resolved` is recorded for audit — the resolution was *successful*
+(the consensus is produced cleanly from the complement-matched alleles), but
+the discrepancy row preserves which two source calls were reconciled. Its
+severity is always `info` and never escalates.
+
+Severity escalates to `critical` for any of the other rows when the variant is
+in an ACMG SF gene (resolved via `variants_master.is_acmg_sf` once group 2
+lands).
 
 ---
 

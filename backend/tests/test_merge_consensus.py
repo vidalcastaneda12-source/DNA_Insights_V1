@@ -104,7 +104,12 @@ def test_genotype_mismatch_non_palindromic_unresolvable() -> None:
 
 
 def test_strand_flip_resolution_non_palindromic() -> None:
-    """``A/G`` on plus strand vs ``T/C`` on minus strand — complement of T/C is A/G."""
+    """``A/G`` on plus strand vs ``T/C`` on minus strand — complement of T/C is A/G.
+
+    The complement flip succeeds, so the consensus is clean
+    (``disagreement_resolved``) and the discrepancy row is the audit-only
+    ``strand_flip_resolved`` type at ``info`` severity — not a real mismatch.
+    """
     pair = _pair(
         twentythree=_call(call_id=1, source="23andme", a1="A", a2="G"),
         ancestry=_call(call_id=2, source="ancestry", a1="C", a2="T"),  # sorted C/T
@@ -118,7 +123,7 @@ def test_strand_flip_resolution_non_palindromic() -> None:
     assert consensus.contributing_calls == (1, 2)
     assert len(discrepancies) == 1
     disc = discrepancies[0]
-    assert disc.discrepancy_type == "genotype_mismatch"
+    assert disc.discrepancy_type == "strand_flip_resolved"
     assert disc.severity == "info"
     assert disc.resolution == "flipped_strand_match"
 
