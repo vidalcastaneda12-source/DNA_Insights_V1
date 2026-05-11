@@ -42,6 +42,20 @@ A local-first personal DNA insights application that ingests 23andMe + Ancestry 
 - Lift-over can produce non-canonical contigs — a canonical GRCh37 coordinate may map to e.g. `4_GL000008v2_random` on GRCh38. The normalize step re-runs `normalize_chrom` on the post-lift chromosome, drops the row when the result is `None`, and counts it in `ingestion_runs.variants_dropped_lift_to_non_canonical`. The same positive-rule filter is applied at both parse time and normalize time, so the writer's `chromosome_enum` cast never sees a non-canonical label regardless of which engine produced it.
 - Every PR that changes behavior, schema, dependencies, or build steps should add an entry to `CHANGELOG.md` under the `[Unreleased]` section. The entry should be one or two sentences describing what changed and why, with a PR reference. Roll up `[Unreleased]` into a versioned release section when phase milestones land.
 - For bulk loads into DuckDB, use PyArrow Table registration plus `INSERT ... SELECT`, not `executemany`. The latter does not batch-bind and is catastrophically slow at scale.
+- **Schema changes require rebuilding local databases.** After pulling any PR that modifies files under `docs/schemas/` or `ddl/`, run:
+  ```
+  rm -rf data/
+  uv run genome init
+  ```
+  DuckDB enums and table structures don't auto-migrate; existing files stay on the old schema. For workflows that need to preserve ingested data across schema changes, this implies a re-ingest after recreation. With the post-Phase-2 optimized pipeline taking ~16 seconds per file, this is acceptable friction for a personal-use app. A proper migration system would be appropriate if the project ever shifted toward multi-user or production deployment.
+
+## Real-data observations
+
+**23andMe v5 and Ancestry v2 chips have meaningfully different SNP compositions.** Real-data verification exposed two findings worth keeping in mind:
+
+1. **Ancestry v2 does not include Y-chromosome SNPs.** Sex inference from Ancestry data alone returns `ambiguous` for males (correctly, since with no Y data the inference is genuinely undetermined). A profile-level QC rollup that combines per-run inferences across sources should be implemented in Phase 5 or later — until then, the per-source `sex_inferred` field is correct on its own terms but may not be a useful single answer at the profile level.
+
+2. **Heterozygosity rate is chip-dependent.** 23andMe v5 typically lands ~0.17, Ancestry v2 ~0.34 — for the same sample. The two chips target different SNP populations: 23andMe's broader panel includes many common variants where most individuals are homozygous-reference, while Ancestry's panel is curated for ancestry-informative markers with higher MAF and consequently higher heterozygosity. The QC `het_outlier` threshold (if/when introduced) should be calibrated per source or use a wide tolerance that accommodates both ranges. Cross-platform het differences are chip-design signal, not biological signal.
 
 ## Environment requirements
 

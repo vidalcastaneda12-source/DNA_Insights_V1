@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+- Documented schema-change-requires-rebuild convention in `CLAUDE.md`.
+- Documented 23andMe v5 vs Ancestry v2 chip composition differences (Y-chromosome coverage, heterozygosity rate ranges) in `CLAUDE.md`.
+- Stubbed `docs/runbooks/imputation.md` ahead of Phase 4 implementation.
+
 ### Fixed
 - Tier-3 strand-flip resolutions in the merge pipeline were being classified
   as `genotype_mismatch` discrepancies. They are now recorded as a new
