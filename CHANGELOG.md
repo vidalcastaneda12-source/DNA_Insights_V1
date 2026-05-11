@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Phase 3 — merge & discrepancy detection.** New `genome.merge` package
+  computes `consensus_genotypes` and populates `discrepancies` from the
+  active set of `genotype_calls` via the `consensus_v1` rule. The merge
+  pipeline:
+  - Resolves each `variants_master` row using the documented branch table
+    (concordant / single-source / no-call-diff / palindromic-ambiguous /
+    non-palindromic-strand-flip / unresolvable-mismatch).
+  - Detects tier-3 strand-flip partners across `variants_master` rows at
+    the same `(chrom, pos_grch38)` and rewrites both rows' consensus to
+    `disagreement_resolved` with `flipped_strand_match` discrepancies.
+  - Is idempotent: `DELETE`s both tables and rebuilds inside one
+    transaction, so re-running after a re-ingest refreshes the merged view.
+  Severity escalation to `critical` for ACMG SF variants is deliberately
+  deferred to a Phase 5+ enrichment job (the `is_acmg_sf` flag is not yet
+  populated). Tier-2 (rsid-based matching across positions) is deferred to
+  Phase 5 once `variant_aliases` lands.
+- `genome merge` CLI command that runs the pipeline against the configured
+  DuckDB and prints per-method / per-type / per-severity rollups plus the
+  shared-call concordance rate.
+- `docs/consensus.md` documenting the `consensus_v1` rule, dosage /
+  confidence conventions, and the rule's versioning workflow so future
+  rule changes can be tracked cleanly.
+- 52 new tests covering: strand-helper unit cases (complement and
+  palindrome detection across A/T, C/G, and non-DNA tokens), every
+  `consensus_v1` branch as a direct `resolve()` call (`both_concordant`,
+  `genotype_mismatch` resolvable and unresolvable, `strand_ambiguous`,
+  `no_call_diff`, `platform_unique` both directions, double no-call), and
+  end-to-end DB round-trips for each discrepancy type plus the tier-3
+  cross-row strand-flip, idempotence, the merge-result summary counts,
+  the CLI smoke, and the `call_comparison_v` view picking up every
+  consensus row.
+
 ### Performance
 - Rewrote `writer._stage_calls` to bulk-load via PyArrow Table registration +
   `INSERT ... SELECT` instead of DuckDB's `executemany`. `executemany` does
