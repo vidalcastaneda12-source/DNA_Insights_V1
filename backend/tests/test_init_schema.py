@@ -219,6 +219,17 @@ def test_seed_user_preferences_present(isolated_settings: dict[str, str]) -> Non
     assert rows["default_audience"] == "layperson"
 
 
+def test_external_calls_enabled_seeded_false(isolated_settings: dict[str, str]) -> None:
+    """The privacy master switch must default to off — fail-closed per CLAUDE.md decision #9."""
+    init_databases()
+    with sqlcipher_connection(Path(isolated_settings["APP_DB_PATH"])) as conn:
+        row = conn.execute(
+            "SELECT pref_value, value_type FROM user_preferences"
+            " WHERE pref_key = 'external_calls_enabled'",
+        ).fetchone()
+    assert row == ("false", "boolean")
+
+
 def test_init_is_idempotent(isolated_settings: dict[str, str]) -> None:  # noqa: ARG001
     first = init_databases()
     second = init_databases()

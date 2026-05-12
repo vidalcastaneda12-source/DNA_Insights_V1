@@ -64,13 +64,56 @@ def test_disabled_master_switch_blocks_call_and_raises(
 ) -> None:
     init_databases()
     _disable_external_calls()
-    # No request reaches the transport — the precheck raises first.
+    # No request reaches the transport — the disabled check raises first, but
+    # only after the intent + blocked audit rows are written.
     with _mock_client(lambda _r: httpx.Response(200, text="never seen")) as transport_client:
         client = ExternalClient("topmed", client=transport_client)
         with pytest.raises(ExternalCallsDisabledError, match="genome config set"):
             client.request("GET", "https://example/x", resource_type="t")
-    # No audit rows: the precheck happens before the intent write.
-    assert _audit_rows() == []
+    # Two rows: the intent precedes the disabled-check, and a blocked result
+    # row is written before the exception escapes. Blocked attempts must leave
+    # a database trace per the "every external-facing operation is audited"
+    # guarantee in CLAUDE.md decision #9.
+    rows = _audit_rows()
+    assert len(rows) == 2
+    intent, blocked = rows
+    intent_details = json.loads(str(intent[3]))
+    blocked_details = json.loads(str(blocked[3]))
+    assert intent_details == {"method": "GET", "phase": "intent"}
+    assert blocked_details["phase"] == "result"
+    assert blocked_details["status"] == "blocked"
+    assert blocked_details["blocked"] is True
+    assert blocked_details["method"] == "GET"
+    assert "duration_ms" in blocked_details
+    # Both rows tag the call as external and share endpoint + payload hash.
+    assert intent[4] == 1
+    assert blocked[4] == 1
+    assert intent[5] == blocked[5] == "topmed"
+    assert intent[6] == blocked[6]
+
+
+def test_disabled_master_switch_writes_blocked_pair_for_download(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+    tmp_path: Path,
+) -> None:
+    """The blocked-attempt audit pair applies to ``download`` as well as ``request``."""
+    init_databases()
+    _disable_external_calls()
+    dest = tmp_path / "never.zip"
+    with _mock_client(lambda _r: httpx.Response(200, content=b"x")) as transport_client:
+        client = ExternalClient("topmed", client=transport_client)
+        with pytest.raises(ExternalCallsDisabledError):
+            client.download(
+                "https://example/zip",
+                str(dest),
+                resource_type="imputation_run",
+                resource_id="999",
+            )
+    assert not dest.exists()
+    rows = _audit_rows()
+    assert len(rows) == 2
+    assert json.loads(str(rows[0][3]))["phase"] == "intent"
+    assert json.loads(str(rows[1][3]))["status"] == "blocked"
 
 
 def test_successful_call_writes_two_audit_rows_with_matching_payload_hash(

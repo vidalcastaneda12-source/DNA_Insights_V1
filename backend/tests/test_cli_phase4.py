@@ -44,8 +44,9 @@ def test_config_get_returns_seeded_value(
     runner = CliRunner()
     result = runner.invoke(app, ["config", "get", "external_calls_enabled"])
     assert result.exit_code == 0
-    # Seed default is 'true' (per init_schema.py USER_PREFERENCES_SEED).
-    assert "true" in result.output
+    # Seed default is 'false' (per init_schema.py USER_PREFERENCES_SEED). The
+    # privacy master switch is fail-closed per CLAUDE.md decision #9.
+    assert "false" in result.output
     assert "value_type=boolean" in result.output
 
 
@@ -66,7 +67,7 @@ def test_config_set_updates_existing_key_and_writes_audit_row(
     runner = CliRunner()
     result = runner.invoke(
         app,
-        ["config", "set", "external_calls_enabled", "false"],
+        ["config", "set", "external_calls_enabled", "true"],
     )
     assert result.exit_code == 0
     # The new value is reflected in the DB.
@@ -79,12 +80,12 @@ def test_config_set_updates_existing_key_and_writes_audit_row(
             "SELECT action_type, resource_id, operation_details "
             "FROM audit_log WHERE action_type='config_change'",
         ).fetchall()
-    assert value == "false"
+    assert value == "true"
     assert len(audit_rows) == 1
     assert audit_rows[0][1] == "external_calls_enabled"
     # Operation details JSON should reflect old → new transition.
-    assert "true" in audit_rows[0][2]
     assert "false" in audit_rows[0][2]
+    assert "true" in audit_rows[0][2]
 
 
 def test_config_set_requires_value_type_for_new_key(

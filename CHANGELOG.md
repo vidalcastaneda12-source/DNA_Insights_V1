@@ -102,6 +102,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CLAUDE.md schema-change convention.
 
 ### Fixed
+- Seeded default for `user_preferences.external_calls_enabled`. Previously
+  seeded as `true`, contradicting the locked privacy decision in CLAUDE.md
+  (#9) and the documented schema. New databases now correctly seed this as
+  `false`; the schema markdown's suggested-seed table is corrected to
+  match. The privacy master switch is fail-closed by default.
+- Blocked external-call attempts (when `external_calls_enabled=false`) now
+  write audit rows. Previously, the disabled check in
+  `genome.privacy.external_client._audited_attempt` raised before the
+  intent row was inserted, so blocked attempts left no database trace —
+  only stdout. The intent row is now written before the enabled-check, and
+  a second `blocked` result row is written before
+  `ExternalCallsDisabledError` is raised. Existing success and failure
+  audit pairs are unchanged.
 - Tier-3 strand-flip resolutions in the merge pipeline were being classified
   as `genotype_mismatch` discrepancies. They are now recorded as a new
   `strand_flip_resolved` discrepancy type with severity `info`. The mechanism

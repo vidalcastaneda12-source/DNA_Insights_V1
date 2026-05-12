@@ -38,7 +38,7 @@ logger = structlog.get_logger(__name__)
 HttpMethod = Literal["GET", "POST", "PUT", "DELETE", "HEAD"]
 """HTTP verbs the client supports. Add more as new external endpoints arrive."""
 
-CallStatus = Literal["success", "failure"]
+CallStatus = Literal["success", "failure", "blocked"]
 
 _DEFAULT_TIMEOUT_S: Final[float] = 30.0
 _HASH_CHUNK_SIZE: Final[int] = 1 << 20  # 1 MiB
@@ -221,15 +221,18 @@ def _audited_attempt(  # noqa: PLR0913 — every parameter is meaningful audit m
     action_type: str,
     profile_id: int | None,
 ) -> Iterator[None]:
-    """Wrap one HTTP attempt with an enabled-check + intent-then-result audit pair.
+    """Wrap one HTTP attempt with an intent-then-result audit pair.
 
-    On entry: confirms the master switch is on (raises ``ExternalCallsDisabledError``
-    otherwise) and writes an ``intent`` audit row.
+    On entry: writes an ``intent`` audit row, then checks the master switch.
+    If external calls are disabled, writes a second ``blocked`` result row and
+    raises :class:`ExternalCallsDisabledError`. Recording the intent *before*
+    the enabled-check means blocked attempts — arguably the most important
+    privacy events to capture — leave a database trace, not just stdout.
 
-    On exit: writes a second audit row recording ``success`` or ``failure`` with
-    the exception text (when applicable). Both rows share the same payload
-    hash, so a log reader can group an intent / outcome pair by ``(endpoint,
-    payload_hash, timestamp)``.
+    On exit (when the call ran): writes a second audit row recording
+    ``success`` or ``failure`` with the exception text (when applicable). Both
+    rows share the same payload hash, so a log reader can group an intent /
+    outcome pair by ``(endpoint, payload_hash, timestamp)``.
 
     The two-row pattern means an attempt that crashes mid-flight (e.g. process
     SIGKILL) still leaves the intent row, so the user can see *something* was
@@ -237,8 +240,6 @@ def _audited_attempt(  # noqa: PLR0913 — every parameter is meaningful audit m
     """
     started = time.monotonic()
     with _open_audit_db() as conn:
-        if not _read_external_calls_enabled(conn):
-            raise ExternalCallsDisabledError
         _insert_audit_row(
             conn,
             action_type=action_type,
@@ -249,6 +250,28 @@ def _audited_attempt(  # noqa: PLR0913 — every parameter is meaningful audit m
             external_payload_hash=payload_hash,
             profile_id=profile_id,
         )
+        enabled = _read_external_calls_enabled(conn)
+
+    if not enabled:
+        duration_ms = int((time.monotonic() - started) * 1000)
+        with _open_audit_db() as conn:
+            _insert_audit_row(
+                conn,
+                action_type=action_type,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                operation_details={
+                    "method": method,
+                    "phase": "result",
+                    "status": "blocked",
+                    "blocked": True,
+                    "duration_ms": duration_ms,
+                },
+                external_endpoint=endpoint,
+                external_payload_hash=payload_hash,
+                profile_id=profile_id,
+            )
+        raise ExternalCallsDisabledError
 
     error: BaseException | None = None
     try:
