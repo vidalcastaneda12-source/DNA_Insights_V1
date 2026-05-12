@@ -16,14 +16,44 @@ from genome.config import get_settings
 from genome.db.duckdb_conn import duckdb_connection
 from genome.db.init_schema import init_databases
 from genome.db.sqlite_conn import sqlcipher_connection
+from genome.imputation import (
+    check_status,
+    download_result,
+    import_result,
+    list_runs,
+    prepare_run,
+)
 from genome.ingest import Source, ingest_file
 from genome.ingest.liftover import LiftoverEngine
 from genome.merge import merge_all
+from genome.privacy.external_client import write_config_change_audit
 
 _VALID_INGEST_SOURCES: tuple[str, ...] = tuple(s for s in get_args(Source) if s != "topmed_imputed")
 _VALID_LIFTOVER_ENGINES: tuple[str, ...] = tuple(get_args(LiftoverEngine))
 
+# Allowed value_types for `genome config set` — must stay in sync with the
+# CHECK constraint on user_preferences.value_type.
+_VALID_PREF_VALUE_TYPES: tuple[str, ...] = ("string", "number", "boolean", "json")
+
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="DNA insights CLI")
+imputation_app = typer.Typer(
+    no_args_is_help=True,
+    add_completion=False,
+    help=(
+        "Run the merged genotype set through the TopMed Imputation Server.\n\n"
+        "The workflow is partially manual: TopMed's free tier does not expose a\n"
+        "programmatic upload, so the user uploads through TopMed's web UI in\n"
+        "between `prepare` and `status`. See docs/runbooks/imputation.md for\n"
+        "the full walkthrough."
+    ),
+)
+config_app = typer.Typer(
+    no_args_is_help=True,
+    add_completion=False,
+    help="Read and write user_preferences from the CLI.",
+)
+app.add_typer(imputation_app, name="imputation")
+app.add_typer(config_app, name="config")
 
 
 def _configure_logging() -> None:
@@ -210,6 +240,271 @@ def merge() -> None:
         typer.echo(f"severity: {sevs}")
     if result.concordance_rate is not None:
         typer.echo(f"shared-call concordance rate: {result.concordance_rate:.4f}")
+
+
+# -----------------------------------------------------------------------------
+# `genome config` — read / write user_preferences
+# -----------------------------------------------------------------------------
+
+
+@config_app.command("get")
+def config_get(
+    key: Annotated[str, typer.Argument(help="Preference key, e.g. 'external_calls_enabled'.")],
+) -> None:
+    """Print the current value of one user_preferences key.
+
+    Exit code is 0 even when the key is missing; the output line distinguishes
+    "missing" from a present-but-empty value. Use this to script preference
+    inspection.
+    """
+    with sqlcipher_connection() as conn:
+        row = conn.execute(
+            "SELECT pref_value, value_type FROM user_preferences WHERE pref_key = ?",
+            (key,),
+        ).fetchone()
+    if row is None:
+        typer.echo(f"{key}: <not set>")
+        return
+    typer.echo(f"{key}: {row[0]} (value_type={row[1]})")
+
+
+@config_app.command("set")
+def config_set(
+    key: Annotated[str, typer.Argument(help="Preference key.")],
+    value: Annotated[str, typer.Argument(help="New value, as a string. See --value-type.")],
+    value_type: Annotated[
+        str,
+        typer.Option(
+            "--value-type",
+            help=(
+                "Pref's value_type. Required only when creating a new key. "
+                "One of: 'string', 'number', 'boolean', 'json'."
+            ),
+        ),
+    ] = "",
+) -> None:
+    """Insert or update a user_preferences row.
+
+    Every change writes a ``config_change`` row to ``audit_log`` so the
+    history of preference changes is auditable.
+
+    The most common use of this command is enabling external calls before
+    Phase 4 imputation::
+
+        genome config set external_calls_enabled true
+    """
+    with sqlcipher_connection() as conn:
+        existing = conn.execute(
+            "SELECT pref_value, value_type FROM user_preferences WHERE pref_key = ?",
+            (key,),
+        ).fetchone()
+        if existing is None:
+            if not value_type:
+                msg = (
+                    f"key {key!r} does not exist; pass --value-type to create it "
+                    f"(one of: {list(_VALID_PREF_VALUE_TYPES)})"
+                )
+                raise typer.BadParameter(msg)
+            if value_type not in _VALID_PREF_VALUE_TYPES:
+                msg = (
+                    f"invalid --value-type {value_type!r}; "
+                    f"expected one of {list(_VALID_PREF_VALUE_TYPES)}"
+                )
+                raise typer.BadParameter(msg)
+            conn.execute(
+                "INSERT INTO user_preferences (pref_key, pref_value, value_type) VALUES (?, ?, ?)",
+                (key, value, value_type),
+            )
+            old_value: str | None = None
+        else:
+            old_value = str(existing[0])
+            conn.execute(
+                "UPDATE user_preferences SET pref_value = ? WHERE pref_key = ?",
+                (value, key),
+            )
+        conn.commit()
+
+    write_config_change_audit(pref_key=key, old_value=old_value, new_value=value)
+    typer.echo(f"{key}: {value} (was: {old_value if old_value is not None else '<not set>'})")
+
+
+# -----------------------------------------------------------------------------
+# `genome imputation` — TopMed roundtrip
+# -----------------------------------------------------------------------------
+
+
+@imputation_app.command("prepare")
+def imputation_prepare(
+    sample_id: Annotated[
+        str,
+        typer.Option(
+            "--sample-id",
+            help="Sample name for the VCF sample column. Used by TopMed as a label.",
+        ),
+    ] = "sample",
+    force_new: Annotated[  # noqa: FBT002 — typer boolean flag, --force-new is opt-in
+        bool,
+        typer.Option(
+            "--force-new",
+            help=(
+                "Create a new imputation run even if one is already pending/processing. "
+                "Use this only when intentionally starting over (e.g. the previous run "
+                "was abandoned)."
+            ),
+        ),
+    ] = False,
+) -> None:
+    """Export the merged consensus genotype set as per-chromosome VCFs.
+
+    Writes files under archive/imputation/run_<id>/upload/. After this completes,
+    the user uploads the files to TopMed's web UI (the runbook describes the form
+    fields). Polling and download are subsequent commands.
+    """
+    result = prepare_run(sample_id=sample_id, force_new=force_new)
+    typer.echo(
+        f"imputation_id={result.imputation_id} "
+        f"variants={result.variants_total} "
+        f"chroms_exported={sorted(result.variants_per_chrom)} "
+        f"upload_dir={result.archive.upload_dir}",
+    )
+    typer.echo(
+        "Next step: upload the per-chromosome VCFs to the TopMed Imputation Server.",
+    )
+    typer.echo(
+        "See docs/runbooks/imputation.md for the exact web-UI form fields.",
+    )
+
+
+@imputation_app.command("status")
+def imputation_status(
+    imputation_id: Annotated[int, typer.Argument(help="Run ID from `genome imputation prepare`.")],
+    status_url: Annotated[
+        str,
+        typer.Option(
+            "--status-url",
+            help=(
+                "TopMed job status URL. Copy from the job details page in the web UI "
+                "(of the form `https://imputation.../api/v2/jobs/<job_id>`)."
+            ),
+        ),
+    ],
+) -> None:
+    """Poll TopMed for a job and update this run's status.
+
+    Idempotent: safe to re-run. Writes an audit_log row per attempt.
+    """
+    parsed = check_status(imputation_id, status_url=status_url)
+    typer.echo(
+        f"imputation_id={imputation_id} status={parsed.status} "
+        f"raw_state={parsed.raw_state} job_id={parsed.job_id} "
+        f"completed_at={parsed.completed_at or '-'}",
+    )
+    if parsed.status == "completed":
+        typer.echo(
+            f"Next step: download the result archive with "
+            f"`genome imputation download {imputation_id} --download-url ... --password ...`",
+        )
+    elif parsed.status == "failed":
+        typer.echo(
+            "TopMed reports failure. Check the job's details page for the error, "
+            "then resubmit (a new `genome imputation prepare --force-new` will "
+            "create a fresh run).",
+        )
+
+
+@imputation_app.command("download")
+def imputation_download(
+    imputation_id: Annotated[int, typer.Argument(help="Run ID.")],
+    download_url: Annotated[
+        str,
+        typer.Option(
+            "--download-url",
+            help=(
+                "Encrypted-archive download URL from TopMed's results email or web UI. "
+                "Direct link to the zip file."
+            ),
+        ),
+    ],
+    password: Annotated[
+        str,
+        typer.Option(
+            "--password",
+            help=(
+                "AES-256 password TopMed sent in the upload confirmation email. "
+                "Used only to surface in the runbook step that follows; not stored."
+            ),
+            prompt=True,
+            hide_input=True,
+        ),
+    ],
+) -> None:
+    """Download the encrypted result archive into archive/imputation/run_<id>/result/.
+
+    The archive is **encrypted**. After download, decrypt with the password you
+    supplied (the runbook walks through this — typically `7z x -p<password>
+    topmed_result.zip`).
+    """
+    dest = download_result(
+        imputation_id,
+        download_url=download_url,
+        password=password,
+    )
+    typer.echo(f"imputation_id={imputation_id} downloaded_to={dest}")
+    typer.echo(
+        "Next step: decrypt the archive (see docs/runbooks/imputation.md), "
+        "then run `genome imputation import <id>`.",
+    )
+
+
+@imputation_app.command("import")
+def imputation_import(
+    imputation_id: Annotated[int, typer.Argument(help="Run ID.")],
+) -> None:
+    """Stream the imputed VCFs into the database.
+
+    Reads archive/imputation/run_<id>/result/chr*.dose.vcf.gz files (the
+    decrypted TopMed output) and writes ``genotype_calls`` rows with
+    ``source='topmed_imputed'``, plus a fresh ``ingestion_runs`` row and
+    ``sample_qc`` row.
+
+    Idempotent: re-importing supersedes prior imputed calls for the same
+    positions rather than duplicating.
+    """
+    result = import_result(imputation_id)
+    mean_r2 = f"{result.mean_r2:.4f}" if result.mean_r2 is not None else "-"
+    typer.echo(
+        f"imputation_id={result.imputation_id} ingestion_run_id={result.ingestion_run_id} "
+        f"qc_id={result.qc_id} variants={result.variants_total} "
+        f"called={result.variants_called} no_call={result.variants_no_call} "
+        f"new_master_rows={result.new_variants_master_rows} "
+        f"deactivated_prior={result.deactivated_prior_calls} "
+        f"mean_r2={mean_r2} "
+        f"r2_above_0.3={result.variants_above_r2_0_3} "
+        f"r2_above_0.8={result.variants_above_r2_0_8}",
+    )
+    typer.echo(
+        "Next step: re-run `genome merge` to refresh consensus across all three sources.",
+    )
+
+
+@imputation_app.command("list")
+def imputation_list() -> None:
+    """Show all imputation_runs rows with current status, timing, and key stats."""
+    runs = list_runs()
+    if not runs:
+        typer.echo("(no imputation runs yet — start with `genome imputation prepare`)")
+        return
+    for r in runs:
+        typer.echo(
+            f"#{r.imputation_id:04d} "
+            f"status={r.status} "
+            f"server={r.imputation_server} panel={r.reference_panel or '-'} "
+            f"submitted={r.submitted_at or '-'} "
+            f"completed={r.completed_at or '-'} "
+            f"variants_in={r.variants_input if r.variants_input is not None else '-'} "
+            f"variants_out={r.variants_output if r.variants_output is not None else '-'} "
+            f"mean_r2={r.mean_r2 if r.mean_r2 is not None else '-'}",
+        )
 
 
 @app.command()

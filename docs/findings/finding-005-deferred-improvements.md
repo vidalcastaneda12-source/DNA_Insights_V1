@@ -43,6 +43,19 @@ manageable. This document tracks them so they aren't forgotten.
    job re-walks discrepancies and bumps severity once ACMG SF flags are in
    place.
 
+6. **TopMed upload misses hom-only positions until canonical REF/ALT is
+   loaded.** Phase 4's `genome imputation prepare` filters out variants
+   where `ref_allele == alt_allele`, because Phase 2's alphabetical-ordering
+   normalize sets both fields to the same base for positions where every
+   observation is homozygous. TopMed cannot impute against `ref=A alt=A`
+   rows, so they are dropped from the upload. In practice this excludes a
+   large fraction of the chip — typical individuals are hom-ref at most
+   common SNPs. Imputation still works against the polymorphic subset.
+   *Recommended fix point:* Phase 5 dbSNP load populates `variant_aliases`
+   with canonical REF/ALT; a follow-on prepare step can rewrite the
+   filtered positions and recover the dropped rows. Tracked in the Phase 4
+   runbook's "compression note" section.
+
 ## Implication
 
 Each item is a known limitation with an identified fix point. They are not

@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Phase 4 — imputation roundtrip.** New `genome.imputation` package and
+  `genome.privacy.external_client` introduce the workflow for sending the
+  merged genotype set through the TopMed Imputation Server and ingesting the
+  ~30M-variant imputed result. The workflow is partially manual — TopMed
+  does not expose a programmatic upload API for free-tier users — but the
+  local code handles preparation, status polling, download, decryption
+  hand-off, and ingest. Highlights:
+  - `genome imputation prepare` exports `consensus_genotypes` joined to
+    `variants_master` as per-chromosome VCFv4.2 files (gzipped, GRCh38,
+    chr-prefixed contigs, dosage-derived genotypes) under
+    `archive/imputation/run_<id>/upload/`, plus a JSON manifest, and inserts
+    an `imputation_runs` row in `status='pending'`.
+  - `genome imputation status <id> --status-url <url>` polls TopMed
+    (Cloudgene API) and maps `state` to the `imputation_runs.status` enum
+    (`pending` / `processing` / `completed` / `failed`). Idempotent — safe
+    to re-run; stamps `submitted_at` once.
+  - `genome imputation download <id> --download-url <url> --password <pw>`
+    streams the encrypted result archive to
+    `archive/imputation/run_<id>/result/topmed_result.zip`, records the
+    SHA-256 on `imputation_runs.output_file_hash_sha256`, and short-circuits
+    when the archive is already present with a matching hash.
+  - `genome imputation import <id>` streams the decrypted per-chromosome
+    VCFs through cyvcf2, batches 50K rows per Arrow Table, and bulk-inserts
+    into `variants_master` and `genotype_calls`
+    (`source='topmed_imputed'`, `is_imputed=TRUE`, `imputation_panel='topmed_r3'`,
+    `imputation_r2` from INFO/R2). Computes a `sample_qc` row for the imputed
+    sample and backfills `variants_output`, `mean_r2`,
+    `variants_above_r2_0_3`, and `variants_above_r2_0_8` on the run row.
+    Memory stays bounded by streaming per chromosome.
+  - `genome imputation list` enumerates all `imputation_runs` rows for
+    quick state-of-the-world inspection.
+  - 30M extrapolation: a 1M-row benchmark test on the streaming ingest
+    completes in well under the 60-second guard ceiling, putting the
+    full TopMed roundtrip at roughly 30 minutes.
+- **Audited external HTTP client** (`genome.privacy.external_client.ExternalClient`).
+  Single chokepoint for any network call the app makes. Enforces
+  `user_preferences.external_calls_enabled` (raising a clear, actionable
+  error when disabled), hashes request bodies SHA-256 and writes the hash to
+  `audit_log.external_payload_hash` (never the body — privacy posture is
+  locked in `CLAUDE.md`), and produces one intent row plus one outcome row
+  per attempt so a process killed mid-call still leaves an audit trace.
+  Built on httpx; injectable `httpx.Client` makes mocked transports trivial
+  in tests. Future Phase-5+ consumers (MyVariant.info, PubMed, R2, etc.)
+  will reuse it untouched.
+- **`genome config get` / `genome config set`** CLI subcommands. Read and
+  write `user_preferences` rows. Every `set` writes a `config_change` row
+  to `audit_log` so preference history is auditable. The most common use is
+  flipping `external_calls_enabled` before the TopMed roundtrip.
+- **Imputation runbook complete.** `docs/runbooks/imputation.md` now walks
+  through every step end to end, including the TopMed web-UI form field
+  values, encryption password handling, decryption with 7-Zip, common
+  failure modes, and an audit-log review query.
+- 81 new tests covering: the audited HTTP client's enable-check / hash /
+  audit invariants across success, network error, HTTP 4xx, HTTP 5xx,
+  retry, and download paths; `imputation_runs` CRUD round-trips; archive
+  layout (path shape, permissions, listing); VCF export field shapes and
+  TopMed-specific filters (SNV-only, biallelic, genotype rendering, contig
+  order); TopMed state-code mapping (integer codes and string labels);
+  status polling DB-state transitions and idempotence; download streaming
+  and hash-match short-circuit; the streaming ingest's schema-correct
+  writes, no-call handling, supersession-over-update on re-import; a 1M-row
+  benchmark; and CLI smoke for every new subcommand.
+
 ### Documentation
 - Added `docs/findings/` directory with five documents capturing real-data observations from Phase 2 and Phase 3: lift-over engine selection, platform overlap and concordance, chip composition differences, DuckDB bulk-load pattern, and deferred improvements list.
 - Documented schema-change-requires-rebuild convention in `CLAUDE.md`.
