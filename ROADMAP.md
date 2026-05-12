@@ -24,14 +24,20 @@ Project layout, DDL extraction, DB initialization, config, CLI, basic tests. **V
 
 **Verification:** known mismatches in fixture data are correctly flagged; concordance rate computed; per-source counts match the Venn-diagram view.
 
-## Phase 4 — Imputation roundtrip
-- Export merged calls to VCF
-- Manual upload to TopMed Imputation Server (documented runbook in `docs/runbooks/`)
-- `imputation_monitor` job polls for completion
-- Download, parse, integrate imputed variants with `imputation_r2` per call
-- CLI: `genome imputation submit | status | import`
+## Phase 4 — Local imputation (Beagle 5.5)
+- Export merged consensus calls to per-chromosome VCFs (autosomes + X + Y)
+- Run Beagle 5.5 locally against the 1000 Genomes Phase 3 reference
+  panel on GRCh38, with the corresponding PLINK genetic map
+- Parse imputed VCFs; integrate with imputation_dr2 (Beagle's INFO/DR2)
+  per call
+- Reference panel management: standard on-disk location under
+  ~/.cache/genome/imputation/, validation, optional one-time download
+- CLI: `genome imputation prepare | run | import | list` plus
+  `genome imputation panel install | status` for one-time setup
 
-**Verification:** end-to-end roundtrip works on a small chromosome subset; `is_imputed` flags correct; R² distribution looks sane.
+**Verification:** end-to-end roundtrip works on chr22 alone first;
+`is_imputed` flags correct; DR² distribution sane; full-genome run
+completes against real 23andMe + Ancestry corpus.
 
 ## Phase 5 — Reference annotation loaders
 - Per-source downloaders (ClinVar, GWAS Catalog, PharmGKB, CPIC, PGS Catalog metadata, gnomAD filtered, dbSNP filtered, genes, traits, pathways)

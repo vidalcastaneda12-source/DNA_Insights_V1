@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Phase 4 pivots from external TopMed imputation to local Beagle 5.5
+  imputation.** Real-data verification showed TopMed rejects single-sample
+  submissions in ~50 seconds with a 20-sample minimum that cannot be
+  worked around safely; `finding-006-topmed-not-viable-for-personal-genomics.md`
+  documents the rationale. `ROADMAP.md` Phase 4 is updated to describe
+  the local Beagle workflow (per-chromosome VCFs, 1000 Genomes Phase 3
+  reference panel on disk, `imputation_dr2` from Beagle's INFO/DR2, new
+  `genome imputation panel install | status` subcommands).
+
 ### Added
 - **Phase 4 — imputation roundtrip.** New `genome.imputation` package and
   `genome.privacy.external_client` introduce the workflow for sending the
