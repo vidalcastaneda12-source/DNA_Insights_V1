@@ -20,7 +20,15 @@ TopMed lands in ``audit_log``.
 from __future__ import annotations
 
 from genome.imputation.archive import ImputationArchive
-from genome.imputation.ingest import IMPUTATION_PIPELINE_VERSION, import_result
+from genome.imputation.ingest import (
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_R2_THRESHOLD,
+    IMPUTATION_PIPELINE_VERSION,
+    DryRunResult,
+    ImportResult,
+    import_result,
+    parse_chromosomes_filter,
+)
 from genome.imputation.runs import (
     ImputationRun,
     list_runs,
@@ -41,10 +49,14 @@ from genome.imputation.vcf_export import (
 )
 
 __all__ = [
+    "DEFAULT_BATCH_SIZE",
+    "DEFAULT_R2_THRESHOLD",
     "EXPORT_PIPELINE_VERSION",
     "IMPUTATION_PIPELINE_VERSION",
     "TOPMED_ENDPOINT_LABEL",
     "TOPMED_PANEL",
+    "DryRunResult",
+    "ImportResult",
     "ImputationArchive",
     "ImputationRun",
     "PreparedUpload",
@@ -54,6 +66,7 @@ __all__ = [
     "download_result",
     "import_result",
     "list_runs",
+    "parse_chromosomes_filter",
     "prepare_run",
     "update_status",
 ]

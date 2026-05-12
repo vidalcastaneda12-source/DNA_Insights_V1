@@ -36,7 +36,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `imputation_r2` from INFO/R2). Computes a `sample_qc` row for the imputed
     sample and backfills `variants_output`, `mean_r2`,
     `variants_above_r2_0_3`, and `variants_above_r2_0_8` on the run row.
-    Memory stays bounded by streaming per chromosome.
+    Memory stays bounded by streaming per chromosome. Operational controls
+    on the command:
+      - `--r2-threshold <float>` (default `0.3`) skips variants whose
+        `INFO/R2` falls below the threshold; the value used is persisted on
+        `imputation_runs.r2_threshold` (new column, see schema change below).
+      - `--chromosomes <list>` (comma-separated) limits the import to the
+        named chromosomes — useful for partial recovery or testing.
+      - `--batch-size <int>` (default `50_000`) tunes the Arrow Table batch
+        size for memory-constrained machines.
+      - `--dry-run` parses each VCF and reports expected variant counts plus
+        an estimated wall-clock time, writing nothing to the database.
+      - `--force-reimport` is required to re-import against a run whose
+        `variants_output` is already populated; without it the command
+        aborts with a clear "already imported" error. The existing
+        supersession-over-update pattern handles the data-side semantics
+        once the flag is present.
   - `genome imputation list` enumerates all `imputation_runs` rows for
     quick state-of-the-world inspection.
   - 30M extrapolation: a 1M-row benchmark test on the streaming ingest
@@ -76,6 +91,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Documented schema-change-requires-rebuild convention in `CLAUDE.md`.
 - Documented 23andMe v5 vs Ancestry v2 chip composition differences (Y-chromosome coverage, heterozygosity rate ranges) in `CLAUDE.md`.
 - Stubbed `docs/runbooks/imputation.md` ahead of Phase 4 implementation.
+
+### Schema
+- Added `imputation_runs.r2_threshold` (`DOUBLE`, nullable) to record the
+  import-time R² filter applied to a run. Rows that predate this column
+  remain `NULL`. Schema markdown
+  (`docs/schemas/schema_group_1_genotype_data.md`) and the extracted DDL
+  (`ddl/group_1_genotype.sql`) are updated together; existing local DuckDB
+  files need a rebuild (`rm -rf data/ && uv run genome init`) per the
+  CLAUDE.md schema-change convention.
 
 ### Fixed
 - Tier-3 strand-flip resolutions in the merge pipeline were being classified

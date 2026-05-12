@@ -57,6 +57,7 @@ class ImputationRun:
     mean_r2: float | None
     variants_above_r2_0_3: int | None
     variants_above_r2_0_8: int | None
+    r2_threshold: float | None
     output_file_path: str | None
     output_file_hash_sha256: str | None
     pipeline_version: str
@@ -113,7 +114,7 @@ def fetch_run(conn: DuckDBPyConnection, imputation_id: int) -> ImputationRun | N
             CAST(submitted_at AS VARCHAR), CAST(completed_at AS VARCHAR),
             CAST(status AS VARCHAR),
             variants_input, variants_output, mean_r2,
-            variants_above_r2_0_3, variants_above_r2_0_8,
+            variants_above_r2_0_3, variants_above_r2_0_8, r2_threshold,
             output_file_path, output_file_hash_sha256, pipeline_version
         FROM imputation_runs
         WHERE imputation_id = ?
@@ -144,6 +145,7 @@ def _row_to_dataclass(row: tuple[object, ...]) -> ImputationRun:
         mean_r2,
         above_03,
         above_08,
+        r2_threshold,
         out_path,
         out_hash,
         pipeline_v,
@@ -166,6 +168,7 @@ def _row_to_dataclass(row: tuple[object, ...]) -> ImputationRun:
         mean_r2=None if mean_r2 is None else float(mean_r2),  # type: ignore[arg-type]
         variants_above_r2_0_3=None if above_03 is None else int(above_03),  # type: ignore[call-overload]
         variants_above_r2_0_8=None if above_08 is None else int(above_08),  # type: ignore[call-overload]
+        r2_threshold=None if r2_threshold is None else float(r2_threshold),  # type: ignore[arg-type]
         output_file_path=None if out_path is None else str(out_path),
         output_file_hash_sha256=None if out_hash is None else str(out_hash),
         pipeline_version=str(pipeline_v),
@@ -190,7 +193,7 @@ def list_all(conn: DuckDBPyConnection) -> list[ImputationRun]:
             CAST(submitted_at AS VARCHAR), CAST(completed_at AS VARCHAR),
             CAST(status AS VARCHAR),
             variants_input, variants_output, mean_r2,
-            variants_above_r2_0_3, variants_above_r2_0_8,
+            variants_above_r2_0_3, variants_above_r2_0_8, r2_threshold,
             output_file_path, output_file_hash_sha256, pipeline_version
         FROM imputation_runs
         ORDER BY imputation_id DESC
@@ -256,10 +259,13 @@ def record_import_volumes(  # noqa: PLR0913 — schema fields are not collapsibl
     mean_r2: float | None,
     variants_above_r2_0_3: int,
     variants_above_r2_0_8: int,
+    r2_threshold: float | None,
 ) -> None:
     """Record the per-variant volume / quality summaries on the run.
 
     Called by :func:`import_result` after the imputed VCFs are ingested.
+    ``r2_threshold`` captures the import-time filter used; ``None`` means no
+    threshold was applied.
     """
     conn.execute(
         """
@@ -267,7 +273,8 @@ def record_import_volumes(  # noqa: PLR0913 — schema fields are not collapsibl
            SET variants_output = ?,
                mean_r2 = ?,
                variants_above_r2_0_3 = ?,
-               variants_above_r2_0_8 = ?
+               variants_above_r2_0_8 = ?,
+               r2_threshold = ?
          WHERE imputation_id = ?
         """,
         [
@@ -275,6 +282,7 @@ def record_import_volumes(  # noqa: PLR0913 — schema fields are not collapsibl
             mean_r2,
             variants_above_r2_0_3,
             variants_above_r2_0_8,
+            r2_threshold,
             imputation_id,
         ],
     )

@@ -124,6 +124,7 @@ def test_record_download_and_record_import_volumes(
             mean_r2=0.82,
             variants_above_r2_0_3=27_000_000,
             variants_above_r2_0_8=15_000_000,
+            r2_threshold=0.3,
         )
         run = fetch_run(conn, imp_id)
     assert run is not None
@@ -134,6 +135,8 @@ def test_record_download_and_record_import_volumes(
     assert abs(run.mean_r2 - 0.82) < 1e-9
     assert run.variants_above_r2_0_3 == 27_000_000
     assert run.variants_above_r2_0_8 == 15_000_000
+    assert run.r2_threshold is not None
+    assert abs(run.r2_threshold - 0.3) < 1e-9
 
 
 def test_list_all_returns_newest_first(

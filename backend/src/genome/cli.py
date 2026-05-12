@@ -17,10 +17,14 @@ from genome.db.duckdb_conn import duckdb_connection
 from genome.db.init_schema import init_databases
 from genome.db.sqlite_conn import sqlcipher_connection
 from genome.imputation import (
+    DEFAULT_BATCH_SIZE,
+    DEFAULT_R2_THRESHOLD,
+    DryRunResult,
     check_status,
     download_result,
     import_result,
     list_runs,
+    parse_chromosomes_filter,
     prepare_run,
 )
 from genome.ingest import Source, ingest_file
@@ -457,8 +461,64 @@ def imputation_download(
 
 
 @imputation_app.command("import")
-def imputation_import(
+def imputation_import(  # noqa: PLR0913 — one CLI flag per operational control
     imputation_id: Annotated[int, typer.Argument(help="Run ID.")],
+    r2_threshold: Annotated[
+        float,
+        typer.Option(
+            "--r2-threshold",
+            min=0.0,
+            max=1.0,
+            help=(
+                "Variants with INFO/R2 below this threshold are skipped at import "
+                "time and never written to genotype_calls. Recorded on the run's "
+                "imputation_runs.r2_threshold column."
+            ),
+        ),
+    ] = DEFAULT_R2_THRESHOLD,
+    chromosomes: Annotated[
+        str | None,
+        typer.Option(
+            "--chromosomes",
+            help=(
+                "Comma-separated chromosome list (e.g. '1,2,X'). When set, only "
+                "matching per-chromosome VCFs are processed. Useful for partial "
+                "recovery or testing."
+            ),
+        ),
+    ] = None,
+    batch_size: Annotated[
+        int,
+        typer.Option(
+            "--batch-size",
+            min=1,
+            help=(
+                "Rows per Arrow Table bulk-insert batch. Lower this on memory-constrained machines."
+            ),
+        ),
+    ] = DEFAULT_BATCH_SIZE,
+    dry_run: Annotated[  # noqa: FBT002 — typer boolean flag, --dry-run is opt-in
+        bool,
+        typer.Option(
+            "--dry-run",
+            help=(
+                "Parse each VCF and report expected variant counts plus an "
+                "estimated wall-clock time, without writing anything to the "
+                "database."
+            ),
+        ),
+    ] = False,
+    force_reimport: Annotated[  # noqa: FBT002 — typer boolean flag, --force-reimport is opt-in
+        bool,
+        typer.Option(
+            "--force-reimport",
+            help=(
+                "Required to re-run import on a run whose variants_output is "
+                "already populated. The prior imputed calls are deactivated via "
+                "the existing supersession pattern."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Stream the imputed VCFs into the database.
 
@@ -470,14 +530,47 @@ def imputation_import(
     Idempotent: re-importing supersedes prior imputed calls for the same
     positions rather than duplicating.
     """
-    result = import_result(imputation_id)
+    try:
+        chromosomes_set = parse_chromosomes_filter(chromosomes)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--chromosomes") from exc
+
+    result = import_result(
+        imputation_id,
+        r2_threshold=r2_threshold,
+        chromosomes=chromosomes_set,
+        batch_size=batch_size,
+        dry_run=dry_run,
+        force_reimport=force_reimport,
+    )
+    if isinstance(result, DryRunResult):
+        est = result.estimated_seconds
+        typer.echo(
+            f"[dry-run] imputation_id={result.imputation_id} "
+            f"r2_threshold={result.r2_threshold:.4f} "
+            f"chromosomes={list(result.chromosomes_planned)} "
+            f"variants_total={result.variants_total} "
+            f"variants_below_threshold={result.variants_below_threshold} "
+            f"estimated_seconds={est:.1f}",
+        )
+        if result.per_chrom:
+            per_chrom = " ".join(f"{k}={v}" for k, v in sorted(result.per_chrom.items()))
+            typer.echo(f"[dry-run] per_chrom: {per_chrom}")
+        typer.echo(
+            "[dry-run] No database writes happened. Re-run without --dry-run to import.",
+        )
+        return
+
     mean_r2 = f"{result.mean_r2:.4f}" if result.mean_r2 is not None else "-"
     typer.echo(
         f"imputation_id={result.imputation_id} ingestion_run_id={result.ingestion_run_id} "
         f"qc_id={result.qc_id} variants={result.variants_total} "
         f"called={result.variants_called} no_call={result.variants_no_call} "
+        f"below_threshold={result.variants_below_threshold} "
         f"new_master_rows={result.new_variants_master_rows} "
         f"deactivated_prior={result.deactivated_prior_calls} "
+        f"r2_threshold={result.r2_threshold:.4f} "
+        f"chromosomes={list(result.chromosomes_imported)} "
         f"mean_r2={mean_r2} "
         f"r2_above_0.3={result.variants_above_r2_0_3} "
         f"r2_above_0.8={result.variants_above_r2_0_8}",
@@ -503,7 +596,8 @@ def imputation_list() -> None:
             f"completed={r.completed_at or '-'} "
             f"variants_in={r.variants_input if r.variants_input is not None else '-'} "
             f"variants_out={r.variants_output if r.variants_output is not None else '-'} "
-            f"mean_r2={r.mean_r2 if r.mean_r2 is not None else '-'}",
+            f"mean_r2={r.mean_r2 if r.mean_r2 is not None else '-'} "
+            f"r2_threshold={r.r2_threshold if r.r2_threshold is not None else '-'}",
         )
 
 

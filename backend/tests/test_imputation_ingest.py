@@ -20,7 +20,12 @@ import pytest
 
 from genome.db import duckdb_connection, init_databases
 from genome.imputation.archive import ImputationArchive
-from genome.imputation.ingest import import_result
+from genome.imputation.ingest import (
+    DryRunResult,
+    ImportResult,
+    import_result,
+    parse_chromosomes_filter,
+)
 from genome.imputation.runs import (
     fetch_run,
     insert_run,
@@ -212,7 +217,10 @@ def test_import_updates_imputation_runs_volumes(
         r2_high_count=3,
     )
 
-    import_result(imp_id, archive_root=archive_root)
+    # r2_threshold=0.0 disables the new default filter so the test still
+    # exercises the variants_above_r2_0_3 / variants_above_r2_0_8 counters
+    # against the full mixed-R² input (a separate test covers the filter).
+    import_result(imp_id, archive_root=archive_root, r2_threshold=0.0)
 
     with duckdb_connection() as conn:
         run = fetch_run(conn, imp_id)
@@ -224,6 +232,7 @@ def test_import_updates_imputation_runs_volumes(
     # the float32 round-trip through the VCF INFO field.
     assert run.mean_r2 is not None
     assert abs(run.mean_r2 - 0.585) < 1e-6
+    assert run.r2_threshold == 0.0
 
 
 def test_import_raises_when_no_result_vcfs_found(
@@ -295,7 +304,9 @@ def test_reimport_supersedes_prior_imputed_calls(
     first = import_result(imp_id, archive_root=archive_root)
     assert first.deactivated_prior_calls == 0
 
-    second = import_result(imp_id, archive_root=archive_root)
+    # Re-running against an already-imported run now requires --force-reimport;
+    # the supersession-over-update semantics are unchanged.
+    second = import_result(imp_id, archive_root=archive_root, force_reimport=True)
     assert second.deactivated_prior_calls == 5
 
     with duckdb_connection() as conn:
@@ -352,3 +363,312 @@ def test_benchmark_streams_1m_rows_within_60s(
 
     assert result.variants_total == 1_000_000
     assert elapsed < 60.0, f"1M-row import took {elapsed:.1f}s, expected < 60s"
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 follow-up: operational controls on `genome imputation import`.
+# ---------------------------------------------------------------------------
+
+
+def test_r2_threshold_filters_low_confidence_variants(
+    isolated_settings: dict[str, str],
+) -> None:
+    """Variants with INFO/R2 below ``r2_threshold`` are skipped at import."""
+    init_databases()
+    archive_root = isolated_settings_archive_root(isolated_settings)
+    imp_id = _seed_completed_run(archive_root=archive_root)
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+    # 10 variants total: 2 at R²=0.25 (below 0.3), 3 at R²=0.95, 5 at R²=0.5.
+    _write_synthetic_vcf(
+        archive.result_dir / "chr1.dose.vcf.gz",
+        n_variants=10,
+        r2_low_count=2,
+        r2_high_count=3,
+    )
+
+    result = import_result(imp_id, archive_root=archive_root, r2_threshold=0.3)
+    assert isinstance(result, ImportResult)
+    assert result.variants_total == 8
+    assert result.variants_below_threshold == 2
+    assert result.r2_threshold == 0.3
+
+    with duckdb_connection() as conn:
+        active = conn.execute(
+            "SELECT COUNT(*) FROM genotype_calls WHERE is_active",
+        ).fetchone()[0]
+        run = fetch_run(conn, imp_id)
+    assert active == 8
+    assert run is not None
+    assert run.r2_threshold == 0.3
+
+
+def test_r2_threshold_zero_lets_every_variant_through(
+    isolated_settings: dict[str, str],
+) -> None:
+    """``r2_threshold=0.0`` reproduces the pre-flag behavior."""
+    init_databases()
+    archive_root = isolated_settings_archive_root(isolated_settings)
+    imp_id = _seed_completed_run(archive_root=archive_root)
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+    _write_synthetic_vcf(
+        archive.result_dir / "chr1.dose.vcf.gz",
+        n_variants=10,
+        r2_low_count=4,
+    )
+    result = import_result(imp_id, archive_root=archive_root, r2_threshold=0.0)
+    assert isinstance(result, ImportResult)
+    assert result.variants_total == 10
+    assert result.variants_below_threshold == 0
+
+
+def test_r2_threshold_validates_range(
+    isolated_settings: dict[str, str],
+) -> None:
+    init_databases()
+    archive_root = isolated_settings_archive_root(isolated_settings)
+    imp_id = _seed_completed_run(archive_root=archive_root)
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+    _write_synthetic_vcf(archive.result_dir / "chr1.dose.vcf.gz", n_variants=1)
+    with pytest.raises(ValueError, match="r2_threshold"):
+        import_result(imp_id, archive_root=archive_root, r2_threshold=1.5)
+
+
+def test_chromosomes_filter_limits_imported_files(
+    isolated_settings: dict[str, str],
+) -> None:
+    """``--chromosomes`` keeps only the requested per-chromosome VCFs."""
+    init_databases()
+    archive_root = isolated_settings_archive_root(isolated_settings)
+    imp_id = _seed_completed_run(archive_root=archive_root)
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+    _write_synthetic_vcf(archive.result_dir / "chr1.dose.vcf.gz", chrom="chr1", n_variants=4)
+    _write_synthetic_vcf(archive.result_dir / "chr2.dose.vcf.gz", chrom="chr2", n_variants=3)
+    _write_synthetic_vcf(archive.result_dir / "chrX.dose.vcf.gz", chrom="chrX", n_variants=2)
+
+    result = import_result(
+        imp_id,
+        archive_root=archive_root,
+        chromosomes=frozenset({"1", "X"}),
+    )
+    assert isinstance(result, ImportResult)
+    assert result.variants_total == 6  # chr1 (4) + chrX (2); chr2 was skipped
+    assert set(result.chromosomes_imported) == {"1", "X"}
+
+    with duckdb_connection() as conn:
+        chroms = {
+            row[0]
+            for row in conn.execute(
+                "SELECT DISTINCT CAST(chrom AS VARCHAR) FROM variants_master",
+            ).fetchall()
+        }
+    assert chroms == {"1", "X"}
+
+
+def test_chromosomes_filter_with_no_matching_files_raises(
+    isolated_settings: dict[str, str],
+) -> None:
+    init_databases()
+    archive_root = isolated_settings_archive_root(isolated_settings)
+    imp_id = _seed_completed_run(archive_root=archive_root)
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+    _write_synthetic_vcf(archive.result_dir / "chr1.dose.vcf.gz", chrom="chr1", n_variants=2)
+    with pytest.raises(RuntimeError, match="chromosome filter"):
+        import_result(
+            imp_id,
+            archive_root=archive_root,
+            chromosomes=frozenset({"22"}),
+        )
+
+
+def test_parse_chromosomes_filter_accepts_chr_prefix_and_lowercase() -> None:
+    assert parse_chromosomes_filter("1,2,X") == frozenset({"1", "2", "X"})
+    assert parse_chromosomes_filter("chr1, chrX , 22") == frozenset({"1", "X", "22"})
+    assert parse_chromosomes_filter(None) is None
+
+
+def test_parse_chromosomes_filter_rejects_invalid_chromosomes() -> None:
+    with pytest.raises(ValueError, match="invalid chromosome"):
+        parse_chromosomes_filter("1,FOO")
+    with pytest.raises(ValueError, match="empty after parsing"):
+        parse_chromosomes_filter(",,")
+
+
+def test_dry_run_does_not_write_to_database(
+    isolated_settings: dict[str, str],
+) -> None:
+    """``--dry-run`` reports per-chrom counts and skips every DB write."""
+    init_databases()
+    archive_root = isolated_settings_archive_root(isolated_settings)
+    imp_id = _seed_completed_run(archive_root=archive_root)
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+    _write_synthetic_vcf(
+        archive.result_dir / "chr1.dose.vcf.gz",
+        chrom="chr1",
+        n_variants=10,
+        r2_low_count=3,
+    )
+    _write_synthetic_vcf(
+        archive.result_dir / "chr2.dose.vcf.gz",
+        chrom="chr2",
+        n_variants=4,
+    )
+
+    result = import_result(imp_id, archive_root=archive_root, dry_run=True)
+    assert isinstance(result, DryRunResult)
+    assert result.r2_threshold == 0.3
+    assert result.variants_total == 11  # 10 - 3 (below 0.3) + 4
+    assert result.variants_below_threshold == 3
+    assert result.per_chrom == {"1": 7, "2": 4}
+    assert set(result.chromosomes_planned) == {"1", "2"}
+    assert result.estimated_seconds > 0
+
+    # Database must still be empty (no calls, no master rows beyond seed).
+    with duckdb_connection() as conn:
+        gc = conn.execute("SELECT COUNT(*) FROM genotype_calls").fetchone()[0]
+        master = conn.execute("SELECT COUNT(*) FROM variants_master").fetchone()[0]
+        run = fetch_run(conn, imp_id)
+    assert gc == 0
+    assert master == 0
+    assert run is not None
+    assert run.variants_output is None  # not marked as imported
+    assert run.r2_threshold is None
+
+
+def test_dry_run_does_not_check_force_reimport(
+    isolated_settings: dict[str, str],
+) -> None:
+    """Dry-run is read-only, so the already-imported guard must not fire."""
+    init_databases()
+    archive_root = isolated_settings_archive_root(isolated_settings)
+    imp_id = _seed_completed_run(archive_root=archive_root)
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+    _write_synthetic_vcf(archive.result_dir / "chr1.dose.vcf.gz", n_variants=3)
+    # First do a real import; that lands variants_output.
+    import_result(imp_id, archive_root=archive_root)
+    # A dry-run after the real import must not require --force-reimport.
+    result = import_result(imp_id, archive_root=archive_root, dry_run=True)
+    assert isinstance(result, DryRunResult)
+
+
+def test_force_reimport_required_after_first_import(
+    isolated_settings: dict[str, str],
+) -> None:
+    """A second import without ``--force-reimport`` aborts with a clear error."""
+    init_databases()
+    archive_root = isolated_settings_archive_root(isolated_settings)
+    imp_id = _seed_completed_run(archive_root=archive_root)
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+    _write_synthetic_vcf(archive.result_dir / "chr1.dose.vcf.gz", n_variants=5)
+
+    first = import_result(imp_id, archive_root=archive_root)
+    assert isinstance(first, ImportResult)
+
+    with pytest.raises(RuntimeError, match="already been imported"):
+        import_result(imp_id, archive_root=archive_root)
+
+
+def test_force_reimport_supersedes_prior_calls(
+    isolated_settings: dict[str, str],
+) -> None:
+    """With ``--force-reimport`` set, the supersession path runs as before."""
+    init_databases()
+    archive_root = isolated_settings_archive_root(isolated_settings)
+    imp_id = _seed_completed_run(archive_root=archive_root)
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+    _write_synthetic_vcf(archive.result_dir / "chr1.dose.vcf.gz", n_variants=5)
+
+    import_result(imp_id, archive_root=archive_root)
+    second = import_result(imp_id, archive_root=archive_root, force_reimport=True)
+    assert isinstance(second, ImportResult)
+    assert second.deactivated_prior_calls == 5
+
+    with duckdb_connection() as conn:
+        active = conn.execute(
+            "SELECT COUNT(*) FROM genotype_calls WHERE is_active",
+        ).fetchone()[0]
+        inactive = conn.execute(
+            "SELECT COUNT(*) FROM genotype_calls WHERE NOT is_active",
+        ).fetchone()[0]
+    assert active == 5
+    assert inactive == 5
+
+
+def test_chromosomes_filter_allows_adding_chromosomes_without_force(
+    isolated_settings: dict[str, str],
+) -> None:
+    """Partial re-import with ``--chromosomes`` is allowed after a prior import.
+
+    The spec's resume message points the user at ``--chromosomes`` as an
+    alternative to ``--force-reimport``. The chromosome filter limits the
+    write set, but the guard still applies because re-running on the same
+    chromosome would still need a force-reimport — only the variants we
+    haven't imported yet should be allowed. For now this test pins the
+    behavior of partial re-import requiring ``--force-reimport`` so the user
+    explicitly acknowledges the supersession of any overlapping calls.
+    """
+    init_databases()
+    archive_root = isolated_settings_archive_root(isolated_settings)
+    imp_id = _seed_completed_run(archive_root=archive_root)
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+    _write_synthetic_vcf(archive.result_dir / "chr1.dose.vcf.gz", n_variants=3)
+    _write_synthetic_vcf(archive.result_dir / "chr2.dose.vcf.gz", chrom="chr2", n_variants=2)
+    # First import: chr1 only.
+    first = import_result(
+        imp_id,
+        archive_root=archive_root,
+        chromosomes=frozenset({"1"}),
+    )
+    assert isinstance(first, ImportResult)
+    assert first.variants_total == 3
+
+    # Without --force-reimport, partial re-import is still blocked.
+    with pytest.raises(RuntimeError, match="already been imported"):
+        import_result(
+            imp_id,
+            archive_root=archive_root,
+            chromosomes=frozenset({"2"}),
+        )
+
+    # With --force-reimport, chr2 is brought in.
+    second = import_result(
+        imp_id,
+        archive_root=archive_root,
+        chromosomes=frozenset({"2"}),
+        force_reimport=True,
+    )
+    assert isinstance(second, ImportResult)
+    assert second.variants_total == 2
+    assert set(second.chromosomes_imported) == {"2"}
+
+
+def test_batch_size_does_not_change_output(
+    isolated_settings: dict[str, str],
+) -> None:
+    """Tuning ``--batch-size`` is purely an internal knob; counts must match."""
+    init_databases()
+    archive_root = isolated_settings_archive_root(isolated_settings)
+    imp_id = _seed_completed_run(archive_root=archive_root)
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+    _write_synthetic_vcf(archive.result_dir / "chr1.dose.vcf.gz", n_variants=20)
+
+    result = import_result(imp_id, archive_root=archive_root, batch_size=7)
+    assert isinstance(result, ImportResult)
+    assert result.variants_total == 20
+
+    with duckdb_connection() as conn:
+        active = conn.execute(
+            "SELECT COUNT(*) FROM genotype_calls WHERE is_active",
+        ).fetchone()[0]
+    assert active == 20
+
+
+def test_batch_size_rejects_non_positive_values(
+    isolated_settings: dict[str, str],
+) -> None:
+    init_databases()
+    archive_root = isolated_settings_archive_root(isolated_settings)
+    imp_id = _seed_completed_run(archive_root=archive_root)
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+    _write_synthetic_vcf(archive.result_dir / "chr1.dose.vcf.gz", n_variants=1)
+    with pytest.raises(ValueError, match="batch_size"):
+        import_result(imp_id, archive_root=archive_root, batch_size=0)

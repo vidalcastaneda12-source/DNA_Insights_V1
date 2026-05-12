@@ -13,6 +13,9 @@ Key design points:
   same as the input positions).
 * **Capture INFO/R2 per variant.** This is the imputation quality score; it
   drives every downstream filter ("only use variants with R² > 0.3", etc.).
+* **R² threshold filter at import time.** Variants with INFO/R2 below
+  ``r2_threshold`` (default 0.3) are skipped entirely and never written to
+  ``genotype_calls``. The threshold is recorded on the run row.
 * **Add missing variants to ``variants_master``.** Most of the ~30M imputed
   variants are not in the chip-genotyped set, so we expand the master table.
 * **Stream per chromosome.** We never load the full result into memory.
@@ -32,7 +35,7 @@ Schema fields we write:
   imputed source.
 * ``ingestion_runs``: one row per import; ``source='topmed_imputed'``.
 * ``imputation_runs``: update ``variants_output``, ``mean_r2``,
-  ``variants_above_r2_0_3``, ``variants_above_r2_0_8``.
+  ``variants_above_r2_0_3``, ``variants_above_r2_0_8``, ``r2_threshold``.
 """
 
 from __future__ import annotations
@@ -67,8 +70,13 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 IMPUTATION_PIPELINE_VERSION: Final[str] = "imputation_import_v0.1.0"
-_BATCH_SIZE: Final[int] = 50_000
+DEFAULT_BATCH_SIZE: Final[int] = 50_000
+DEFAULT_R2_THRESHOLD: Final[float] = 0.3
 _R2_THRESHOLDS: Final[tuple[float, float]] = (0.3, 0.8)
+# Empirical: ~30M variants stream in ~30 min on a dev machine
+# (the benchmark test confirms 1M rows clear in well under 60s).
+# Rate used for the dry-run time estimate.
+_ESTIMATED_VARIANTS_PER_SECOND: Final[int] = 16_500
 
 _VALID_TOPMED_CHROMS: Final[frozenset[str]] = frozenset(
     {*(str(i) for i in range(1, 23)), "X"},
@@ -84,6 +92,7 @@ class _ImportCounters:
     variants_no_call: int = 0
     variants_above_r2_0_3: int = 0
     variants_above_r2_0_8: int = 0
+    variants_below_threshold: int = 0
     r2_sum: float = 0.0
     r2_count: int = 0
     autosomal_called: int = 0
@@ -133,11 +142,32 @@ class ImportResult:
     variants_total: int
     variants_called: int
     variants_no_call: int
+    variants_below_threshold: int
     new_variants_master_rows: int
     deactivated_prior_calls: int
     mean_r2: float | None
     variants_above_r2_0_3: int
     variants_above_r2_0_8: int
+    r2_threshold: float
+    chromosomes_imported: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DryRunResult:
+    """Summary returned by :func:`import_result` when ``dry_run=True``.
+
+    Reports the per-chromosome variant counts we would import (after the
+    R²-threshold and chromosome filters), plus a wall-clock time estimate
+    based on the documented benchmark. No database writes happen on this path.
+    """
+
+    imputation_id: int
+    chromosomes_planned: tuple[str, ...]
+    variants_total: int
+    variants_below_threshold: int
+    per_chrom: dict[str, int]
+    r2_threshold: float
+    estimated_seconds: float
 
 
 def _normalize_chrom_label(chrom: str) -> str | None:
@@ -287,8 +317,19 @@ def _stream_chromosome(
     path: Path,
     chrom: str,
     counters: _ImportCounters,
+    *,
+    r2_threshold: float,
+    batch_size: int,
 ) -> Iterator[_Batch]:
-    """Yield batches of normalized rows from one chromosome's imputed VCF."""
+    """Yield batches of normalized rows from one chromosome's imputed VCF.
+
+    Variants whose INFO/R2 falls below ``r2_threshold`` are skipped before
+    the batch grows — they don't reach ``variants_master`` or
+    ``genotype_calls`` and are accounted for in
+    ``counters.variants_below_threshold``. Variants missing an R² value pass
+    through (matching the pre-filter behavior; this is rare on TopMed output
+    but defensible for non-TopMed VCFs).
+    """
     log = logger.bind(path=str(path), chrom=chrom)
     log.info("imputation.import.chrom.start")
     reader = _open_imputed_vcf(path)
@@ -303,6 +344,11 @@ def _stream_chromosome(
                 continue
             alts = tuple(str(a) for a in v.ALT or [])
             if not _is_biallelic_snv(str(v.REF), alts):
+                continue
+
+            r2 = _extract_r2(v.INFO)
+            if r2 is not None and r2 < r2_threshold:
+                counters.variants_below_threshold += 1
                 continue
 
             genotypes = v.genotypes or []
@@ -327,10 +373,10 @@ def _stream_chromosome(
                 allele_1=allele_1,
                 allele_2=allele_2,
                 is_no_call=is_no_call,
-                r2=_extract_r2(v.INFO),
+                r2=r2,
             )
 
-            if len(batch) >= _BATCH_SIZE:
+            if len(batch) >= batch_size:
                 yield batch
                 batch = _Batch()
     finally:
@@ -632,11 +678,19 @@ def _process_one_vcf(  # noqa: PLR0913 — per-VCF parameters mirror the writer'
     run_id: int,
     superseded_reason: str,
     imputation_panel: str,
+    r2_threshold: float,
+    batch_size: int,
 ) -> tuple[int, int]:
     """Stream one VCF into the DB. Returns ``(new_master_rows, deactivated_calls)``."""
     new_master_total = 0
     deactivated_total = 0
-    for batch in _stream_chromosome(path, chrom, counters):
+    for batch in _stream_chromosome(
+        path,
+        chrom,
+        counters,
+        r2_threshold=r2_threshold,
+        batch_size=batch_size,
+    ):
         _create_stage_table(conn)
         _stage_batch(conn, batch)
         new_master_total += _upsert_variants_master(conn)
@@ -680,34 +734,172 @@ def _resolve_result_vcfs(
     return out
 
 
-def import_result(
+def parse_chromosomes_filter(raw: str | None) -> frozenset[str] | None:
+    """Parse a ``--chromosomes`` CLI value into a canonical chromosome set.
+
+    Accepts a comma-separated list like ``"1,2,X"``. Empty / whitespace tokens
+    are ignored. Every token must resolve to a valid TopMed chromosome label
+    or :class:`ValueError` is raised so the user gets immediate feedback.
+    Returns ``None`` when ``raw`` is ``None`` (no filter requested).
+    """
+    if raw is None:
+        return None
+    tokens = [t.strip().upper().removeprefix("CHR") for t in raw.split(",") if t.strip()]
+    if not tokens:
+        msg = "chromosome filter is empty after parsing; pass at least one chromosome"
+        raise ValueError(msg)
+    bad = [t for t in tokens if t not in _VALID_TOPMED_CHROMS]
+    if bad:
+        msg = (
+            f"invalid chromosome(s) {sorted(set(bad))!r}; "
+            f"valid TopMed chromosomes are {sorted(_VALID_TOPMED_CHROMS)}"
+        )
+        raise ValueError(msg)
+    return frozenset(tokens)
+
+
+def _apply_chromosomes_filter(
+    vcf_inputs: list[tuple[str, Path]],
+    chromosomes: frozenset[str] | None,
+) -> list[tuple[str, Path]]:
+    """Drop ``(chrom, path)`` pairs not in ``chromosomes``. No-op when ``None``."""
+    if chromosomes is None:
+        return vcf_inputs
+    return [(c, p) for c, p in vcf_inputs if c in chromosomes]
+
+
+def _count_chromosome_variants(
+    path: Path,
+    chrom: str,
+    *,
+    r2_threshold: float,
+) -> tuple[int, int]:
+    """Count ``(kept, dropped)`` variants for one chromosome's VCF.
+
+    Used by the dry-run path. Mirrors ``_stream_chromosome``'s filter rules
+    (chromosome match, biallelic SNV, R²-threshold) but writes nothing.
+    """
+    reader = _open_imputed_vcf(path)
+    kept = 0
+    dropped = 0
+    try:
+        for v in reader:
+            mapped = _normalize_chrom_label(str(v.CHROM))
+            if mapped != chrom:
+                continue
+            alts = tuple(str(a) for a in v.ALT or [])
+            if not _is_biallelic_snv(str(v.REF), alts):
+                continue
+            r2 = _extract_r2(v.INFO)
+            if r2 is not None and r2 < r2_threshold:
+                dropped += 1
+                continue
+            kept += 1
+    finally:
+        reader.close()
+    return kept, dropped
+
+
+def _run_dry_run(
+    imputation_id: int,
+    vcf_inputs: list[tuple[str, Path]],
+    *,
+    r2_threshold: float,
+) -> DryRunResult:
+    """Parse each VCF without writing to the DB. Returns the planned summary."""
+    log = logger.bind(imputation_id=imputation_id, n_vcfs=len(vcf_inputs))
+    log.info("imputation.import.dry_run.start", r2_threshold=r2_threshold)
+    per_chrom: dict[str, int] = {}
+    total = 0
+    dropped_total = 0
+    for chrom, path in vcf_inputs:
+        kept, dropped = _count_chromosome_variants(path, chrom, r2_threshold=r2_threshold)
+        per_chrom[chrom] = kept
+        total += kept
+        dropped_total += dropped
+        log.info(
+            "imputation.import.dry_run.chrom",
+            chrom=chrom,
+            variants_kept=kept,
+            variants_below_threshold=dropped,
+        )
+    estimated_seconds = (
+        total / _ESTIMATED_VARIANTS_PER_SECOND if _ESTIMATED_VARIANTS_PER_SECOND else 0.0
+    )
+    log.info(
+        "imputation.import.dry_run.complete",
+        variants_total=total,
+        variants_below_threshold=dropped_total,
+        estimated_seconds=estimated_seconds,
+    )
+    return DryRunResult(
+        imputation_id=imputation_id,
+        chromosomes_planned=tuple(c for c, _ in vcf_inputs),
+        variants_total=total,
+        variants_below_threshold=dropped_total,
+        per_chrom=per_chrom,
+        r2_threshold=r2_threshold,
+        estimated_seconds=estimated_seconds,
+    )
+
+
+def _guard_already_imported(run: ImputationRun, *, force_reimport: bool) -> None:
+    """Raise if ``run`` has been imported before and the user didn't pass ``--force-reimport``.
+
+    "Already imported" is detected by ``variants_output`` being non-NULL on
+    the run row — that field is populated by :func:`record_import_volumes` at
+    the end of a successful import, so its presence is the persistent marker
+    that an import has run against this id at least once.
+    """
+    if force_reimport:
+        return
+    if run.variants_output is None:
+        return
+    msg = (
+        f"Run {run.imputation_id} has already been imported. Use "
+        f"`--force-reimport` to start over, or specify `--chromosomes` to "
+        f"import additional chromosomes."
+    )
+    raise RuntimeError(msg)
+
+
+@dataclass(frozen=True, slots=True)
+class _ImportPlan:
+    """Resolved import inputs after validation, chromosome filtering, and run lookup."""
+
+    run: ImputationRun
+    archive: ImputationArchive
+    vcf_inputs: list[tuple[str, Path]]
+
+
+def _validate_import_options(*, r2_threshold: float, batch_size: int) -> None:
+    if not 0.0 <= r2_threshold <= 1.0:
+        msg = f"r2_threshold must be between 0.0 and 1.0, got {r2_threshold!r}"
+        raise ValueError(msg)
+    if batch_size <= 0:
+        msg = f"batch_size must be positive, got {batch_size!r}"
+        raise ValueError(msg)
+
+
+def _plan_import(  # noqa: PLR0913 — option set comes from the public API surface
     imputation_id: int,
     *,
-    duckdb_path: Path | None = None,
-    archive_root: Path | None = None,
-    explicit_vcf_paths: tuple[Path, ...] | None = None,
-    imputation_panel: str = "topmed_r3",
-) -> ImportResult:
-    """Stream the imputed VCFs from ``run_<id>/result/`` into the database.
-
-    Idempotence: re-running on a run that's already in ``status='completed'``
-    with imputed calls will deactivate the prior calls and write a fresh
-    ``ingestion_runs`` row. The user gets a no-op-on-content (same rows
-    re-inserted) plus new supersession rows for audit.
-
-    ``explicit_vcf_paths`` overrides the archive layout — used by tests and
-    by users whose result directory differs from the default.
-    """
-    settings = get_settings()
-    db_path = duckdb_path or settings.genome_duckdb_path
-    archive_root = archive_root or settings.archive_path
-
-    with duckdb_connection(db_path) as conn:
+    duckdb_path: Path,
+    archive_root: Path,
+    explicit_vcf_paths: tuple[Path, ...] | None,
+    chromosomes: frozenset[str] | None,
+    dry_run: bool,
+    force_reimport: bool,
+) -> _ImportPlan:
+    """Resolve the run row, archive layout, and per-chromosome VCF list."""
+    with duckdb_connection(duckdb_path) as conn:
         run = fetch_run(conn, imputation_id)
         if run is None:
             msg = f"imputation_id {imputation_id} not found"
             raise ValueError(msg)
     _validate_for_import(run)
+    if not dry_run:
+        _guard_already_imported(run, force_reimport=force_reimport)
 
     archive = ImputationArchive.for_run(archive_root, imputation_id)
     vcf_inputs = _resolve_result_vcfs(archive, explicit_vcf_paths)
@@ -718,20 +910,51 @@ def import_result(
         )
         raise RuntimeError(msg)
 
-    log = logger.bind(imputation_id=imputation_id, n_vcfs=len(vcf_inputs))
-    log.info("imputation.import.start")
+    vcf_inputs = _apply_chromosomes_filter(vcf_inputs, chromosomes)
+    if not vcf_inputs:
+        msg = (
+            f"chromosome filter {sorted(chromosomes) if chromosomes else '-'} "
+            f"left no matching VCFs under {archive.result_dir}."
+        )
+        raise RuntimeError(msg)
 
+    if chromosomes is not None:
+        logger.info(
+            "imputation.import.chromosomes_filter",
+            imputation_id=imputation_id,
+            chromosomes=sorted(chromosomes),
+        )
+    return _ImportPlan(run=run, archive=archive, vcf_inputs=vcf_inputs)
+
+
+def _execute_import(  # noqa: PLR0913 — options pass through directly to the writers
+    imputation_id: int,
+    plan: _ImportPlan,
+    *,
+    duckdb_path: Path,
+    imputation_panel: str,
+    r2_threshold: float,
+    batch_size: int,
+) -> ImportResult:
+    """Run the per-chromosome ingest transaction. Caller owns plan creation."""
+    log = logger.bind(
+        imputation_id=imputation_id,
+        n_vcfs=len(plan.vcf_inputs),
+        r2_threshold=r2_threshold,
+        batch_size=batch_size,
+    )
+    log.info("imputation.import.start")
     counters = _ImportCounters()
 
-    with duckdb_connection(db_path) as conn:
+    with duckdb_connection(duckdb_path) as conn:
         conn.execute("BEGIN TRANSACTION")
         try:
             run_id = insert_ingestion_run(
                 conn,
                 source="topmed_imputed",
                 chip_version=None,
-                file_path=str(archive.result_dir),
-                file_hash_sha256=(run.output_file_hash_sha256 or ""),
+                file_path=str(plan.archive.result_dir),
+                file_hash_sha256=(plan.run.output_file_hash_sha256 or ""),
                 file_size_bytes=0,  # archive on disk; size not material here
                 file_native_build="GRCh38",
                 pipeline_version=IMPUTATION_PIPELINE_VERSION,
@@ -742,7 +965,7 @@ def import_result(
             )
             new_master_total = 0
             deactivated_total = 0
-            for chrom, path in vcf_inputs:
+            for chrom, path in plan.vcf_inputs:
                 new_master, deactivated = _process_one_vcf(
                     conn,
                     path=path,
@@ -751,13 +974,14 @@ def import_result(
                     run_id=run_id,
                     superseded_reason=f"superseded by imputation_id {imputation_id}",
                     imputation_panel=imputation_panel,
+                    r2_threshold=r2_threshold,
+                    batch_size=batch_size,
                 )
                 new_master_total += new_master
                 deactivated_total += deactivated
 
             mean_r2 = counters.r2_sum / counters.r2_count if counters.r2_count else None
 
-            # Backfill ingestion_runs counts now that we know the totals.
             conn.execute(
                 """
                 UPDATE ingestion_runs
@@ -785,7 +1009,6 @@ def import_result(
                 mean_r2=mean_r2,
                 low_r2_count=max(low_r2, 0),
             )
-
             record_import_volumes(
                 conn,
                 imputation_id,
@@ -793,8 +1016,8 @@ def import_result(
                 mean_r2=mean_r2,
                 variants_above_r2_0_3=counters.variants_above_r2_0_3,
                 variants_above_r2_0_8=counters.variants_above_r2_0_8,
+                r2_threshold=r2_threshold,
             )
-            # The run is already 'completed' (download required that); leave it.
             update_status(conn, imputation_id, status="completed")
             conn.execute("COMMIT")
         except Exception:
@@ -805,6 +1028,7 @@ def import_result(
     log.info(
         "imputation.import.complete",
         variants_total=counters.variants_total,
+        variants_below_threshold=counters.variants_below_threshold,
         new_master_rows=new_master_total,
         deactivated_prior_calls=deactivated_total,
         mean_r2=mean_r2,
@@ -816,11 +1040,80 @@ def import_result(
         variants_total=counters.variants_total,
         variants_called=counters.variants_called,
         variants_no_call=counters.variants_no_call,
+        variants_below_threshold=counters.variants_below_threshold,
         new_variants_master_rows=new_master_total,
         deactivated_prior_calls=deactivated_total,
         mean_r2=mean_r2,
         variants_above_r2_0_3=counters.variants_above_r2_0_3,
         variants_above_r2_0_8=counters.variants_above_r2_0_8,
+        r2_threshold=r2_threshold,
+        chromosomes_imported=tuple(c for c, _ in plan.vcf_inputs),
+    )
+
+
+def import_result(  # noqa: PLR0913 — operational flags map 1:1 to schema/CLI controls
+    imputation_id: int,
+    *,
+    duckdb_path: Path | None = None,
+    archive_root: Path | None = None,
+    explicit_vcf_paths: tuple[Path, ...] | None = None,
+    imputation_panel: str = "topmed_r3",
+    r2_threshold: float = DEFAULT_R2_THRESHOLD,
+    chromosomes: frozenset[str] | None = None,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    dry_run: bool = False,
+    force_reimport: bool = False,
+) -> ImportResult | DryRunResult:
+    """Stream the imputed VCFs from ``run_<id>/result/`` into the database.
+
+    Idempotence: re-running on a run that's already in ``status='completed'``
+    with imputed calls will deactivate the prior calls and write a fresh
+    ``ingestion_runs`` row. The user gets a no-op-on-content (same rows
+    re-inserted) plus new supersession rows for audit.
+
+    ``explicit_vcf_paths`` overrides the archive layout — used by tests and
+    by users whose result directory differs from the default.
+
+    Operational flags:
+
+    * ``r2_threshold`` (default ``0.3``): variants with ``INFO/R2 <
+      r2_threshold`` are skipped and never written to ``genotype_calls``.
+      The threshold is recorded on ``imputation_runs.r2_threshold``.
+    * ``chromosomes``: optional set of chromosome labels (e.g. ``{"1","X"}``);
+      when set, only matching files are processed.
+    * ``batch_size`` (default ``50_000``): rows per Arrow Table bulk-insert.
+    * ``dry_run``: parse VCFs and report expected counts / time without
+      writing anything. Returns :class:`DryRunResult` instead of
+      :class:`ImportResult`.
+    * ``force_reimport``: required to re-run import against an id whose
+      ``variants_output`` is already populated (i.e. a prior import landed).
+      Re-runs use the same supersession-over-update semantics that were
+      already in place.
+    """
+    settings = get_settings()
+    db_path = duckdb_path or settings.genome_duckdb_path
+    archive_root = archive_root or settings.archive_path
+
+    _validate_import_options(r2_threshold=r2_threshold, batch_size=batch_size)
+    plan = _plan_import(
+        imputation_id,
+        duckdb_path=db_path,
+        archive_root=archive_root,
+        explicit_vcf_paths=explicit_vcf_paths,
+        chromosomes=chromosomes,
+        dry_run=dry_run,
+        force_reimport=force_reimport,
+    )
+    if dry_run:
+        return _run_dry_run(imputation_id, plan.vcf_inputs, r2_threshold=r2_threshold)
+
+    return _execute_import(
+        imputation_id,
+        plan,
+        duckdb_path=db_path,
+        imputation_panel=imputation_panel,
+        r2_threshold=r2_threshold,
+        batch_size=batch_size,
     )
 
 

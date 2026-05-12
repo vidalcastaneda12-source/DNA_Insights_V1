@@ -147,3 +147,40 @@ def test_imputation_list_when_empty(
     result = runner.invoke(app, ["imputation", "list"])
     assert result.exit_code == 0
     assert "no imputation runs yet" in result.output
+
+
+def test_imputation_import_help_lists_all_operational_flags(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """``genome imputation import --help`` exposes every operational flag."""
+    runner = CliRunner()
+    result = runner.invoke(app, ["imputation", "import", "--help"])
+    assert result.exit_code == 0
+    for flag in (
+        "--r2-threshold",
+        "--chromosomes",
+        "--dry-run",
+        "--batch-size",
+        "--force-reimport",
+    ):
+        assert flag in result.output, f"{flag!r} missing from `imputation import --help`"
+
+
+def test_imputation_import_rejects_invalid_chromosomes_filter(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """``--chromosomes`` with an invalid token aborts before any DB work."""
+    init_databases()
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["imputation", "import", "1", "--chromosomes", "1,NOPE"],
+    )
+    assert result.exit_code != 0
+    assert (
+        "invalid chromosome" in result.output.lower()
+        or "invalid chromosome"
+        in str(
+            result.exception or "",
+        ).lower()
+    )
