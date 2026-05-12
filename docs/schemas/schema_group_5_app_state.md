@@ -480,7 +480,7 @@ END;
 | `theme` | `system` | string | UI theme: `light` / `dark` / `system` |
 | `llm_model` | `claude-opus-4-7` | string | Model for NL queries |
 | `audit_retention_days` | `365` | number | How long to keep audit logs |
-| `external_calls_enabled` | `true` | boolean | Master switch for any network egress |
+| `external_calls_enabled` | `false` | boolean | Master switch for any network egress |
 | `pubmed_enrichment_enabled` | `false` | boolean | Auto-fetch PubMed for variants |
 | `auto_snapshot_cadence` | `90d` | string | Auto snapshots every N days (`""` = off) |
 | `prs_min_coverage_pct` | `80` | number | Hide PGS results below this coverage |

@@ -338,6 +338,11 @@ CREATE TABLE imputation_runs (
   variants_above_r2_0_3 INTEGER,
   variants_above_r2_0_8 INTEGER,
 
+  -- Import-time filter applied to INFO/R2 before writing genotype_calls.
+  -- Variants with R2 below this threshold are skipped during import.
+  -- NULL = no filter recorded (e.g. for rows predating the field).
+  r2_threshold          DOUBLE,
+
   -- File provenance
   output_file_path      VARCHAR,
   output_file_hash_sha256 VARCHAR(64),
