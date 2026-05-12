@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Documentation
+- Added `docs/findings/` directory with five documents capturing real-data observations from Phase 2 and Phase 3: lift-over engine selection, platform overlap and concordance, chip composition differences, DuckDB bulk-load pattern, and deferred improvements list.
 - Documented schema-change-requires-rebuild convention in `CLAUDE.md`.
 - Documented 23andMe v5 vs Ancestry v2 chip composition differences (Y-chromosome coverage, heterozygosity rate ranges) in `CLAUDE.md`.
 - Stubbed `docs/runbooks/imputation.md` ahead of Phase 4 implementation.
