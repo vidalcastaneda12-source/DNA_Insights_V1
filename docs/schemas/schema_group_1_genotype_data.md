@@ -28,6 +28,7 @@ The user's actual DNA: every variant call from every source, the resolved consen
 CREATE TYPE source_enum AS ENUM (
   '23andme',
   'ancestry',
+  'beagle_imputed',
   'topmed_imputed'
 );
 
