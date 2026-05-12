@@ -69,6 +69,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `consensus_genotypes`, and `discrepancies`.
 
 ### Changed
+- Migrated `[tool.uv.dev-dependencies]` to `[dependency-groups]` in
+  `pyproject.toml` per uv's deprecation notice. No behavior change.
 - Lift-over now uses the [`liftover`](https://pypi.org/project/liftover/) PyPI
   package (C++/CFFI-backed) as the default engine. It runs ~10–50× faster than
   `pyliftover` on whole-array exports and installs cleanly via `uv sync` with
