@@ -100,8 +100,8 @@ module = [
 ]
 ignore_missing_imports = true
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest>=8.3.0",
     "pytest-cov>=6.0.0",
     "ruff>=0.7.0",
