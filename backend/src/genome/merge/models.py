@@ -24,7 +24,7 @@ DiscrepancyType = Literal[
     "multi_allelic_split",
 ]
 Severity = Literal["critical", "major", "minor", "info"]
-Source = Literal["23andme", "ancestry", "topmed_imputed"]
+Source = Literal["23andme", "ancestry", "beagle_imputed", "topmed_imputed"]
 
 
 @dataclass(frozen=True, slots=True)

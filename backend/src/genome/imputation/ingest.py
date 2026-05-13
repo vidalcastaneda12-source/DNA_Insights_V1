@@ -1,23 +1,25 @@
 """Stream imputed VCFs into the analytical DB.
 
-This is the heavy step of Phase 4. The TopMed result is ~30M variants spread
-across one VCF per chromosome. We stream each file through cyvcf2, batch
-records into PyArrow Tables, and bulk-insert with the locked DuckDB
-convention (registered Arrow Table + ``INSERT ... SELECT``; see
+This is the heavy step of Phase 4. The Beagle 5.5 result is several million
+variants spread across one VCF per chromosome. We stream each file through
+cyvcf2, batch records into PyArrow Tables, and bulk-insert with the locked
+DuckDB convention (registered Arrow Table + ``INSERT ... SELECT``; see
 ``finding-004``).
 
 Key design points:
 
-* **Bypass lift-over.** TopMed output is GRCh38-native. We use
+* **Bypass lift-over.** Beagle output is GRCh38-native. We use
   :class:`IdentityLiftover`-equivalent logic (the lifted positions are the
   same as the input positions).
-* **Capture INFO/R2 per variant.** This is the imputation quality score; it
-  drives every downstream filter ("only use variants with R² > 0.3", etc.).
-* **R² threshold filter at import time.** Variants with INFO/R2 below
+* **Capture INFO/DR2 per variant.** Beagle emits dosage R² (``DR2``) as the
+  imputation quality score; we accept ``R2`` and ``Rsq`` as fallbacks for
+  compatibility with other servers. This drives every downstream filter
+  ("only use variants with R² > 0.3", etc.).
+* **R² threshold filter at import time.** Variants with R² below
   ``r2_threshold`` (default 0.3) are skipped entirely and never written to
   ``genotype_calls``. The threshold is recorded on the run row.
-* **Add missing variants to ``variants_master``.** Most of the ~30M imputed
-  variants are not in the chip-genotyped set, so we expand the master table.
+* **Add missing variants to ``variants_master``.** Most imputed variants are
+  not in the chip-genotyped set, so we expand the master table.
 * **Stream per chromosome.** We never load the full result into memory.
 * **Compute a sample QC row.** Call rate should be ~100% (imputation fills
   every position), but het rate and sex from imputed X/Y are useful.
@@ -27,13 +29,14 @@ Schema fields we write:
 * ``variants_master``: rsid, chrom, pos_grch38, ref_allele, alt_allele,
   variant_type (SNV — INDELs are not in the standard imputation panel),
   has_imputed_call = TRUE.
-* ``genotype_calls``: variant_id, source='topmed_imputed', is_imputed=TRUE,
-  imputation_r2 = INFO/R2, imputation_panel='topmed_r3',
+* ``genotype_calls``: variant_id, source='beagle_imputed', is_imputed=TRUE,
+  imputation_r2 = INFO/DR2 (or R2/Rsq fallback),
+  imputation_panel='1000g_phase3_grch38' (default),
   allele_1/allele_2 derived from GT, is_no_call inferred from missing GT,
-  strand_status = 'resolved_plus' (TopMed reports on the forward strand).
+  strand_status = 'resolved_plus' (Beagle output is on the forward strand).
 * ``sample_qc``: one row per ``ingestion_runs`` row we create for the
   imputed source.
-* ``ingestion_runs``: one row per import; ``source='topmed_imputed'``.
+* ``ingestion_runs``: one row per import; ``source='beagle_imputed'``.
 * ``imputation_runs``: update ``variants_output``, ``mean_r2``,
   ``variants_above_r2_0_3``, ``variants_above_r2_0_8``, ``r2_threshold``.
 """
@@ -78,8 +81,8 @@ _R2_THRESHOLDS: Final[tuple[float, float]] = (0.3, 0.8)
 # Rate used for the dry-run time estimate.
 _ESTIMATED_VARIANTS_PER_SECOND: Final[int] = 16_500
 
-_VALID_TOPMED_CHROMS: Final[frozenset[str]] = frozenset(
-    {*(str(i) for i in range(1, 23)), "X"},
+_IMPUTABLE_CHROMS: Final[frozenset[str]] = frozenset(
+    {*(str(i) for i in range(1, 23)), "X", "Y"},
 )
 
 
@@ -173,12 +176,12 @@ class DryRunResult:
 def _normalize_chrom_label(chrom: str) -> str | None:
     """Strip an optional ``chr`` prefix and return the canonical label.
 
-    Returns ``None`` for anything outside ``_VALID_TOPMED_CHROMS``. TopMed's
+    Returns ``None`` for anything outside ``_IMPUTABLE_CHROMS``. Beagle's
     output uses ``chr1`` / ``chrX`` / etc.; the schema's enum is the unprefixed
     label.
     """
     raw = chrom.strip().upper().removeprefix("CHR")
-    if raw in _VALID_TOPMED_CHROMS:
+    if raw in _IMPUTABLE_CHROMS:
         return raw
     return None
 
@@ -218,10 +221,11 @@ def _is_biallelic_snv(ref: str, alts: tuple[str, ...]) -> bool:
 def _extract_r2(info: _cyvcf2_typing.INFO) -> float | None:
     """Return the imputation R² for this variant, or ``None`` if absent.
 
-    TopMed's INFO field is ``R2``. Older imputation servers sometimes use
-    ``Rsq``; we accept both so this code is reusable for non-TopMed servers.
+    Beagle 5.5's INFO field is ``DR2`` (dosage R²). Some servers (TopMed)
+    emit ``R2``; older Minimac releases use ``Rsq``. We try the keys in
+    preference order so the import path is reusable across servers.
     """
-    for key in ("R2", "Rsq", "INFO_R2"):
+    for key in ("DR2", "R2", "Rsq", "INFO_R2"):
         value = info.get(key)
         if value is not None:
             with contextlib.suppress(TypeError, ValueError):
@@ -323,12 +327,12 @@ def _stream_chromosome(
 ) -> Iterator[_Batch]:
     """Yield batches of normalized rows from one chromosome's imputed VCF.
 
-    Variants whose INFO/R2 falls below ``r2_threshold`` are skipped before
-    the batch grows — they don't reach ``variants_master`` or
-    ``genotype_calls`` and are accounted for in
+    Variants whose imputation R² (INFO/DR2 or fallback) falls below
+    ``r2_threshold`` are skipped before the batch grows — they don't reach
+    ``variants_master`` or ``genotype_calls`` and are accounted for in
     ``counters.variants_below_threshold``. Variants missing an R² value pass
-    through (matching the pre-filter behavior; this is rare on TopMed output
-    but defensible for non-TopMed VCFs).
+    through (matching the pre-filter behavior; rare on Beagle output but
+    defensible for non-Beagle VCFs).
     """
     log = logger.bind(path=str(path), chrom=chrom)
     log.info("imputation.import.chrom.start")
@@ -339,7 +343,7 @@ def _stream_chromosome(
             mapped = _normalize_chrom_label(str(v.CHROM))
             if mapped != chrom:
                 # The file's chromosome doesn't match the expected one — skip
-                # silently. TopMed should never produce this, but a misnamed
+                # silently. Beagle should never produce this, but a misnamed
                 # file would otherwise corrupt the per-chrom counters.
                 continue
             alts = tuple(str(a) for a in v.ALT or [])
@@ -512,7 +516,7 @@ def _deactivate_prior_imputed_calls(
            SET is_active = FALSE,
                superseded_reason = ?
          WHERE is_active = TRUE
-           AND source = 'topmed_imputed'::source_enum
+           AND source = 'beagle_imputed'::source_enum
            AND variant_id IN (
                 SELECT vm.variant_id
                   FROM _impute_stage s
@@ -551,7 +555,7 @@ def _insert_imputed_calls(
         SELECT
             ? + s.ord                          AS call_id,
             vm.variant_id                      AS variant_id,
-            'topmed_imputed'::source_enum      AS source,
+            'beagle_imputed'::source_enum      AS source,
             NULL                               AS source_chip_version,
             ?                                  AS ingestion_run_id,
             CASE WHEN s.is_no_call THEN './.'
@@ -729,7 +733,7 @@ def _resolve_result_vcfs(
         # Pull the chromosome token: "chr1.dose.vcf.gz" -> "1"; "chrX..." -> "X".
         rest = name[3:]
         chrom = rest.split(".", 1)[0].upper()
-        if chrom in _VALID_TOPMED_CHROMS:
+        if chrom in _IMPUTABLE_CHROMS:
             out.append((chrom, p))
     return out
 
@@ -738,9 +742,9 @@ def parse_chromosomes_filter(raw: str | None) -> frozenset[str] | None:
     """Parse a ``--chromosomes`` CLI value into a canonical chromosome set.
 
     Accepts a comma-separated list like ``"1,2,X"``. Empty / whitespace tokens
-    are ignored. Every token must resolve to a valid TopMed chromosome label
-    or :class:`ValueError` is raised so the user gets immediate feedback.
-    Returns ``None`` when ``raw`` is ``None`` (no filter requested).
+    are ignored. Every token must resolve to a valid imputable chromosome
+    label or :class:`ValueError` is raised so the user gets immediate
+    feedback. Returns ``None`` when ``raw`` is ``None`` (no filter requested).
     """
     if raw is None:
         return None
@@ -748,11 +752,11 @@ def parse_chromosomes_filter(raw: str | None) -> frozenset[str] | None:
     if not tokens:
         msg = "chromosome filter is empty after parsing; pass at least one chromosome"
         raise ValueError(msg)
-    bad = [t for t in tokens if t not in _VALID_TOPMED_CHROMS]
+    bad = [t for t in tokens if t not in _IMPUTABLE_CHROMS]
     if bad:
         msg = (
             f"invalid chromosome(s) {sorted(set(bad))!r}; "
-            f"valid TopMed chromosomes are {sorted(_VALID_TOPMED_CHROMS)}"
+            f"valid imputable chromosomes are {sorted(_IMPUTABLE_CHROMS)}"
         )
         raise ValueError(msg)
     return frozenset(tokens)
@@ -906,7 +910,7 @@ def _plan_import(  # noqa: PLR0913 — option set comes from the public API surf
     if not vcf_inputs:
         msg = (
             f"no per-chromosome VCFs found under {archive.result_dir}. "
-            "Decrypt the TopMed archive first; the runbook walks through the steps."
+            "Run `genome imputation run <id>` first; the runbook walks through the steps."
         )
         raise RuntimeError(msg)
 
@@ -951,7 +955,7 @@ def _execute_import(  # noqa: PLR0913 — options pass through directly to the w
         try:
             run_id = insert_ingestion_run(
                 conn,
-                source="topmed_imputed",
+                source="beagle_imputed",
                 chip_version=None,
                 file_path=str(plan.archive.result_dir),
                 file_hash_sha256=(plan.run.output_file_hash_sha256 or ""),
@@ -1057,7 +1061,7 @@ def import_result(  # noqa: PLR0913 — operational flags map 1:1 to schema/CLI 
     duckdb_path: Path | None = None,
     archive_root: Path | None = None,
     explicit_vcf_paths: tuple[Path, ...] | None = None,
-    imputation_panel: str = "topmed_r3",
+    imputation_panel: str = "1000g_phase3_grch38",
     r2_threshold: float = DEFAULT_R2_THRESHOLD,
     chromosomes: frozenset[str] | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
@@ -1076,9 +1080,10 @@ def import_result(  # noqa: PLR0913 — operational flags map 1:1 to schema/CLI 
 
     Operational flags:
 
-    * ``r2_threshold`` (default ``0.3``): variants with ``INFO/R2 <
-      r2_threshold`` are skipped and never written to ``genotype_calls``.
-      The threshold is recorded on ``imputation_runs.r2_threshold``.
+    * ``r2_threshold`` (default ``0.3``): variants whose imputation R²
+      (``INFO/DR2``, falling back to ``R2``/``Rsq``) is below ``r2_threshold``
+      are skipped and never written to ``genotype_calls``. The threshold is
+      recorded on ``imputation_runs.r2_threshold``.
     * ``chromosomes``: optional set of chromosome labels (e.g. ``{"1","X"}``);
       when set, only matching files are processed.
     * ``batch_size`` (default ``50_000``): rows per Arrow Table bulk-insert.

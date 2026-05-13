@@ -86,7 +86,7 @@ def _seed_variant_with_consensus(  # noqa: PLR0913 — explicit per-variant inse
     )
 
 
-def test_prepare_run_writes_per_chrom_vcfs_with_topmed_headers(
+def test_prepare_run_writes_per_chrom_vcfs_with_beagle_headers(
     isolated_settings: dict[str, str],  # noqa: ARG001 — fixture forces tmp-scoped settings
     tmp_path: Path,  # noqa: ARG001 — isolated_settings already redirects paths
 ) -> None:
@@ -192,10 +192,40 @@ def test_prepare_run_writes_per_chrom_vcfs_with_topmed_headers(
     # Manifest is written and parseable.
     manifest = json.loads(result.manifest_path.read_text())
     assert manifest["imputation_id"] == 1
-    assert manifest["reference_panel"] == "topmed_r3"
+    assert manifest["reference_panel"] == "1000g_phase3_grch38"
+    assert manifest["imputation_server"] == "beagle"
+    assert manifest["imputation_tool"] == "beagle_5.5"
     assert manifest["build"] == "GRCh38"
     assert manifest["variants_total"] == 6
     assert manifest["chromosomes_exported"] == ["1", "2", "X"]
+    # Old TopMed-era manifest fields are gone.
+    assert "topmed_recommended_compression" not in manifest
+    assert "compression_note" not in manifest
+
+
+def test_prepare_includes_chr_y_when_present(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """Y is part of the Beagle-era imputable set (it was excluded under TopMed)."""
+    init_databases()
+    with duckdb_connection() as conn:
+        _seed_ingestion_run(conn, 1, "23andme")
+        _seed_variant_with_consensus(
+            conn,
+            variant_id=1,
+            rsid="rs_y",
+            chrom="Y",
+            pos=100,
+            ref="A",
+            alt="G",
+            consensus_a1="A",
+            consensus_a2="G",
+            dosage=1,
+        )
+
+    result = prepare_run(sample_id="x")
+    assert result.variants_per_chrom == {"Y": 1}
+    assert {p.name for p in result.vcf_paths} == {"chrY.vcf.gz"}
 
 
 def test_prepare_writes_one_record_per_variant_in_chrom_order(
@@ -308,7 +338,7 @@ def test_prepare_skips_ref_equals_alt_rows(
 ) -> None:
     """Hom-only rows where Phase 2 set ref==alt are excluded from the upload.
 
-    TopMed cannot impute against ``ref=A alt=A`` rows; until Phase 5 loads
+    Beagle cannot impute against ``ref=A alt=A`` rows; until Phase 5 loads
     dbSNP and a future prepare can rewrite these with canonical alleles,
     they are correctly dropped at the SQL filter step.
     """

@@ -1,21 +1,17 @@
-"""Export merged genotype calls as per-chromosome VCFs for TopMed upload.
+"""Export merged genotype calls as per-chromosome GRCh38 VCFs for Beagle 5.5.
 
-The TopMed Imputation Server expects per-chromosome VCFv4.2 files, sorted by
-position, with one sample column. We export from ``consensus_genotypes`` joined
-to ``variants_master`` — the merged set is the only sensible input (uploading
-unmerged 23andMe + Ancestry separately would produce wildly different imputation
-results on overlapping SNPs).
+We export from ``consensus_genotypes`` joined to ``variants_master`` — the
+merged set is the only sensible input (imputing unmerged 23andMe + Ancestry
+separately would produce wildly different results on overlapping SNPs).
 
 Format details we honor:
 
-* ``##fileformat=VCFv4.2`` — TopMed validates this.
-* ``##contig=<ID=chr1,assembly=GRCh38>`` style declarations — TopMed wants
-  ``chr``-prefixed contig IDs to match its reference build.
+* ``##fileformat=VCFv4.2``.
+* ``##contig=<ID=chr1,assembly=GRCh38>`` style declarations with ``chr``-prefixed
+  contig IDs to match the reference build.
 * Variants in ``chr<N> POS REF ALT`` form, with sample genotype as ``0/0`` /
   ``0/1`` / ``1/1`` / ``./.`` derived from ``consensus_genotypes.dosage``.
-* gzipped (``.vcf.gz``). TopMed prefers bgzip, but accepts gzipped input — it
-  re-bgzips internally. The manifest records the compression flavor so a
-  future bgzip-aware path can light up when ``pysam`` becomes available.
+* gzipped (``.vcf.gz``). Beagle 5.5 accepts both gzip and bgzip.
 
 This module deliberately writes text + ``gzip.open`` rather than going through
 ``cyvcf2.Writer``. The Writer requires a template header VCF, and constructing
@@ -48,12 +44,12 @@ logger = structlog.get_logger(__name__)
 EXPORT_PIPELINE_VERSION: Final[str] = "imputation_prepare_v0.1.0"
 """Pipeline version stamped on ``imputation_runs.pipeline_version`` for prepare."""
 
-_TOPMED_SERVER: Final[str] = "topmed"
-_TOPMED_PANEL: Final[str] = "topmed_r3"
+_IMPUTATION_SERVER: Final[str] = "beagle"
+_DEFAULT_PANEL: Final[str] = "1000g_phase3_grch38"
 
 # Per-chromosome lengths for GRCh38 (used in ``##contig=<...>`` headers).
 # Values from the GRCh38.p14 primary assembly; lengths are not strictly
-# required by TopMed but make the VCF valid against strict validators.
+# required by Beagle but make the VCF valid against strict validators.
 _CONTIG_LENGTHS_GRCH38: Final[dict[str, int]] = {
     "1": 248_956_422,
     "2": 242_193_529,
@@ -83,8 +79,8 @@ _CONTIG_LENGTHS_GRCH38: Final[dict[str, int]] = {
 }
 
 _AUTOSOMES: Final[tuple[str, ...]] = tuple(str(i) for i in range(1, 23))
-_VALID_TOPMED_CHROMS: Final[tuple[str, ...]] = (*_AUTOSOMES, "X")
-"""TopMed accepts autosomes + X. Y and MT are not imputed by the r3 panel."""
+_IMPUTABLE_CHROMS: Final[tuple[str, ...]] = (*_AUTOSOMES, "X", "Y")
+"""Chromosomes exported for imputation: autosomes + X + Y. MT is not imputed."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,7 +135,7 @@ def _genotype_for_dosage(dosage: int | None, *, is_no_call: bool) -> str:
 
     Schema invariant: ``dosage`` is 0 / 1 / 2 for hom-ref / het / hom-alt, or
     NULL when ``is_no_call`` is true. We render unphased (``/``) because the
-    raw chip data has no phasing information — TopMed will phase via Eagle as
+    raw chip data has no phasing information — Beagle phases internally as
     part of imputation.
     """
     if is_no_call or dosage is None:
@@ -160,7 +156,7 @@ def _fetch_export_rows(
 ) -> list[_ExportRow]:
     """Pull the export rows for one chromosome in position order.
 
-    Filters at SQL-level: only SNVs (TopMed cannot impute INDELs unless they're
+    Filters at SQL-level: only SNVs (Beagle cannot impute INDELs unless they're
     in the reference panel — and 23andMe's I/D indels don't carry the
     sequence anyway), only consensus rows that are not no-call (no-calls add
     no information for imputation), only variants whose ref/alt are single
@@ -171,9 +167,9 @@ def _fetch_export_rows(
     have no reference panel to identify the canonical allele. Phase 2's
     alphabetical-ordering rule sets both ref and alt to the same base for
     these positions (an honest "we don't know which is the reference"
-    encoding); TopMed cannot impute against ``ref=alt`` rows. The downstream
-    impact is that homozygous-only positions are dropped from the upload, but
-    TopMed still has the polymorphic positions (het + hom-alt) to impute
+    encoding); Beagle cannot impute against ``ref=alt`` rows. The downstream
+    impact is that homozygous-only positions are dropped from the export, but
+    Beagle still has the polymorphic positions (het + hom-alt) to impute
     against — once Phase 5 loads dbSNP, a future prepare step can rewrite
     these positions with the canonical REF/ALT and recover the dropped rows.
     """
@@ -217,8 +213,8 @@ def _fetch_export_rows(
 def _vcf_header(chrom: str, sample_id: str) -> str:
     """Build the VCF header for one chromosome's export file.
 
-    The header lists *only* the contig being exported. TopMed validates that
-    every record's contig is declared, but does not require every chromosome
+    The header lists *only* the contig being exported. Strict validators require
+    every record's contig to be declared, but do not require every chromosome
     in the reference to be listed in every file.
     """
     length = _CONTIG_LENGTHS_GRCH38[chrom]
@@ -278,15 +274,10 @@ def _write_manifest(  # noqa: PLR0913 — manifest covers every provenance field
         "sample_id": sample_id,
         "reference_panel": panel,
         "imputation_server": server,
+        "imputation_tool": "beagle_5.5",
         "pipeline_version": pipeline_version,
         "build": "GRCh38",
         "compression": "gzip",
-        "topmed_recommended_compression": "bgzip",
-        "compression_note": (
-            "Files are gzipped. TopMed prefers bgzip but accepts gzip; the "
-            "server re-bgzips internally. If TopMed rejects the upload, run "
-            "bgzip locally and re-upload."
-        ),
         "variants_per_chrom": variants_per_chrom,
         "variants_total": sum(variants_per_chrom.values()),
         "chromosomes_exported": sorted(variants_per_chrom),
@@ -301,9 +292,9 @@ def _detect_existing_prepared_run(conn: DuckDBPyConnection) -> int | None:
     """Return an ``imputation_id`` for a prior prepare we should reuse, or ``None``.
 
     Re-running ``prepare`` when an existing run is already in ``status='pending'``
-    or ``'processing'`` is unusual — TopMed has only one in-flight job per
-    user. We return the existing id so the caller can decide whether to abort
-    or proceed (the CLI surfaces this as a clear message).
+    or ``'processing'`` is unusual — only one in-flight imputation run is
+    expected at a time. We return the existing id so the caller can decide
+    whether to abort or proceed (the CLI surfaces this as a clear message).
     """
     row = conn.execute(
         """
@@ -365,7 +356,7 @@ def prepare_run(
         # Compute totals up front so the imputation_runs row records the right number.
         variants_per_chrom: dict[str, int] = {}
         export_rows_per_chrom: dict[str, list[_ExportRow]] = {}
-        for chrom in _VALID_TOPMED_CHROMS:
+        for chrom in _IMPUTABLE_CHROMS:
             rows = _fetch_export_rows(conn, chrom)
             if not rows:
                 continue
@@ -383,8 +374,8 @@ def prepare_run(
         imputation_id = insert_run(
             conn,
             input_run_ids=input_run_ids,
-            imputation_server=_TOPMED_SERVER,
-            reference_panel=_TOPMED_PANEL,
+            imputation_server=_IMPUTATION_SERVER,
+            reference_panel=_DEFAULT_PANEL,
             pipeline_version=EXPORT_PIPELINE_VERSION,
             variants_input=total_variants,
         )
@@ -409,8 +400,8 @@ def prepare_run(
         archive,
         imputation_id=imputation_id,
         sample_id=sample_id,
-        panel=_TOPMED_PANEL,
-        server=_TOPMED_SERVER,
+        panel=_DEFAULT_PANEL,
+        server=_IMPUTATION_SERVER,
         pipeline_version=EXPORT_PIPELINE_VERSION,
         variants_per_chrom=variants_per_chrom,
         input_run_ids=input_run_ids,

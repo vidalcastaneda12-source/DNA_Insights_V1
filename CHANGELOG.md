@@ -31,6 +31,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the local Beagle workflow (per-chromosome VCFs, 1000 Genomes Phase 3
   reference panel on disk, `imputation_dr2` from Beagle's INFO/DR2, new
   `genome imputation panel install | status` subcommands).
+- **`vcf_export` and `ingest` produce/consume Beagle-flavored outputs.**
+  Prepare now writes `imputation_runs.imputation_server='beagle'` and
+  `reference_panel='1000g_phase3_grch38'`, and the manifest gains an
+  `imputation_tool='beagle_5.5'` field (dropping the TopMed-era
+  `topmed_recommended_compression` / `compression_note` keys). Import
+  writes `genotype_calls.source='beagle_imputed'` and
+  `imputation_panel='1000g_phase3_grch38'` by default; the R²
+  extractor now tries `INFO/DR2` (Beagle's native dosage-R² field)
+  before falling back to `R2` / `Rsq`, so output from Beagle, TopMed,
+  and older Minimac releases all parse correctly. The imputable
+  chromosome set expands to autosomes + X + Y (Y was excluded under
+  TopMed r3, which did not impute it; under Beagle 5.5 it is included
+  at the prepare layer, and the runner warns and skips Y if the 1000G
+  Phase 3 bref3 release lacks Y coverage).
+- **Imputation runbook rewritten for the local workflow.**
+  `docs/runbooks/imputation.md` now documents the four-step local
+  flow — panel install (one-time), prepare, run, import — with
+  Beagle-specific flags, OOM guidance, and the privacy posture that
+  no genome data leaves the machine.
 
 ### Added
 - **Phase 4 Beagle pivot — local Beagle 5.5 runner.** New
