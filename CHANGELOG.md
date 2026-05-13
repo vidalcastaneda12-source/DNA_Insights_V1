@@ -33,6 +33,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `genome imputation panel install | status` subcommands).
 
 ### Added
+- **Phase 4 Beagle pivot — reference-panel management.** New
+  `genome.imputation.reference_panel` module owns the local Beagle
+  reference-panel layout under `~/.cache/genome/imputation/` by default
+  (overridable via the new `imputation_panel_root` setting). Manages the
+  Beagle 5.5 JAR (`beagle.27Feb25.75f.jar`), the PLINK GRCh38 genetic-map
+  archive (`plink.GRCh38.map.zip` — extracted into per-chromosome `.map`
+  files), and the per-chromosome 1000 Genomes Phase 3 GRCh38 reference
+  panel VCFs (autosomes 1-22 plus X; chrY is not part of the
+  high-coverage phased release and `panel_for_chrom('Y')` returns
+  `None`). All downloads flow through the existing audited
+  `ExternalClient`, so every fetch is gated on `external_calls_enabled`
+  and produces intent + result audit rows; downloaded files land with
+  `0600` permissions, directories with `0700`. New CLI subcommands
+  `genome imputation panel status` (validates the on-disk layout) and
+  `genome imputation panel install [--force] [--chromosomes <list>]`
+  (downloads anything missing). The `--chromosomes` filter targets the
+  per-chrom panels only; the JAR and genetic-map archive are left alone
+  for partial-install / recovery flows. Documents the upstream URL
+  choice in a constants block at the top of the module: the Beagle
+  authors host pre-built bref3 panels for b37 only, so we fetch the
+  GRCh38 VCFs from EBI's 1000 Genomes high-coverage phased release —
+  Beagle 5.5 accepts either format for its `ref=` argument.
 - **Phase 4 — imputation roundtrip.** New `genome.imputation` package and
   `genome.privacy.external_client` introduce the workflow for sending the
   merged genotype set through the TopMed Imputation Server and ingesting the

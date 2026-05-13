@@ -19,16 +19,20 @@ from genome.db.sqlite_conn import sqlcipher_connection
 from genome.imputation import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_R2_THRESHOLD,
+    PANEL_CHROMOSOMES,
     DryRunResult,
+    ReferencePanel,
     import_result,
+    install_panel,
     list_runs,
     parse_chromosomes_filter,
     prepare_run,
+    validate_panel,
 )
 from genome.ingest import Source, ingest_file
 from genome.ingest.liftover import LiftoverEngine
 from genome.merge import merge_all
-from genome.privacy.external_client import write_config_change_audit
+from genome.privacy.external_client import is_external_enabled, write_config_change_audit
 
 _VALID_INGEST_SOURCES: tuple[str, ...] = tuple(s for s in get_args(Source) if s != "topmed_imputed")
 _VALID_LIFTOVER_ENGINES: tuple[str, ...] = tuple(get_args(LiftoverEngine))
@@ -51,8 +55,17 @@ config_app = typer.Typer(
     add_completion=False,
     help="Read and write user_preferences from the CLI.",
 )
+panel_app = typer.Typer(
+    no_args_is_help=True,
+    add_completion=False,
+    help=(
+        "Manage the local Beagle reference panel (Beagle JAR, PLINK GRCh38 "
+        "genetic map, and per-chromosome 1000 Genomes Phase 3 panel VCFs)."
+    ),
+)
 app.add_typer(imputation_app, name="imputation")
 app.add_typer(config_app, name="config")
+imputation_app.add_typer(panel_app, name="panel")
 
 
 def _configure_logging() -> None:
@@ -513,6 +526,108 @@ def imputation_list() -> None:
             f"mean_r2={r.mean_r2 if r.mean_r2 is not None else '-'} "
             f"r2_threshold={r.r2_threshold if r.r2_threshold is not None else '-'}",
         )
+
+
+# -----------------------------------------------------------------------------
+# `genome imputation panel` — manage the local Beagle reference panel
+# -----------------------------------------------------------------------------
+
+
+def _parse_panel_chromosomes(raw: str | None) -> frozenset[str] | None:
+    """Parse a ``--chromosomes`` value against :data:`PANEL_CHROMOSOMES`.
+
+    Mirrors :func:`parse_chromosomes_filter` but accepts only chromosomes
+    that exist in the reference panel (no chrY, no chrMT).
+    """
+    if raw is None:
+        return None
+    tokens = [t.strip().upper().removeprefix("CHR") for t in raw.split(",") if t.strip()]
+    if not tokens:
+        msg = "chromosome filter is empty after parsing; pass at least one chromosome"
+        raise ValueError(msg)
+    bad = sorted({t for t in tokens if t not in PANEL_CHROMOSOMES})
+    if bad:
+        msg = (
+            f"invalid chromosome(s) {bad!r}; valid panel chromosomes are "
+            f"{sorted(PANEL_CHROMOSOMES, key=lambda c: (0, int(c)) if c.isdigit() else (1, c))}"
+        )
+        raise ValueError(msg)
+    return frozenset(tokens)
+
+
+@panel_app.command("status")
+def panel_status() -> None:
+    """Report whether all reference-panel artifacts are present on disk.
+
+    Prints the resolved panel root, then either ``all components present``
+    or one ``- <problem>`` line per missing artifact. Exit code is 0 either
+    way; the user reads the output to decide whether to run ``install``.
+    """
+    panel = ReferencePanel.resolve()
+    typer.echo(f"panel_root: {panel.root}")
+    problems = validate_panel(panel)
+    if not problems:
+        typer.echo("all components present")
+        return
+    typer.echo(f"missing {len(problems)} component(s):")
+    for p in problems:
+        typer.echo(f"  - {p}")
+
+
+@panel_app.command("install")
+def panel_install(
+    force: Annotated[  # noqa: FBT002 — typer boolean flag, --force is opt-in
+        bool,
+        typer.Option(
+            "--force",
+            help=(
+                "Re-download every selected artifact even if it is already "
+                "on disk. By default, existing files are left alone."
+            ),
+        ),
+    ] = False,
+    chromosomes: Annotated[
+        str | None,
+        typer.Option(
+            "--chromosomes",
+            help=(
+                "Comma-separated chromosome list (e.g. '1,22,X'). When set, "
+                "only the matching per-chromosome panel VCFs are downloaded; "
+                "the Beagle JAR and the genetic-map archive are left alone."
+            ),
+        ),
+    ] = None,
+) -> None:
+    """Download missing reference-panel artifacts via the audited HTTP client.
+
+    Requires ``user_preferences.external_calls_enabled = true``. When the
+    master switch is off the command aborts immediately with an actionable
+    error message — the same one any external call would produce.
+    """
+    try:
+        chromosomes_set = _parse_panel_chromosomes(chromosomes)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--chromosomes") from exc
+
+    if not is_external_enabled():
+        msg = (
+            "External calls are disabled; cannot download the reference panel. "
+            "Enable them with `genome config set external_calls_enabled true` "
+            "and re-run."
+        )
+        typer.echo(msg, err=True)
+        raise typer.Exit(code=1)
+
+    panel = ReferencePanel.resolve()
+    install_panel(panel, force=force, chromosomes=chromosomes_set)
+    typer.echo(f"panel_root: {panel.root}")
+    problems = validate_panel(panel)
+    if not problems:
+        typer.echo("all components present")
+    else:
+        typer.echo(f"after install, {len(problems)} component(s) still missing:")
+        for p in problems:
+            typer.echo(f"  - {p}")
 
 
 @app.command()

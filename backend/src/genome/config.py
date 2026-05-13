@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     app_db_passphrase: SecretStr
     archive_path: Path = Field(default=Path("archive"))
     external_calls_enabled: bool = Field(default=False)
+    # Override the default reference panel root (~/.cache/genome/imputation/).
+    # Useful for shared-storage setups where the panel lives on an external drive.
+    imputation_panel_root: Path | None = Field(default=None)
     llm_model: str = Field(default="claude-opus-4-7")
     anthropic_api_key: SecretStr | None = Field(default=None)
     log_level: str = Field(default="INFO")
