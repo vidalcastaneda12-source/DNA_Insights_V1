@@ -3,6 +3,8 @@
 Public entry points the CLI calls into:
 
 * :func:`prepare_run` builds the upload VCFs from active genotype calls.
+* :func:`run_imputation` pipes each upload VCF through Beagle 5.5 against
+  the local reference panel.
 * :func:`import_result` streams the imputed VCFs into ``genotype_calls`` /
   ``variants_master``.
 * :func:`list_runs` enumerates ``imputation_runs`` for display.
@@ -11,6 +13,11 @@ Public entry points the CLI calls into:
 from __future__ import annotations
 
 from genome.imputation.archive import ImputationArchive
+from genome.imputation.beagle_runner import (
+    BEAGLE_RUNNER_VERSION,
+    BeagleRunResult,
+    run_imputation,
+)
 from genome.imputation.ingest import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_R2_THRESHOLD,
@@ -39,11 +46,13 @@ from genome.imputation.vcf_export import (
 )
 
 __all__ = [
+    "BEAGLE_RUNNER_VERSION",
     "DEFAULT_BATCH_SIZE",
     "DEFAULT_R2_THRESHOLD",
     "EXPORT_PIPELINE_VERSION",
     "IMPUTATION_PIPELINE_VERSION",
     "PANEL_CHROMOSOMES",
+    "BeagleRunResult",
     "DryRunResult",
     "ImportResult",
     "ImputationArchive",
@@ -56,6 +65,7 @@ __all__ = [
     "list_runs",
     "parse_chromosomes_filter",
     "prepare_run",
+    "run_imputation",
     "update_status",
     "validate_panel",
 ]

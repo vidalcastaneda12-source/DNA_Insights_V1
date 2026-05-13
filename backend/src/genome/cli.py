@@ -27,8 +27,10 @@ from genome.imputation import (
     list_runs,
     parse_chromosomes_filter,
     prepare_run,
+    run_imputation,
     validate_panel,
 )
+from genome.imputation.beagle_runner import DEFAULT_MEMORY_GB, DEFAULT_NE
 from genome.ingest import Source, ingest_file
 from genome.ingest.liftover import LiftoverEngine
 from genome.merge import merge_all
@@ -505,6 +507,145 @@ def imputation_import(  # noqa: PLR0913 — one CLI flag per operational control
     typer.echo(
         "Next step: re-run `genome merge` to refresh consensus across all three sources.",
     )
+
+
+_VALID_RUN_CHROMS: tuple[str, ...] = (*(str(i) for i in range(1, 23)), "X", "Y")
+
+
+def _parse_run_chromosomes(raw: str | None) -> frozenset[str] | None:
+    """Parse a ``--chromosomes`` value for ``imputation run``.
+
+    Accepts the same shape as the import command's filter (comma-separated,
+    optional ``chr`` prefix, case-insensitive) but the valid set is the
+    autosomes plus X and Y. chrY may be present in the upload set even
+    though the panel doesn't cover it — the runner skips it with a
+    warning at run time.
+    """
+    if raw is None:
+        return None
+    tokens = [t.strip().upper().removeprefix("CHR") for t in raw.split(",") if t.strip()]
+    if not tokens:
+        msg = "chromosome filter is empty after parsing; pass at least one chromosome"
+        raise ValueError(msg)
+    bad = sorted({t for t in tokens if t not in _VALID_RUN_CHROMS})
+    if bad:
+        msg = (
+            f"invalid chromosome(s) {bad!r}; valid chromosomes are "
+            f"{sorted(_VALID_RUN_CHROMS, key=lambda c: (0, int(c)) if c.isdigit() else (1, c))}"
+        )
+        raise ValueError(msg)
+    return frozenset(tokens)
+
+
+@imputation_app.command("run")
+def imputation_run(  # noqa: PLR0913 — one CLI flag per operational control
+    imputation_id: Annotated[int, typer.Argument(help="Run ID.")],
+    chromosomes: Annotated[
+        str | None,
+        typer.Option(
+            "--chromosomes",
+            help=(
+                "Comma-separated chromosome list (e.g. '1,2,X'). When set, only "
+                "matching per-chromosome upload VCFs are run through Beagle. "
+                "Useful for partial recovery, retrying failures, or testing."
+            ),
+        ),
+    ] = None,
+    threads: Annotated[
+        int | None,
+        typer.Option(
+            "--threads",
+            min=1,
+            help=(
+                "Number of threads Beagle should use (passed as ``nthreads=``). "
+                "Defaults to max(1, os.cpu_count() - 1) so one core stays free "
+                "for the OS / shell."
+            ),
+        ),
+    ] = None,
+    memory_gb: Annotated[
+        int,
+        typer.Option(
+            "--memory-gb",
+            min=1,
+            help=(
+                "Java heap size in GB (Beagle's ``-Xmx``). Default 8 GB suits "
+                "most chromosomes; chr1 / chr2 may need 12-16 GB on dense panels."
+            ),
+        ),
+    ] = DEFAULT_MEMORY_GB,
+    ne: Annotated[
+        int,
+        typer.Option(
+            "--ne",
+            min=1,
+            help=(
+                "Effective population size (Beagle's ``ne=``). Default 1,000,000 "
+                "matches Beagle's documented default for outbred human populations."
+            ),
+        ),
+    ] = DEFAULT_NE,
+    force: Annotated[  # noqa: FBT002 — typer boolean flag, --force is opt-in
+        bool,
+        typer.Option(
+            "--force",
+            help=(
+                "Re-run every chromosome even if its output VCF already exists "
+                "and parses cleanly. By default, finished chromosomes are skipped "
+                "to make the runner resumable."
+            ),
+        ),
+    ] = False,
+) -> None:
+    """Run Beagle 5.5 against the prepared upload VCFs for one run.
+
+    Reads ``archive/imputation/run_<id>/upload/chr*.vcf.gz`` and writes
+    ``archive/imputation/run_<id>/result/chr<N>.vcf.gz`` per chromosome.
+    Imputation runs one chromosome at a time as separate ``java -jar``
+    invocations so a failed chromosome can be retried independently —
+    pass ``--chromosomes`` to limit the retry set.
+
+    Status transitions: ``pending`` → ``processing`` when the first
+    chromosome starts; ``completed`` if every attempted chromosome
+    succeeds; ``failed`` if every attempted chromosome fails. Mixed
+    success leaves the status at ``processing`` so the user can retry
+    the failures without losing the successes.
+    """
+    try:
+        chromosomes_set = _parse_run_chromosomes(chromosomes)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--chromosomes") from exc
+
+    result = run_imputation(
+        imputation_id,
+        chromosomes=chromosomes_set,
+        threads=threads,
+        memory_gb=memory_gb,
+        ne=ne,
+        force=force,
+    )
+
+    per_chrom = " ".join(f"{k}={v:.1f}s" for k, v in sorted(result.per_chrom_seconds.items()))
+    typer.echo(
+        f"imputation_id={result.imputation_id} "
+        f"attempted={list(result.chromosomes_attempted)} "
+        f"completed={list(result.chromosomes_completed)} "
+        f"failed={list(result.chromosomes_failed)} "
+        f"skipped={list(result.chromosomes_skipped)}",
+    )
+    if per_chrom:
+        typer.echo(f"per_chrom_seconds: {per_chrom}")
+    if result.chromosomes_failed:
+        typer.echo(
+            "Some chromosomes failed; review the structlog output above. "
+            f"Re-run with `--chromosomes {','.join(result.chromosomes_failed)}` "
+            "after addressing the failure.",
+        )
+    elif result.chromosomes_completed:
+        typer.echo(
+            "Next step: `genome imputation import <id>` to load the imputed "
+            "VCFs into genotype_calls and variants_master.",
+        )
 
 
 @imputation_app.command("list")

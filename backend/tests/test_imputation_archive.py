@@ -62,14 +62,19 @@ def test_list_upload_vcfs_returns_empty_when_dir_missing(tmp_path: Path) -> None
     assert a.list_upload_vcfs() == []
 
 
-def test_list_result_vcfs_only_matches_dose_pattern(tmp_path: Path) -> None:
+def test_list_result_vcfs_matches_beagle_and_legacy_topmed_patterns(
+    tmp_path: Path,
+) -> None:
     a = ImputationArchive.for_run(tmp_path, 1)
     a.ensure_layout()
-    (a.result_dir / "chr1.dose.vcf.gz").write_bytes(b"x")
-    (a.result_dir / "chr1.info.gz").write_bytes(b"x")  # info file, not dose
+    # Beagle output (chr<N>.vcf.gz) and legacy TopMed output (chr<N>.dose.vcf.gz)
+    # both glob-match chr*.vcf.gz, so both are surfaced by list_result_vcfs.
+    (a.result_dir / "chr1.vcf.gz").write_bytes(b"x")
+    (a.result_dir / "chr2.dose.vcf.gz").write_bytes(b"x")
+    (a.result_dir / "chr1.info.gz").write_bytes(b"x")  # not a VCF
     (a.result_dir / "topmed_result.zip").write_bytes(b"x")
     files = a.list_result_vcfs()
-    assert [f.name for f in files] == ["chr1.dose.vcf.gz"]
+    assert [f.name for f in files] == ["chr1.vcf.gz", "chr2.dose.vcf.gz"]
 
 
 def test_restrict_file_chmods_to_0600(tmp_path: Path) -> None:
