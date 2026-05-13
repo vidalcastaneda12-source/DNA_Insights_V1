@@ -20,6 +20,13 @@ from genome.imputation.ingest import (
     import_result,
     parse_chromosomes_filter,
 )
+from genome.imputation.reference_panel import (
+    PANEL_CHROMOSOMES,
+    ReferencePanel,
+    default_panel_root,
+    install_panel,
+    validate_panel,
+)
 from genome.imputation.runs import (
     ImputationRun,
     list_runs,
@@ -36,14 +43,19 @@ __all__ = [
     "DEFAULT_R2_THRESHOLD",
     "EXPORT_PIPELINE_VERSION",
     "IMPUTATION_PIPELINE_VERSION",
+    "PANEL_CHROMOSOMES",
     "DryRunResult",
     "ImportResult",
     "ImputationArchive",
     "ImputationRun",
     "PreparedUpload",
+    "ReferencePanel",
+    "default_panel_root",
     "import_result",
+    "install_panel",
     "list_runs",
     "parse_chromosomes_filter",
     "prepare_run",
     "update_status",
+    "validate_panel",
 ]
