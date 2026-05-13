@@ -20,8 +20,6 @@ from genome.imputation import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_R2_THRESHOLD,
     DryRunResult,
-    check_status,
-    download_result,
     import_result,
     list_runs,
     parse_chromosomes_filter,
@@ -44,11 +42,8 @@ imputation_app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
     help=(
-        "Run the merged genotype set through the TopMed Imputation Server.\n\n"
-        "The workflow is partially manual: TopMed's free tier does not expose a\n"
-        "programmatic upload, so the user uploads through TopMed's web UI in\n"
-        "between `prepare` and `status`. See docs/runbooks/imputation.md for\n"
-        "the full walkthrough."
+        "Run the merged genotype set through imputation. The workflow is "
+        "prepare → run → import; see docs/runbooks/imputation.md."
     ),
 )
 config_app = typer.Typer(
@@ -333,7 +328,7 @@ def config_set(
 
 
 # -----------------------------------------------------------------------------
-# `genome imputation` — TopMed roundtrip
+# `genome imputation`
 # -----------------------------------------------------------------------------
 
 
@@ -376,87 +371,6 @@ def imputation_prepare(
     )
     typer.echo(
         "See docs/runbooks/imputation.md for the exact web-UI form fields.",
-    )
-
-
-@imputation_app.command("status")
-def imputation_status(
-    imputation_id: Annotated[int, typer.Argument(help="Run ID from `genome imputation prepare`.")],
-    status_url: Annotated[
-        str,
-        typer.Option(
-            "--status-url",
-            help=(
-                "TopMed job status URL. Copy from the job details page in the web UI "
-                "(of the form `https://imputation.../api/v2/jobs/<job_id>`)."
-            ),
-        ),
-    ],
-) -> None:
-    """Poll TopMed for a job and update this run's status.
-
-    Idempotent: safe to re-run. Writes an audit_log row per attempt.
-    """
-    parsed = check_status(imputation_id, status_url=status_url)
-    typer.echo(
-        f"imputation_id={imputation_id} status={parsed.status} "
-        f"raw_state={parsed.raw_state} job_id={parsed.job_id} "
-        f"completed_at={parsed.completed_at or '-'}",
-    )
-    if parsed.status == "completed":
-        typer.echo(
-            f"Next step: download the result archive with "
-            f"`genome imputation download {imputation_id} --download-url ... --password ...`",
-        )
-    elif parsed.status == "failed":
-        typer.echo(
-            "TopMed reports failure. Check the job's details page for the error, "
-            "then resubmit (a new `genome imputation prepare --force-new` will "
-            "create a fresh run).",
-        )
-
-
-@imputation_app.command("download")
-def imputation_download(
-    imputation_id: Annotated[int, typer.Argument(help="Run ID.")],
-    download_url: Annotated[
-        str,
-        typer.Option(
-            "--download-url",
-            help=(
-                "Encrypted-archive download URL from TopMed's results email or web UI. "
-                "Direct link to the zip file."
-            ),
-        ),
-    ],
-    password: Annotated[
-        str,
-        typer.Option(
-            "--password",
-            help=(
-                "AES-256 password TopMed sent in the upload confirmation email. "
-                "Used only to surface in the runbook step that follows; not stored."
-            ),
-            prompt=True,
-            hide_input=True,
-        ),
-    ],
-) -> None:
-    """Download the encrypted result archive into archive/imputation/run_<id>/result/.
-
-    The archive is **encrypted**. After download, decrypt with the password you
-    supplied (the runbook walks through this — typically `7z x -p<password>
-    topmed_result.zip`).
-    """
-    dest = download_result(
-        imputation_id,
-        download_url=download_url,
-        password=password,
-    )
-    typer.echo(f"imputation_id={imputation_id} downloaded_to={dest}")
-    typer.echo(
-        "Next step: decrypt the archive (see docs/runbooks/imputation.md), "
-        "then run `genome imputation import <id>`.",
     )
 
 
