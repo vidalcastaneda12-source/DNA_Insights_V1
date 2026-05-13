@@ -133,7 +133,7 @@ def test_imputation_help_top_level_and_each_subcommand(
     runner = CliRunner()
     top = runner.invoke(app, ["imputation", "--help"])
     assert top.exit_code == 0
-    for cmd in ("prepare", "status", "download", "import", "list"):
+    for cmd in ("prepare", "import", "list"):
         # Each command should appear in the parent help.
         assert cmd in top.output, f"{cmd!r} missing from `imputation --help`"
         sub = runner.invoke(app, ["imputation", cmd, "--help"])

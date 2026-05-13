@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- TopMed Imputation Server client and its CLI surface: deleted
+  `backend/src/genome/imputation/topmed_client.py` (including
+  `TopMedClient`, `TopMedStatus`, `check_status`, `download_result`,
+  `TOPMED_ENDPOINT_LABEL`, `TOPMED_PANEL`, and the Cloudgene state-code
+  mapping), removed the `genome imputation status` and
+  `genome imputation download` subcommands from `genome.cli`, dropped the
+  TopMed symbols from `genome.imputation.__all__`, and deleted
+  `backend/tests/test_imputation_topmed_client.py` along with the
+  corresponding `status`/`download` plumbing checks in
+  `test_cli_phase4.py`. Phase 4 pivots from TopMed to local Beagle
+  imputation (see
+  `docs/findings/finding-006-topmed-not-viable-for-personal-genomics.md`);
+  the new flow lands in subsequent commits.
+
 ### Changed
 - **Phase 4 pivots from external TopMed imputation to local Beagle 5.5
   imputation.** Real-data verification showed TopMed rejects single-sample
