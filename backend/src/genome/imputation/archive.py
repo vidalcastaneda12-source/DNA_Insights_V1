@@ -6,16 +6,15 @@ Each roundtrip gets its own subdirectory under ``<archive_root>/imputation/``:
 
     <archive_root>/imputation/
         run_0001/
-            upload/                  # per-chromosome VCFs ready for TopMed
+            upload/                  # per-chromosome VCFs ready for imputation
                 chr1.vcf.gz
                 chr2.vcf.gz
                 ...
                 MANIFEST.json        # what we exported and how
-            result/                  # what TopMed sent back, after decryption
-                chr1.dose.vcf.gz
+            result/                  # imputed per-chromosome VCFs
+                chr1.vcf.gz          # Beagle output
                 ...
-                topmed_result.zip    # the original encrypted archive
-                topmed_result.sha256 # checksum + bookkeeping
+                (legacy TopMed runs may have chr*.dose.vcf.gz instead)
 
 ``run_0001`` matches ``imputation_runs.imputation_id`` zero-padded to 4 digits;
 this makes ``ls`` output sort correctly and keeps the on-disk layout aligned
@@ -69,12 +68,12 @@ class ImputationArchive:
 
     @property
     def encrypted_archive(self) -> Path:
-        """``<result_dir>/topmed_result.zip`` — the encrypted archive as downloaded."""
+        """``<result_dir>/topmed_result.zip`` — legacy TopMed encrypted archive path."""
         return self.result_dir / "topmed_result.zip"
 
     @property
     def download_metadata(self) -> Path:
-        """``<result_dir>/topmed_result.sha256`` — checksum + bookkeeping."""
+        """``<result_dir>/topmed_result.sha256`` — legacy TopMed checksum path."""
         return self.result_dir / "topmed_result.sha256"
 
     def ensure_layout(self) -> None:
@@ -98,10 +97,16 @@ class ImputationArchive:
         return sorted(self.upload_dir.glob("chr*.vcf.gz"))
 
     def list_result_vcfs(self) -> list[Path]:
-        """All ``chr*.dose.vcf.gz`` files TopMed produced (after decryption)."""
+        """All ``chr*.vcf.gz`` files in the result directory.
+
+        Matches both the Beagle runner's output (``chr<N>.vcf.gz``) and any
+        legacy TopMed result files (``chr<N>.dose.vcf.gz`` — also a glob
+        match of ``chr*.vcf.gz``). Non-VCF files in the result directory
+        (e.g. encrypted-archive bookkeeping) are filtered out by the glob.
+        """
         if not self.result_dir.is_dir():
             return []
-        return sorted(self.result_dir.glob("chr*.dose.vcf.gz"))
+        return sorted(self.result_dir.glob("chr*.vcf.gz"))
 
 
 def restrict_file(path: Path) -> None:

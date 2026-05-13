@@ -33,6 +33,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `genome imputation panel install | status` subcommands).
 
 ### Added
+- **Phase 4 Beagle pivot — local Beagle 5.5 runner.** New
+  `genome.imputation.beagle_runner` module pipes the per-chromosome
+  upload VCFs (produced by the existing `prepare_run`) through Beagle
+  5.5 against the local 1000 Genomes Phase 3 reference panel. Runs one
+  `java -jar beagle.jar` subprocess per chromosome with `ref=`, `map=`,
+  `gt=`, `out=`, `nthreads=`, `ne=`, and `impute=true` arguments;
+  streams Beagle's stderr line-by-line into structlog at INFO so a
+  long-running invocation is observable. Defaults: heap `-Xmx8g`,
+  `ne=1_000_000` (Beagle's outbred-human default), threads
+  `max(1, os.cpu_count() - 1)`. Resumable: a chromosome whose output
+  VCF already exists and parses cleanly with cyvcf2 is skipped unless
+  `--force` is passed. Partial failures are recoverable — one
+  chromosome's failure does not abort the rest of the run; the
+  `BeagleRunResult` reports which chromosomes succeeded, failed, and
+  were skipped. Status transitions: `pending` → `processing` on first
+  chromosome start; `completed` (stamps `completed_at`) when every
+  attempted chromosome succeeds; `failed` when every attempted
+  chromosome fails; mixed outcomes leave the run at `processing` so
+  the user can retry the failures without losing the successes.
+  chrY is intentionally skipped (the 1000G high-coverage release omits
+  chrY); the runner logs the skip and continues. Output VCFs land at
+  `archive/imputation/run_<id>/result/chr<N>.vcf.gz` with 0600 perms,
+  the same path the existing `import_result` step picks up via
+  `archive.list_result_vcfs()` (whose glob is now `chr*.vcf.gz` so
+  Beagle output and any legacy `chr*.dose.vcf.gz` are both found).
+  New CLI subcommand
+  `genome imputation run <id> [--chromosomes <list>] [--threads <n>] [--memory-gb <n>] [--ne <n>] [--force]`.
+  Pre-flight checks: the run row exists and is in `pending` /
+  `processing` (or `completed` / `failed` with `--force`), Java 8+ is
+  on PATH (parsed from `java -version`), and the reference panel is
+  fully populated (the error points the user at `genome imputation
+  panel install`).
 - **Phase 4 Beagle pivot — reference-panel management.** New
   `genome.imputation.reference_panel` module owns the local Beagle
   reference-panel layout under `~/.cache/genome/imputation/` by default
