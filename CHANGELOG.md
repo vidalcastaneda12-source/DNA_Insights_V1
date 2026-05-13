@@ -110,6 +110,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`ddl/group_1_genotype.sql`) are updated together; existing local DuckDB
   files need a rebuild (`rm -rf data/ && uv run genome init`) per the
   CLAUDE.md schema-change convention.
+- Added `'beagle_imputed'` to `source_enum` so post-Beagle imputed calls
+  carry a distinct source label from the existing `'topmed_imputed'` (which
+  is retained for backward compatibility per finding-006 even though
+  TopMed-imputed calls never landed in real data). Supports the Phase 4
+  pivot to local Beagle 5.5 imputation. Schema markdown
+  (`docs/schemas/schema_group_1_genotype_data.md`) and the extracted DDL
+  (`ddl/group_1_genotype.sql`) are updated together; existing local DuckDB
+  files need a rebuild (`rm -rf data/ && uv run genome init`) per the
+  CLAUDE.md schema-change convention.
 
 ### Fixed
 - Seeded default for `user_preferences.external_calls_enabled`. Previously
