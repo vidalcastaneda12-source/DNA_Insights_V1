@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Final, Literal
 if TYPE_CHECKING:
     from pathlib import Path
 
-Source = Literal["23andme", "ancestry", "topmed_imputed"]
+Source = Literal["23andme", "ancestry", "beagle_imputed", "topmed_imputed"]
 StrandStatus = Literal[
     "resolved_plus",
     "resolved_minus",

@@ -36,7 +36,9 @@ from genome.ingest.liftover import LiftoverEngine
 from genome.merge import merge_all
 from genome.privacy.external_client import is_external_enabled, write_config_change_audit
 
-_VALID_INGEST_SOURCES: tuple[str, ...] = tuple(s for s in get_args(Source) if s != "topmed_imputed")
+_VALID_INGEST_SOURCES: tuple[str, ...] = tuple(
+    s for s in get_args(Source) if s not in {"topmed_imputed", "beagle_imputed"}
+)
 _VALID_LIFTOVER_ENGINES: tuple[str, ...] = tuple(get_args(LiftoverEngine))
 
 # Allowed value_types for `genome config set` — must stay in sync with the
@@ -452,8 +454,8 @@ def imputation_import(  # noqa: PLR0913 — one CLI flag per operational control
     """Stream the imputed VCFs into the database.
 
     Reads archive/imputation/run_<id>/result/chr*.dose.vcf.gz files (the
-    decrypted TopMed output) and writes ``genotype_calls`` rows with
-    ``source='topmed_imputed'``, plus a fresh ``ingestion_runs`` row and
+    Beagle 5.5 output) and writes ``genotype_calls`` rows with
+    ``source='beagle_imputed'``, plus a fresh ``ingestion_runs`` row and
     ``sample_qc`` row.
 
     Idempotent: re-importing supersedes prior imputed calls for the same

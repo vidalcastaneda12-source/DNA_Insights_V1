@@ -46,8 +46,8 @@ def _seed_completed_run(*, archive_root: Path | None = None) -> int:
         imp_id = insert_run(
             conn,
             input_run_ids=(1,),
-            imputation_server="topmed",
-            reference_panel="topmed_r3",
+            imputation_server="beagle",
+            reference_panel="1000g_phase3_grch38",
             pipeline_version="imputation_prepare_v0.1.0",
             variants_input=100,
         )
@@ -78,18 +78,21 @@ def _write_synthetic_vcf(  # noqa: PLR0913 — direct knobs make per-test variat
     r2_high_count: int = 0,
     start_pos: int = 100,
     include_no_call: bool = False,
+    r2_info_key: str = "R2",
 ) -> None:
     """Build a tiny imputed VCF.
 
     The variants are SNVs at consecutive positions starting at ``start_pos``.
     ``r2_low_count`` of them get R²=0.25; ``r2_high_count`` get R²=0.95; the
     rest get R²=0.5. ``include_no_call=True`` makes the first variant a `./.`
-    genotype to exercise the no-call path.
+    genotype to exercise the no-call path. ``r2_info_key`` controls which
+    INFO key carries the R² value — ``DR2`` is Beagle 5.5's native field,
+    ``R2`` matches TopMed-style output, ``Rsq`` matches older Minimac.
     """
     header = (
         "##fileformat=VCFv4.2\n"
         f"##contig=<ID={chrom},length=248956422,assembly=GRCh38>\n"
-        '##INFO=<ID=R2,Number=1,Type=Float,Description="Imputation R-squared">\n'
+        f'##INFO=<ID={r2_info_key},Number=1,Type=Float,Description="Imputation R-squared">\n'
         '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n'
         "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMPLE\n"
     )
@@ -116,13 +119,13 @@ def _write_synthetic_vcf(  # noqa: PLR0913 — direct knobs make per-test variat
         else:
             gt = "1|1"
         lines.append(
-            f"{chrom}\t{pos}\t{rsid}\t{ref}\t{alt}\t.\tPASS\tR2={r2}\tGT\t{gt}\n",
+            f"{chrom}\t{pos}\t{rsid}\t{ref}\t{alt}\t.\tPASS\t{r2_info_key}={r2}\tGT\t{gt}\n",
         )
     with gzip.open(dest, "wt", encoding="ascii") as out:
         out.writelines(lines)
 
 
-def test_import_writes_genotype_calls_with_r2_and_topmed_source(
+def test_import_writes_genotype_calls_with_r2_and_beagle_source(
     isolated_settings: dict[str, str],
     tmp_path: Path,  # noqa: ARG001 — isolated_settings already redirects paths
 ) -> None:
@@ -158,13 +161,13 @@ def test_import_writes_genotype_calls_with_r2_and_topmed_source(
             "SELECT COUNT(*) FROM variants_master",
         ).fetchone()[0]
         imp_call_count = conn.execute(
-            "SELECT COUNT(*) FROM genotype_calls WHERE source='topmed_imputed'",
+            "SELECT COUNT(*) FROM genotype_calls WHERE source='beagle_imputed'",
         ).fetchone()[0]
     assert master_n == 15
     assert imp_call_count == 15
-    assert all(r[0] == "topmed_imputed" for r in gc_rows)
+    assert all(r[0] == "beagle_imputed" for r in gc_rows)
     assert all(r[1] for r in gc_rows)  # is_imputed
-    assert all(r[2] == "topmed_r3" for r in gc_rows)
+    assert all(r[2] == "1000g_phase3_grch38" for r in gc_rows)
     assert all(0.0 < r[3] <= 1.0 for r in gc_rows)
 
 
@@ -195,7 +198,7 @@ def test_import_creates_one_ingestion_run_and_one_sample_qc(
             " FROM sample_qc WHERE qc_id = ?",
             [result.qc_id],
         ).fetchall()
-    assert runs == [("topmed_imputed", "GRCh38", 5)]
+    assert runs == [("beagle_imputed", "GRCh38", 5)]
     assert qc[0][0] == 1  # call_rate = 1.0 exactly
     assert qc[0][3] in {"pass", "warn", "fail"}
     # The mean R² should be the mean of the synthetic file's R² values (all 0.5
@@ -264,8 +267,8 @@ def test_import_rejects_pending_run(
         imp_id = insert_run(
             conn,
             input_run_ids=(1,),
-            imputation_server="topmed",
-            reference_panel="topmed_r3",
+            imputation_server="beagle",
+            reference_panel="1000g_phase3_grch38",
             pipeline_version="imputation_prepare_v0.1.0",
             variants_input=10,
         )
@@ -345,10 +348,10 @@ def test_benchmark_streams_1m_rows_within_60s(
 ) -> None:
     """1M-row imputed VCF streams in under 60 seconds.
 
-    The real TopMed result is ~30M variants. A 1M-row benchmark gives us a
-    ~30x scaling guide. Real-world numbers from the ingest path: on a
-    development machine, 1M rows clear in well under 10 seconds; the 60-second
-    ceiling is generous slack to survive CI variability.
+    A 1M-row benchmark gives a useful scaling guide for the full imputed
+    set (several million variants). Real-world numbers from the ingest path:
+    on a development machine, 1M rows clear in well under 10 seconds; the
+    60-second ceiling is generous slack to survive CI variability.
     """
     init_databases()
     archive_root = isolated_settings_archive_root(isolated_settings)
@@ -419,6 +422,33 @@ def test_r2_threshold_zero_lets_every_variant_through(
     assert isinstance(result, ImportResult)
     assert result.variants_total == 10
     assert result.variants_below_threshold == 0
+
+
+def test_import_reads_beagle_native_dr2_info_field(
+    isolated_settings: dict[str, str],
+) -> None:
+    """Beagle 5.5 emits INFO/DR2; the importer must read it natively."""
+    init_databases()
+    archive_root = isolated_settings_archive_root(isolated_settings)
+    imp_id = _seed_completed_run(archive_root=archive_root)
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+    # 10 variants total, all carrying INFO/DR2 instead of R2: 2 at DR²=0.25
+    # (below 0.3), 3 at DR²=0.95, 5 at DR²=0.5.
+    _write_synthetic_vcf(
+        archive.result_dir / "chr1.dose.vcf.gz",
+        n_variants=10,
+        r2_low_count=2,
+        r2_high_count=3,
+        r2_info_key="DR2",
+    )
+
+    result = import_result(imp_id, archive_root=archive_root, r2_threshold=0.3)
+    assert isinstance(result, ImportResult)
+    assert result.variants_total == 8
+    assert result.variants_below_threshold == 2
+    # mean_r2 should reflect the parsed DR2 values: (3*0.95 + 5*0.5) / 8.
+    assert result.mean_r2 is not None
+    assert abs(result.mean_r2 - (3 * 0.95 + 5 * 0.5) / 8) < 1e-6
 
 
 def test_r2_threshold_validates_range(
