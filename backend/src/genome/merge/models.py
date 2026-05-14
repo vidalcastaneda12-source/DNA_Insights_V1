@@ -34,7 +34,9 @@ class CallView:
     All allele fields are post-ingest normalized (alphabetically ordered,
     upper-case single tokens or empty when no-call). ``call_id`` identifies
     the underlying ``genotype_calls`` row so the discrepancy / consensus
-    rows can reference it.
+    rows can reference it. ``imputation_r2`` is populated only for imputed
+    sources (``beagle_imputed`` / ``topmed_imputed``) and propagates to
+    ``consensus_genotypes.consensus_r2`` on imputed-only consensus rows.
     """
 
     call_id: int
@@ -42,6 +44,7 @@ class CallView:
     allele_1: str | None
     allele_2: str | None
     is_no_call: bool
+    imputation_r2: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,8 +52,13 @@ class VariantPair:
     """Everything the consensus rule needs about one variant.
 
     Built by :mod:`genome.merge.pipeline` from a ``variants_master`` row plus
-    its active ``genotype_calls`` rows. ``twentythree`` and ``ancestry`` are
-    ``None`` when that source did not contribute an active call.
+    its active ``genotype_calls`` rows. ``twentythree``, ``ancestry``, and
+    ``imputed`` are ``None`` when that source did not contribute an active
+    call. ``imputed`` carries the Phase 4 ``beagle_imputed`` call (if any);
+    when only the imputed call is present, ``consensus_v1`` produces an
+    ``imputed_only`` consensus, when one or both chip calls are present the
+    chip resolution prevails and the imputed call is appended to
+    ``contributing_calls`` as confirming evidence.
     """
 
     variant_id: int
@@ -60,6 +68,7 @@ class VariantPair:
     alt_allele: str
     twentythree: CallView | None
     ancestry: CallView | None
+    imputed: CallView | None = None
 
 
 @dataclass(frozen=True, slots=True)

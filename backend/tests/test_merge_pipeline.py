@@ -32,7 +32,9 @@ class Site:
 
     Keep the fields in 1:1 correspondence with the parts of the schema we
     need at merge time. ``call_23`` / ``call_anc`` are ``(a1, a2, is_no_call)``
-    or ``None`` when that source has no active call on this row.
+    or ``None`` when that source has no active call on this row. ``call_imp``
+    is ``(a1, a2, is_no_call, imputation_r2)`` for the Phase 4 imputed
+    source or ``None`` when no imputed call exists at this variant.
     """
 
     variant_id: int
@@ -43,6 +45,7 @@ class Site:
     alt: str
     call_23: tuple[str, str, bool] | None
     call_anc: tuple[str, str, bool] | None
+    call_imp: tuple[str, str, bool, float] | None = None
 
 
 def _insert_variants(conn: DuckDBPyConnection, sites: list[Site]) -> None:
@@ -71,15 +74,19 @@ def _insert_call(  # noqa: PLR0913 — schema-aligned positional fields
     allele_1: str,
     allele_2: str,
     is_no_call: bool,
+    is_imputed: bool = False,
+    imputation_r2: float | None = None,
 ) -> None:
     conn.execute(
         """
         INSERT INTO genotype_calls (
             call_id, variant_id, source, source_chip_version, ingestion_run_id,
             genotype_raw, allele_1, allele_2, is_no_call,
-            is_imputed, raw_strand, strand_status, quality_flags, is_active
+            is_imputed, imputation_r2, imputation_panel,
+            raw_strand, strand_status, quality_flags, is_active
         ) VALUES (?, ?, ?::source_enum, 'test', ?,
-                  ?, ?, ?, ?, FALSE, '+',
+                  ?, ?, ?, ?, ?, ?, ?,
+                  '+',
                   CASE WHEN ? THEN 'unknown'::strand_status_enum
                        ELSE 'resolved_plus'::strand_status_enum END,
                   ARRAY[]::VARCHAR[], TRUE)
@@ -93,6 +100,9 @@ def _insert_call(  # noqa: PLR0913 — schema-aligned positional fields
             None if is_no_call else allele_1,
             None if is_no_call else allele_2,
             is_no_call,
+            is_imputed,
+            imputation_r2,
+            "1000g_phase3_grch38" if is_imputed else None,
             is_no_call,
         ],
     )
@@ -117,6 +127,8 @@ def _seed(conn: DuckDBPyConnection, sites: list[Site]) -> None:
     """Seed variants_master, genotype_calls, ingestion_runs for the merge to chew on."""
     _insert_ingestion_run(conn, 1, "23andme")
     _insert_ingestion_run(conn, 2, "ancestry")
+    # Only register the imputed ingestion_run lazily — most fixtures don't need it.
+    imputed_run_registered = False
     _insert_variants(conn, sites)
 
     next_call_id = 1
@@ -145,6 +157,24 @@ def _seed(conn: DuckDBPyConnection, sites: list[Site]) -> None:
                 allele_1=a1,
                 allele_2=a2,
                 is_no_call=nc,
+            )
+            next_call_id += 1
+        if s.call_imp is not None:
+            if not imputed_run_registered:
+                _insert_ingestion_run(conn, 3, "beagle_imputed")
+                imputed_run_registered = True
+            a1, a2, nc, r2 = s.call_imp
+            _insert_call(
+                conn,
+                call_id=next_call_id,
+                variant_id=s.variant_id,
+                source="beagle_imputed",
+                run_id=3,
+                allele_1=a1,
+                allele_2=a2,
+                is_no_call=nc,
+                is_imputed=True,
+                imputation_r2=r2,
             )
             next_call_id += 1
 
@@ -246,6 +276,82 @@ CORPUS: list[Site] = [
         alt="T",
         call_23=None,
         call_anc=("C", "T", False),  # complement of A/G after sort
+    ),
+    # 9) Phase 4: imputed-only, called. Only beagle_imputed has an active call.
+    Site(
+        variant_id=9,
+        rsid="rs_imputed_only_called",
+        chrom="1",
+        pos=9000,
+        ref="A",
+        alt="G",
+        call_23=None,
+        call_anc=None,
+        call_imp=("A", "G", False, 0.92),
+    ),
+    # 10) Phase 4: imputed-only, no-call.
+    Site(
+        variant_id=10,
+        rsid="rs_imputed_only_nocall",
+        chrom="1",
+        pos=10000,
+        ref="C",
+        alt="T",
+        call_23=None,
+        call_anc=None,
+        call_imp=("", "", True, 0.15),
+    ),
+    # 11) Phase 4: 23andme + beagle_imputed at the same variant.
+    #     Chip resolution prevails; imputed contributes confirming evidence.
+    Site(
+        variant_id=11,
+        rsid="rs_chip23_plus_imputed",
+        chrom="1",
+        pos=11000,
+        ref="A",
+        alt="G",
+        call_23=("A", "G", False),
+        call_anc=None,
+        call_imp=("A", "G", False, 0.88),
+    ),
+    # 12) Phase 4: both chips concordant + beagle_imputed. Chip both_concordant
+    #     stays; imputed appended to contributing_calls.
+    Site(
+        variant_id=12,
+        rsid="rs_both_chips_plus_imputed",
+        chrom="1",
+        pos=12000,
+        ref="A",
+        alt="G",
+        call_23=("A", "G", False),
+        call_anc=("A", "G", False),
+        call_imp=("A", "G", False, 0.95),
+    ),
+    # 13+14) Phase 4: tier-3 strand-flip candidate where one row also has an
+    #     active beagle_imputed call. Our implementation excludes pairs with
+    #     imputed calls from tier-3 candidacy (so the imputed call is not
+    #     dropped from contributing_calls); both rows stay single_source.
+    Site(
+        variant_id=13,
+        rsid="rs_tier3_flip_with_imputed_a",
+        chrom="1",
+        pos=13000,
+        ref="A",
+        alt="G",
+        call_23=("A", "G", False),
+        call_anc=None,
+        call_imp=None,
+    ),
+    Site(
+        variant_id=14,
+        rsid="rs_tier3_flip_with_imputed_b",
+        chrom="1",
+        pos=13000,  # same (chrom, pos) as row 13
+        ref="C",
+        alt="T",
+        call_23=None,
+        call_anc=("C", "T", False),  # complement of A/G after sort
+        call_imp=("C", "T", False, 0.80),  # confirming evidence on this row
     ),
 ]
 
@@ -515,28 +621,34 @@ def test_merge_result_summary_counts(isolated_settings: dict[str, str]) -> None:
         _seed(conn, CORPUS)
 
     result = merge_all()
-    # 1 both_concordant; 1 unresolvable genotype_mismatch; 1 unresolvable strand_ambiguous;
-    # 1 single_source no_call_diff; 2 single_source platform_unique;
-    # 2 disagreement_resolved from tier-3 flip.
+    # 1 both_concordant + 1 chip+chip+imputed both_concordant (v12);
+    # 2 unresolvable (genotype_mismatch + strand_ambiguous);
+    # 6 single_source (v4 no_call_diff, v5/v6 platform_unique, v11 chip+imputed,
+    #   v13/v14 tier-3 candidate excluded because v14 carries an imputed call);
+    # 2 disagreement_resolved from the v7+v8 tier-3 flip;
+    # 2 imputed_only (v9 called, v10 no-call).
     assert result.method_counts == {
-        "both_concordant": 1,
+        "both_concordant": 2,
         "unresolvable": 2,
-        "single_source": 3,
+        "single_source": 6,
         "disagreement_resolved": 2,
+        "imputed_only": 2,
     }
     # genotype_mismatch is strictly the unresolved biological disagreement now;
     # the 2 tier-3 strand-flip rows land in their own strand_flip_resolved bucket.
+    # platform_unique gains v11 (chip+imputed at platform-unique site) and
+    # v13/v14 (tier-3 candidate held back by the imputed-bearing guard).
     assert result.discrepancy_type_counts == {
         "genotype_mismatch": 1,
         "strand_flip_resolved": 2,
         "strand_ambiguous": 1,
         "no_call_diff": 1,
-        "platform_unique": 2,
+        "platform_unique": 5,
     }
     assert result.severity_counts == {
         "major": 1,
         "minor": 2,
-        "info": 4,
+        "info": 7,
     }
     assert result.strand_flip_resolutions == 2
     # Concordance denominator: concordant + flip-resolved shared variants vs
@@ -557,14 +669,14 @@ def test_merge_cli_runs_end_to_end(isolated_settings: dict[str, str]) -> None:
     result = runner.invoke(app, ["merge"])
     assert result.exit_code == 0, result.output
     assert f"rule={MERGE_VERSION}" in result.output
-    assert "consensus_rows=8" in result.output
+    assert f"consensus_rows={len(CORPUS)}" in result.output
     assert "strand_flips=2" in result.output
     assert "discrepancy_types:" in result.output
 
 
 @pytest.mark.parametrize(
     "variant_id",
-    [1, 2, 3, 4, 5, 6, 7, 8],
+    [s.variant_id for s in CORPUS],
 )
 def test_call_comparison_view_returns_each_variant(
     isolated_settings: dict[str, str],
@@ -584,3 +696,228 @@ def test_call_comparison_view_returns_each_variant(
         ).fetchone()
     assert row is not None
     assert row[0] is not None
+
+
+# ----------------------------------------------------------------------------
+# Phase 4 — imputation as third source. The fixtures below assert each branch
+# of the consensus_v1 extension: imputed-only (called and no-call), chip plus
+# imputed (single_source and both_concordant cases), and the tier-3 strand-
+# flip guard that excludes imputed-bearing rows from tier-3 candidacy.
+# ----------------------------------------------------------------------------
+
+
+def test_merge_imputed_only_called(isolated_settings: dict[str, str]) -> None:
+    """Variant with only a beagle_imputed call resolves as ``imputed_only``.
+
+    The consensus carries the imputed call's alleles and the per-variant
+    imputation_r2 propagates to ``consensus_genotypes.consensus_r2``. No
+    discrepancy is emitted — an imputed-only call is a thin source, not a
+    disagreement with anything.
+    """
+    init_databases()
+    db = _duckdb_path(isolated_settings)
+    with duckdb_connection(db) as conn:
+        _seed(conn, CORPUS)
+    merge_all()
+
+    with duckdb_connection(db, read_only=True) as conn:
+        consensus = conn.execute(
+            "SELECT consensus_method, consensus_allele_1, consensus_allele_2,"
+            "       is_no_call, dosage, is_imputed, consensus_r2,"
+            "       array_length(contributing_calls)"
+            "  FROM consensus_genotypes WHERE variant_id = 9",
+        ).fetchone()
+        disc_n = conn.execute(
+            "SELECT COUNT(*) FROM discrepancies WHERE variant_id = 9",
+        ).fetchone()
+    assert consensus is not None
+    method, a1, a2, is_no_call, dosage, is_imputed, r2, contributing_n = consensus
+    assert method == "imputed_only"
+    assert (a1, a2) == ("A", "G")
+    assert is_no_call is False
+    assert dosage == 1  # A/G het with alt='G'
+    assert is_imputed is True
+    assert r2 is not None
+    assert abs(r2 - 0.92) < 1e-6
+    assert contributing_n == 1
+    assert disc_n == (0,)
+
+
+def test_merge_imputed_only_no_call(isolated_settings: dict[str, str]) -> None:
+    """Variant with only a beagle_imputed no-call resolves as ``imputed_only`` no-call.
+
+    is_imputed remains True and the imputation_r2 propagates even though the
+    call itself is a no-call — downstream filters can still see that this
+    site was looked up against the panel.
+    """
+    init_databases()
+    db = _duckdb_path(isolated_settings)
+    with duckdb_connection(db) as conn:
+        _seed(conn, CORPUS)
+    merge_all()
+
+    with duckdb_connection(db, read_only=True) as conn:
+        consensus = conn.execute(
+            "SELECT consensus_method, is_no_call, is_imputed, consensus_r2"
+            "  FROM consensus_genotypes WHERE variant_id = 10",
+        ).fetchone()
+        disc_n = conn.execute(
+            "SELECT COUNT(*) FROM discrepancies WHERE variant_id = 10",
+        ).fetchone()
+    assert consensus is not None
+    method, is_no_call, is_imputed, r2 = consensus
+    assert method == "imputed_only"
+    assert is_no_call is True
+    assert is_imputed is True
+    assert r2 is not None
+    assert abs(r2 - 0.15) < 1e-6
+    assert disc_n == (0,)
+
+
+def test_merge_chip_plus_imputed_chip_prevails(
+    isolated_settings: dict[str, str],
+) -> None:
+    """Chip + imputed at the same variant: chip resolution stays, imputed appended.
+
+    Variant 11 has a 23andme call A/G and a beagle_imputed call A/G. The
+    consensus method must remain ``single_source`` (the chip-only result),
+    ``is_imputed`` stays False, alleles/dosage come from the chip call, and
+    ``contributing_calls`` carries both call_ids — chip first, imputed
+    appended.
+    """
+    init_databases()
+    db = _duckdb_path(isolated_settings)
+    with duckdb_connection(db) as conn:
+        _seed(conn, CORPUS)
+    merge_all()
+
+    with duckdb_connection(db, read_only=True) as conn:
+        consensus = conn.execute(
+            "SELECT consensus_method, consensus_allele_1, consensus_allele_2,"
+            "       is_imputed, consensus_r2,"
+            "       array_length(contributing_calls)"
+            "  FROM consensus_genotypes WHERE variant_id = 11",
+        ).fetchone()
+        # Verify the two call_ids in contributing_calls map to the chip 23andme
+        # call and the beagle_imputed call respectively, in that order.
+        sources = conn.execute(
+            "SELECT gc.source"
+            "  FROM consensus_genotypes cg, UNNEST(cg.contributing_calls)"
+            "       WITH ORDINALITY AS u(call_id, ord)"
+            "  JOIN genotype_calls gc ON gc.call_id = u.call_id"
+            " WHERE cg.variant_id = 11"
+            " ORDER BY u.ord",
+        ).fetchall()
+    assert consensus is not None
+    method, a1, a2, is_imputed, r2, contributing_n = consensus
+    assert method == "single_source"
+    assert (a1, a2) == ("A", "G")
+    assert is_imputed is False
+    # consensus_r2 is left None on chip-derived rows: imputation is confirming
+    # evidence, not the consensus source. The per-call imputation_r2 is still
+    # discoverable via the imputed call_id in contributing_calls.
+    assert r2 is None
+    assert contributing_n == 2
+    assert [s for (s,) in sources] == ["23andme", "beagle_imputed"]
+
+
+def test_merge_both_chips_plus_imputed_concordant(
+    isolated_settings: dict[str, str],
+) -> None:
+    """Both chips concordant + imputed: consensus stays both_concordant, imputed appended.
+
+    Variant 12 has 23andme A/G, ancestry A/G, and beagle_imputed A/G all
+    agreeing. The chip both_concordant resolution must stand byte-for-byte
+    (alleles, dosage, is_imputed=False, confidence=0.99); contributing_calls
+    grows from two to three entries, with the imputed call_id appended last.
+    """
+    init_databases()
+    db = _duckdb_path(isolated_settings)
+    with duckdb_connection(db) as conn:
+        _seed(conn, CORPUS)
+    merge_all()
+
+    with duckdb_connection(db, read_only=True) as conn:
+        consensus = conn.execute(
+            "SELECT consensus_method, consensus_allele_1, consensus_allele_2,"
+            "       is_imputed, dosage, confidence,"
+            "       array_length(contributing_calls)"
+            "  FROM consensus_genotypes WHERE variant_id = 12",
+        ).fetchone()
+        sources = conn.execute(
+            "SELECT gc.source"
+            "  FROM consensus_genotypes cg, UNNEST(cg.contributing_calls)"
+            "       WITH ORDINALITY AS u(call_id, ord)"
+            "  JOIN genotype_calls gc ON gc.call_id = u.call_id"
+            " WHERE cg.variant_id = 12"
+            " ORDER BY u.ord",
+        ).fetchall()
+        disc_n = conn.execute(
+            "SELECT COUNT(*) FROM discrepancies WHERE variant_id = 12",
+        ).fetchone()
+    assert consensus is not None
+    method, a1, a2, is_imputed, dosage, confidence, contributing_n = consensus
+    assert method == "both_concordant"
+    assert (a1, a2) == ("A", "G")
+    assert is_imputed is False
+    assert dosage == 1
+    assert confidence is not None
+    assert abs(float(confidence) - 0.99) < 1e-6
+    assert contributing_n == 3
+    assert [s for (s,) in sources] == ["23andme", "ancestry", "beagle_imputed"]
+    # both_concordant emits no discrepancy.
+    assert disc_n == (0,)
+
+
+def test_merge_tier3_excludes_pairs_with_imputed_call(
+    isolated_settings: dict[str, str],
+) -> None:
+    """Tier-3 candidacy is suppressed when any candidate row carries an imputed call.
+
+    Variants 13 and 14 sit at the same (chrom, pos) with complementary
+    alleles — exactly the shape that would trigger a tier-3 strand-flip
+    rewrite. But variant 14 also has an active beagle_imputed call. Letting
+    the tier-3 rewrite proceed would replace v14's contributing_calls with
+    (23andme_id, ancestry_id) and drop the imputed call from the audit trail.
+    The implementation therefore excludes any pair with an imputed call from
+    tier-3 candidacy: both rows stay ``single_source`` with the imputed call
+    preserved on v14.
+    """
+    init_databases()
+    db = _duckdb_path(isolated_settings)
+    with duckdb_connection(db) as conn:
+        _seed(conn, CORPUS)
+    merge_all()
+
+    with duckdb_connection(db, read_only=True) as conn:
+        rows = conn.execute(
+            "SELECT variant_id, consensus_method, array_length(contributing_calls)"
+            "  FROM consensus_genotypes WHERE variant_id IN (13, 14)"
+            "  ORDER BY variant_id",
+        ).fetchall()
+        # No strand_flip_resolved discrepancies for these two rows; the only
+        # discrepancies should be platform_unique at info severity.
+        discs = conn.execute(
+            "SELECT variant_id, discrepancy_type, severity"
+            "  FROM discrepancies WHERE variant_id IN (13, 14)"
+            "  ORDER BY variant_id",
+        ).fetchall()
+        v14_sources = conn.execute(
+            "SELECT gc.source"
+            "  FROM consensus_genotypes cg, UNNEST(cg.contributing_calls)"
+            "       WITH ORDINALITY AS u(call_id, ord)"
+            "  JOIN genotype_calls gc ON gc.call_id = u.call_id"
+            " WHERE cg.variant_id = 14"
+            " ORDER BY u.ord",
+        ).fetchall()
+    assert rows == [
+        (13, "single_source", 1),  # 23andme only
+        (14, "single_source", 2),  # ancestry + imputed
+    ]
+    assert discs == [
+        (13, "platform_unique", "info"),
+        (14, "platform_unique", "info"),
+    ]
+    # Imputed call is preserved on v14's contributing_calls — that is exactly
+    # what the tier-3 exclusion protects against.
+    assert [s for (s,) in v14_sources] == ["ancestry", "beagle_imputed"]

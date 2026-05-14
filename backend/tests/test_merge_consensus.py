@@ -21,6 +21,7 @@ def _pair(  # noqa: PLR0913 — schema-aligned positional fields
     alt: str = "G",
     twentythree: CallView | None,
     ancestry: CallView | None,
+    imputed: CallView | None = None,
 ) -> VariantPair:
     return VariantPair(
         variant_id=variant_id,
@@ -30,16 +31,18 @@ def _pair(  # noqa: PLR0913 — schema-aligned positional fields
         alt_allele=alt,
         twentythree=twentythree,
         ancestry=ancestry,
+        imputed=imputed,
     )
 
 
-def _call(
+def _call(  # noqa: PLR0913 — one positional per CallView field
     *,
     call_id: int,
     source: str,
     a1: str | None,
     a2: str | None,
     is_no_call: bool = False,
+    imputation_r2: float | None = None,
 ) -> CallView:
     return CallView(
         call_id=call_id,
@@ -47,6 +50,7 @@ def _call(
         allele_1=a1,
         allele_2=a2,
         is_no_call=is_no_call,
+        imputation_r2=imputation_r2,
     )
 
 
@@ -250,3 +254,142 @@ def test_no_active_calls_anywhere_is_defensive_unresolvable() -> None:
     assert consensus.is_no_call is True
     assert consensus.contributing_calls == ()
     assert discrepancies == []
+
+
+# ----------------------------------------------------------------------------
+# Phase 4 — imputed source. Each branch of the consensus_v1 extension gets
+# a tightly-scoped unit test against the resolve() function directly.
+# ----------------------------------------------------------------------------
+
+
+def test_imputed_only_called_resolves_to_imputed_only() -> None:
+    """No chip calls, just a beagle_imputed call: imputed_only consensus."""
+    pair = _pair(
+        twentythree=None,
+        ancestry=None,
+        imputed=_call(
+            call_id=10,
+            source="beagle_imputed",
+            a1="A",
+            a2="G",
+            imputation_r2=0.92,
+        ),
+    )
+    consensus, discrepancies = resolve(pair)
+    assert consensus.consensus_method == "imputed_only"
+    assert (consensus.consensus_allele_1, consensus.consensus_allele_2) == ("A", "G")
+    assert consensus.is_no_call is False
+    assert consensus.is_imputed is True
+    assert consensus.consensus_r2 == 0.92
+    assert consensus.dosage == 1
+    assert consensus.contributing_calls == (10,)
+    assert consensus.confidence is None
+    assert discrepancies == []
+
+
+def test_imputed_only_no_call_resolves_to_imputed_only_no_call() -> None:
+    pair = _pair(
+        twentythree=None,
+        ancestry=None,
+        imputed=_call(
+            call_id=11,
+            source="beagle_imputed",
+            a1=None,
+            a2=None,
+            is_no_call=True,
+            imputation_r2=0.15,
+        ),
+    )
+    consensus, discrepancies = resolve(pair)
+    assert consensus.consensus_method == "imputed_only"
+    assert consensus.is_no_call is True
+    assert consensus.is_imputed is True
+    assert consensus.consensus_r2 == 0.15
+    assert consensus.dosage is None
+    assert consensus.contributing_calls == (11,)
+    assert discrepancies == []
+
+
+def test_single_chip_plus_imputed_appends_imputed_to_contributing_calls() -> None:
+    """23andme alone + an imputed call at the same variant.
+
+    The chip resolution prevails (single_source platform_unique discrepancy)
+    and the imputed call_id is appended to contributing_calls. The method,
+    alleles, dosage, and is_imputed flag are unchanged from the chip-only
+    Phase 3 result.
+    """
+    pair = _pair(
+        twentythree=_call(call_id=1, source="23andme", a1="A", a2="G"),
+        ancestry=None,
+        imputed=_call(
+            call_id=20,
+            source="beagle_imputed",
+            a1="A",
+            a2="G",
+            imputation_r2=0.88,
+        ),
+    )
+    consensus, discrepancies = resolve(pair)
+    assert consensus.consensus_method == "single_source"
+    assert (consensus.consensus_allele_1, consensus.consensus_allele_2) == ("A", "G")
+    assert consensus.is_imputed is False
+    # consensus_r2 on chip-derived consensus stays None — imputation is
+    # confirming evidence, not the consensus source. Downstream filters can
+    # still find the imputation_r2 via the imputed call_id in contributing_calls.
+    assert consensus.consensus_r2 is None
+    assert consensus.contributing_calls == (1, 20)
+    assert len(discrepancies) == 1
+    assert discrepancies[0].discrepancy_type == "platform_unique"
+
+
+def test_both_chips_concordant_plus_imputed_keeps_both_concordant() -> None:
+    pair = _pair(
+        twentythree=_call(call_id=1, source="23andme", a1="A", a2="G"),
+        ancestry=_call(call_id=2, source="ancestry", a1="A", a2="G"),
+        imputed=_call(
+            call_id=21,
+            source="beagle_imputed",
+            a1="A",
+            a2="G",
+            imputation_r2=0.95,
+        ),
+    )
+    consensus, discrepancies = resolve(pair)
+    assert consensus.consensus_method == "both_concordant"
+    assert (consensus.consensus_allele_1, consensus.consensus_allele_2) == ("A", "G")
+    assert consensus.is_imputed is False
+    assert consensus.consensus_r2 is None
+    assert consensus.dosage == 1
+    assert consensus.confidence == 0.99
+    assert consensus.contributing_calls == (1, 2, 21)
+    # The chip-only branch emitted no discrepancy; the imputed appendage
+    # doesn't create one either.
+    assert discrepancies == []
+
+
+def test_chip_disagreement_resolved_plus_imputed_preserves_resolution() -> None:
+    """Strand-flip resolution prevails; imputed appended to contributing_calls.
+
+    23andme A/G on plus strand and ancestry C/T (its complement) reconcile
+    via the per-row strand flip. With an additional beagle_imputed A/G call,
+    the consensus method stays ``disagreement_resolved`` and the imputed
+    call_id is appended after the two chip call_ids.
+    """
+    pair = _pair(
+        twentythree=_call(call_id=1, source="23andme", a1="A", a2="G"),
+        ancestry=_call(call_id=2, source="ancestry", a1="C", a2="T"),
+        imputed=_call(
+            call_id=22,
+            source="beagle_imputed",
+            a1="A",
+            a2="G",
+            imputation_r2=0.85,
+        ),
+    )
+    consensus, discrepancies = resolve(pair)
+    assert consensus.consensus_method == "disagreement_resolved"
+    assert (consensus.consensus_allele_1, consensus.consensus_allele_2) == ("A", "G")
+    assert consensus.contributing_calls == (1, 2, 22)
+    assert consensus.is_imputed is False
+    assert len(discrepancies) == 1
+    assert discrepancies[0].discrepancy_type == "strand_flip_resolved"

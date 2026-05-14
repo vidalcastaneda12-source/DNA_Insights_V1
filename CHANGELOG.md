@@ -8,6 +8,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Phase 4 cleanup (session B): `consensus_v1` now handles imputed-only
+  variants and treats imputation as confirming evidence.** Real-data
+  verification after the Phase 4 ingest landed showed 2,267,751 of
+  3,210,371 consensus rows misclassified as `unresolvable` because the
+  merge step's pivot and resolver only knew about `23andme` and
+  `ancestry`. Extended `_fetch_variant_pairs` to also pivot
+  `beagle_imputed` (plus its per-variant `imputation_r2`), added a
+  third `imputed` field to `VariantPair`, and rewrote
+  `consensus.resolve` so (a) chip-only resolutions stand byte-for-byte
+  when at least one chip call is active, with the imputed call's
+  `call_id` appended to `contributing_calls` as confirming evidence,
+  and (b) variants with only a `beagle_imputed` call resolve to
+  `consensus_method='imputed_only'` with `is_imputed=True` and the
+  imputation R² propagated to `consensus_genotypes.consensus_r2`.
+  Tier-3 cross-row strand-flip candidacy now excludes any row that
+  carries an active imputed call, since the tier-3 rewrite replaces
+  `contributing_calls` with just the paired chip call_ids and would
+  otherwise drop the imputed call from the audit trail. Rule label
+  stays `consensus_v1` — no schema or version bump. After the fix the
+  Phase 3 numbers are preserved exactly (`both_concordant=120,516`,
+  `disagreement_resolved=106`, `single_source=821,998`,
+  `strand_flip_resolutions=106`, shared-call concordance=1.0000) and
+  the new `imputed_only=2,267,751` bucket lands where the
+  `unresolvable` rows previously did. See updated `docs/consensus.md`
+  and the new "Real-data observations" entry #3 in `CLAUDE.md`.
 - **Phase 4 cleanup (session A) second follow-up: remove the htslib
   log-level manipulation entirely.** The previous follow-up's
   `silence_htslib_contig_warnings` context manager imported
