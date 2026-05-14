@@ -53,7 +53,6 @@ import structlog
 
 from genome.config import get_settings
 from genome.db.duckdb_conn import duckdb_connection
-from genome.imputation._htslib import silence_htslib_contig_warnings
 from genome.imputation.archive import ImputationArchive
 from genome.imputation.runs import (
     ImputationRun,
@@ -338,58 +337,54 @@ def _stream_chromosome(
     log = logger.bind(path=str(path), chrom=chrom)
     log.info("imputation.import.chrom.start")
     batch = _Batch()
-    # Beagle output is missing canonical ##contig headers, so cyvcf2 prints
-    # a per-record contig warning across millions of records. Scope the
-    # htslib log-level suppression to this read.
-    with silence_htslib_contig_warnings():
-        reader = _open_imputed_vcf(path)
-        try:
-            for v in reader:
-                mapped = _normalize_chrom_label(str(v.CHROM))
-                if mapped != chrom:
-                    # The file's chromosome doesn't match the expected one — skip
-                    # silently. Beagle should never produce this, but a misnamed
-                    # file would otherwise corrupt the per-chrom counters.
-                    continue
-                alts = tuple(str(a) for a in v.ALT or [])
-                if not _is_biallelic_snv(str(v.REF), alts):
-                    continue
+    reader = _open_imputed_vcf(path)
+    try:
+        for v in reader:
+            mapped = _normalize_chrom_label(str(v.CHROM))
+            if mapped != chrom:
+                # The file's chromosome doesn't match the expected one — skip
+                # silently. Beagle should never produce this, but a misnamed
+                # file would otherwise corrupt the per-chrom counters.
+                continue
+            alts = tuple(str(a) for a in v.ALT or [])
+            if not _is_biallelic_snv(str(v.REF), alts):
+                continue
 
-                r2 = _extract_r2(v.INFO)
-                if r2 is not None and r2 < r2_threshold:
-                    counters.variants_below_threshold += 1
-                    continue
+            r2 = _extract_r2(v.INFO)
+            if r2 is not None and r2 < r2_threshold:
+                counters.variants_below_threshold += 1
+                continue
 
-                genotypes = v.genotypes or []
-                gt: tuple[int, int, bool] | None = None
-                if genotypes:
-                    a, b, phased = genotypes[0]
-                    gt = (int(a), int(b), bool(phased))
-                allele_1, allele_2, is_no_call = _genotype_alleles(
-                    str(v.REF),
-                    alts,
-                    gt,
-                )
+            genotypes = v.genotypes or []
+            gt: tuple[int, int, bool] | None = None
+            if genotypes:
+                a, b, phased = genotypes[0]
+                gt = (int(a), int(b), bool(phased))
+            allele_1, allele_2, is_no_call = _genotype_alleles(
+                str(v.REF),
+                alts,
+                gt,
+            )
 
-                _accept_variant(
-                    counters,
-                    batch,
-                    chrom=chrom,
-                    pos=int(v.POS),
-                    rsid=None if not v.ID else str(v.ID),
-                    ref=str(v.REF),
-                    alt=alts[0],
-                    allele_1=allele_1,
-                    allele_2=allele_2,
-                    is_no_call=is_no_call,
-                    r2=r2,
-                )
+            _accept_variant(
+                counters,
+                batch,
+                chrom=chrom,
+                pos=int(v.POS),
+                rsid=None if not v.ID else str(v.ID),
+                ref=str(v.REF),
+                alt=alts[0],
+                allele_1=allele_1,
+                allele_2=allele_2,
+                is_no_call=is_no_call,
+                r2=r2,
+            )
 
-                if len(batch) >= batch_size:
-                    yield batch
-                    batch = _Batch()
-        finally:
-            reader.close()
+            if len(batch) >= batch_size:
+                yield batch
+                batch = _Batch()
+    finally:
+        reader.close()
 
     if len(batch) > 0:
         yield batch
@@ -790,26 +785,22 @@ def _count_chromosome_variants(
     """
     kept = 0
     dropped = 0
-    # Same htslib-warning suppression as the streaming path; Beagle output
-    # is missing canonical ##contig headers and would otherwise flood
-    # stderr on the dry-run scan.
-    with silence_htslib_contig_warnings():
-        reader = _open_imputed_vcf(path)
-        try:
-            for v in reader:
-                mapped = _normalize_chrom_label(str(v.CHROM))
-                if mapped != chrom:
-                    continue
-                alts = tuple(str(a) for a in v.ALT or [])
-                if not _is_biallelic_snv(str(v.REF), alts):
-                    continue
-                r2 = _extract_r2(v.INFO)
-                if r2 is not None and r2 < r2_threshold:
-                    dropped += 1
-                    continue
-                kept += 1
-        finally:
-            reader.close()
+    reader = _open_imputed_vcf(path)
+    try:
+        for v in reader:
+            mapped = _normalize_chrom_label(str(v.CHROM))
+            if mapped != chrom:
+                continue
+            alts = tuple(str(a) for a in v.ALT or [])
+            if not _is_biallelic_snv(str(v.REF), alts):
+                continue
+            r2 = _extract_r2(v.INFO)
+            if r2 is not None and r2 < r2_threshold:
+                dropped += 1
+                continue
+            kept += 1
+    finally:
+        reader.close()
     return kept, dropped
 
 

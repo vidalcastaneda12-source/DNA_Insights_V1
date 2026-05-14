@@ -217,16 +217,10 @@ def _vcf_parses_cleanly(path: Path) -> bool:
     The function returns ``False`` on any parse failure so the caller can
     treat the file as missing and re-run.
 
-    Note on the htslib contig warning: this validator runs once per
-    chromosome and reads a single record, so at most one
-    ``[W::vcf_parse] Contig 'chr<N>' is not defined in the header``
-    line is emitted. We deliberately do NOT wrap this open+iterate
-    in :func:`silence_htslib_contig_warnings` — real-data verification
-    surfaced an interaction where the wrapper caused the validator to
-    return False on a valid Beagle output. The spam fix belongs on the
-    streaming read sites in :mod:`genome.imputation.ingest` (where the
-    warning would fire per-record across millions of variants), not on
-    the post-run validator.
+    Note: Beagle's output VCFs omit canonical ``##contig`` headers, so
+    cyvcf2 may emit one ``[W::vcf_parse] Contig 'chr<N>' is not defined
+    in the header`` line per call. The warning is cosmetic — the parse
+    succeeds — and is documented in ``docs/runbooks/imputation.md``.
     """
     if not path.is_file():
         return False

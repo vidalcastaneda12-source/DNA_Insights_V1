@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Phase 4 cleanup (session A) second follow-up: remove the htslib
+  log-level manipulation entirely.** The previous follow-up's
+  `silence_htslib_contig_warnings` context manager imported
+  `set_htslib_log_level` from `cyvcf2.cyvcf2`, but that symbol does not
+  exist in the installed cyvcf2 version, raising ImportError on every
+  read path that loaded the helper. The downstream effect was 35
+  pytest failures rooted in the same import, and a real-data chr22
+  re-run that left the Beagle output at `0o644` instead of `0o600`
+  because `restrict_file` could not run after the silence context
+  raised. Deleted `backend/src/genome/imputation/_htslib.py`, removed
+  the `with silence_htslib_contig_warnings():` wrappers from
+  `ingest._stream_chromosome` and `_count_chromosome_variants`,
+  reverted the imports, and deleted the suppression-specific tests.
+  The contig warning is now documented as expected log output in
+  `docs/runbooks/imputation.md` — it fires once per cyvcf2 file open
+  (about 23 lines per full-genome import) and is cosmetic. The
+  map-prefix fix and the timestamp fixes from session A remain in
+  place.
 - **Phase 4 cleanup (session A) follow-up: stop wrapping
   `_vcf_parses_cleanly` with the htslib log-level suppression.** Real-
   data re-run on chr22 after the first cleanup landed showed the

@@ -688,7 +688,7 @@ def test_run_imputation_output_vcf_is_owner_read_write_only(
 
 
 # ---------------------------------------------------------------------------
-# htslib contig-warning suppression.
+# Beagle output parses cleanly despite missing ##contig headers.
 # ---------------------------------------------------------------------------
 
 
@@ -703,8 +703,8 @@ _HEADERLESS_VCF_HEADER = (
 def _write_vcf_without_contig_header(dest: Path, chrom: str) -> None:
     """Write a tiny VCF with NO ``##contig`` line, mimicking Beagle output.
 
-    htslib emits ``[W::vcf_parse] Contig 'chr<N>' is not defined in the
-    header`` once per record when the contig isn't declared. The cyvcf2
+    cyvcf2 emits ``[W::vcf_parse] Contig 'chr<N>' is not defined in the
+    header`` once per file open when the contig isn't declared. The
     parse itself succeeds.
     """
     body = (
@@ -719,22 +719,7 @@ def _write_vcf_without_contig_header(dest: Path, chrom: str) -> None:
 def test_vcf_parses_cleanly_returns_true_on_beagle_style_output(
     tmp_path: Path,
 ) -> None:
-    """Regression: a Beagle-style VCF (no ##contig header) is accepted.
-
-    Real-data verification surfaced a regression where wrapping the
-    validator's open + iterate in ``silence_htslib_contig_warnings``
-    caused it to return False on a parsable 1M-record Beagle output.
-    We can't reproduce the exact failure with synthetic data, but the
-    fix is to keep the validator wrapper-free (the warning fires at
-    most once per call here, since the function reads a single record)
-    and scope the suppression to the per-record streaming reads in
-    :mod:`genome.imputation.ingest` instead.
-
-    This test guards against re-introducing the regression by verifying
-    that ``_vcf_parses_cleanly`` returns True on a header-less Beagle-
-    shaped VCF — the same provocation that exposed the failure in real
-    use.
-    """
+    """A Beagle-style VCF (no ##contig header) is accepted by the validator."""
     from genome.imputation.beagle_runner import (  # noqa: PLC0415 — late import keeps top-level minimal
         _vcf_parses_cleanly,
     )
@@ -760,70 +745,6 @@ def test_vcf_parses_cleanly_returns_false_on_truncated_file(
     bad = tmp_path / "truncated.vcf.gz"
     bad.write_bytes(b"not a vcf at all")
     assert _vcf_parses_cleanly(bad) is False
-
-
-def test_silence_htslib_contig_warnings_restores_default_on_exit(
-    tmp_path: Path,
-    capfd: pytest.CaptureFixture[str],
-) -> None:
-    """After our context manager exits, htslib's log level is back to default.
-
-    Important so that other cyvcf2 readers elsewhere in the process see
-    htslib's normal warning verbosity. We verify by opening a headerless
-    VCF AFTER the suppressed block and confirming the warning fires.
-    """
-    import cyvcf2  # noqa: PLC0415
-
-    from genome.imputation._htslib import (  # noqa: PLC0415
-        silence_htslib_contig_warnings,
-    )
-
-    vcf_path = tmp_path / "headerless.vcf.gz"
-    _write_vcf_without_contig_header(vcf_path, "22")
-
-    # First: inside the suppression block, no warning.
-    with silence_htslib_contig_warnings():
-        reader = cyvcf2.VCF(str(vcf_path))
-        for _ in reader:
-            pass
-        reader.close()
-    inside = capfd.readouterr()
-    assert "Contig" not in inside.err
-
-    # Second: AFTER the block, htslib is back to default — warning fires.
-    reader = cyvcf2.VCF(str(vcf_path))
-    for _ in reader:
-        pass
-    reader.close()
-    after = capfd.readouterr()
-    assert "Contig 'chr22'" in after.err
-
-
-def test_silence_htslib_contig_warnings_restores_default_on_exception(
-    tmp_path: Path,
-    capfd: pytest.CaptureFixture[str],
-) -> None:
-    """A body that raises still triggers the level restore on context exit."""
-    import cyvcf2  # noqa: PLC0415
-
-    from genome.imputation._htslib import (  # noqa: PLC0415
-        silence_htslib_contig_warnings,
-    )
-
-    vcf_path = tmp_path / "headerless.vcf.gz"
-    _write_vcf_without_contig_header(vcf_path, "22")
-
-    boom = RuntimeError("synthetic")
-    with pytest.raises(RuntimeError, match="synthetic"), silence_htslib_contig_warnings():
-        raise boom
-    # Now confirm the level is back to default by opening a headerless VCF
-    # and asserting the warning still fires.
-    reader = cyvcf2.VCF(str(vcf_path))
-    for _ in reader:
-        pass
-    reader.close()
-    captured = capfd.readouterr()
-    assert "Contig 'chr22'" in captured.err
 
 
 # ---------------------------------------------------------------------------

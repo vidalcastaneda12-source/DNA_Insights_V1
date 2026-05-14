@@ -245,6 +245,14 @@ The consensus needs to be refreshed across all three sources now that
 After this step, the entire downstream pipeline (Phases 5+) operates on
 the unified imputed set.
 
+## Expected log output
+
+cyvcf2 emits `[W::vcf_parse] Contig 'chr<N>' is not defined in the header.`
+once per file open during the run, import, and dry-run steps. Beagle's
+output VCFs do not declare contigs in their headers; cyvcf2 parses the
+files correctly regardless. The warning is informational — about 23
+lines per full-genome import — and can be ignored.
+
 ## Troubleshooting
 
 ### Java not found / Java too old

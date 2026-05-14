@@ -70,20 +70,28 @@ normalized files. One info log line per rewritten file
 (`reference_panel.genetic_map.chr_prefix_added`) provides a forensic
 trail.
 
-### Fix 2 — Scope htslib log-level suppression to imputation reads
+### Fix 2 — Accept the contig warning as expected log output
 
-A new private module `genome.imputation._htslib` exposes a
-`silence_htslib_contig_warnings()` context manager. It lowers htslib's
-global log level to `HTS_LOG_ERROR` (`1`) for the duration of one read
-and restores `HTS_LOG_WARNING` (`3`, htslib's default) on exit. The
-manager wraps the three read sites listed above. The suppression is
-scoped: real htslib errors (truncated body, malformed records) still
-fire at the ERROR level and continue to surface, and unrelated cyvcf2
-readers elsewhere in the process see htslib's normal warning verbosity
-once the imputation read completes. Test coverage verifies both halves —
-suppressed inside the manager, restored after — via `capfd` (the
-contig warning is emitted to the C-level stderr, which `capsys` cannot
-intercept).
+The contig warning was investigated, but every viable suppression
+mechanism required reaching into cyvcf2's internal API. The initial
+attempt imported `set_htslib_log_level` from `cyvcf2.cyvcf2`; that
+symbol is not present in the installed cyvcf2 version, so the import
+raised on every read path that loaded the helper. The downstream
+effect was real: pytest reported 35 ImportError-rooted failures, and
+the post-Beagle `restrict_file` step stopped running, leaving result
+VCFs at `0o644` instead of `0o600`.
+
+Alternative suppression mechanisms — ctypes reach-around into the
+htslib shared library, post-hoc header injection on every Beagle
+output VCF, fd 2 redirection during cyvcf2 reads — each carry their
+own risk surface (linker assumptions, on-disk rewrites, swallowed
+errors). The warning itself is cosmetic and fires about once per
+file open, which for a full-genome import is ~23 lines total. We've
+judged that volume not worth the complexity of suppression and
+have removed the suppression layer entirely. The warning is now
+documented as expected behavior in
+`docs/runbooks/imputation.md` so future readers know what they're
+seeing.
 
 ### Fix 3 — Restore the stamping invariant on every update_status call
 
@@ -114,8 +122,9 @@ callers (e.g. a future merge or analysis pipeline that reuses
 - `uv run mypy --strict backend/src` — clean.
 - Real-data spot check on the existing chr22 panel: rewritten
   `plink.chr22.GRCh38.map` column 1 reads `chr22`; chr22 re-run produces
-  a row with both `submitted_at` and `completed_at` populated; no
-  htslib contig warnings on either the run or the import.
+  a row with both `submitted_at` and `completed_at` populated; the
+  cyvcf2 contig warning fires a small number of times (once per file
+  open) and is now treated as expected log output rather than a defect.
 
 ## Follow-up
 
