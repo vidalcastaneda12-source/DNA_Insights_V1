@@ -7,6 +7,215 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-05-14
+
+### Added
+- **Phase 3 — merge & discrepancy detection.** New `genome.merge` package
+  computes `consensus_genotypes` and populates `discrepancies` from the
+  active set of `genotype_calls` via the `consensus_v1` rule. The merge
+  pipeline:
+  - Resolves each `variants_master` row using the documented branch table
+    (concordant / single-source / no-call-diff / palindromic-ambiguous /
+    non-palindromic-strand-flip / unresolvable-mismatch).
+  - Detects tier-3 strand-flip partners across `variants_master` rows at
+    the same `(chrom, pos_grch38)` and rewrites both rows' consensus to
+    `disagreement_resolved` with `flipped_strand_match` discrepancies.
+  - Is idempotent: `DELETE`s both tables and rebuilds inside one
+    transaction, so re-running after a re-ingest refreshes the merged view.
+  Severity escalation to `critical` for ACMG SF variants is deliberately
+  deferred to a Phase 5+ enrichment job (the `is_acmg_sf` flag is not yet
+  populated). Tier-2 (rsid-based matching across positions) is deferred to
+  Phase 5 once `variant_aliases` lands.
+- `genome merge` CLI command that runs the pipeline against the configured
+  DuckDB and prints per-method / per-type / per-severity rollups plus the
+  shared-call concordance rate.
+- 52 new tests covering: strand-helper unit cases (complement and
+  palindrome detection across A/T, C/G, and non-DNA tokens), every
+  `consensus_v1` branch as a direct `resolve()` call (`both_concordant`,
+  `genotype_mismatch` resolvable and unresolvable, `strand_ambiguous`,
+  `no_call_diff`, `platform_unique` both directions, double no-call), and
+  end-to-end DB round-trips for each discrepancy type plus the tier-3
+  cross-row strand-flip, idempotence, the merge-result summary counts,
+  the CLI smoke, and the `call_comparison_v` view picking up every
+  consensus row.
+- **Phase 4 Beagle pivot — local Beagle 5.5 runner.** New
+  `genome.imputation.beagle_runner` module pipes the per-chromosome
+  upload VCFs (produced by the existing `prepare_run`) through Beagle
+  5.5 against the local 1000 Genomes Phase 3 reference panel. Runs one
+  `java -jar beagle.jar` subprocess per chromosome with `ref=`, `map=`,
+  `gt=`, `out=`, `nthreads=`, `ne=`, and `impute=true` arguments;
+  streams Beagle's stderr line-by-line into structlog at INFO so a
+  long-running invocation is observable. Defaults: heap `-Xmx8g`,
+  `ne=1_000_000` (Beagle's outbred-human default), threads
+  `max(1, os.cpu_count() - 1)`. Resumable: a chromosome whose output
+  VCF already exists and parses cleanly with cyvcf2 is skipped unless
+  `--force` is passed. Partial failures are recoverable — one
+  chromosome's failure does not abort the rest of the run; the
+  `BeagleRunResult` reports which chromosomes succeeded, failed, and
+  were skipped. Status transitions: `pending` → `processing` on first
+  chromosome start; `completed` (stamps `completed_at`) when every
+  attempted chromosome succeeds; `failed` when every attempted
+  chromosome fails; mixed outcomes leave the run at `processing` so
+  the user can retry the failures without losing the successes.
+  chrY is intentionally skipped (the 1000G high-coverage release omits
+  chrY); the runner logs the skip and continues. Output VCFs land at
+  `archive/imputation/run_<id>/result/chr<N>.vcf.gz` with 0600 perms,
+  the same path the existing `import_result` step picks up via
+  `archive.list_result_vcfs()` (whose glob is now `chr*.vcf.gz` so
+  Beagle output and any legacy `chr*.dose.vcf.gz` are both found).
+  New CLI subcommand
+  `genome imputation run <id> [--chromosomes <list>] [--threads <n>] [--memory-gb <n>] [--ne <n>] [--force]`.
+  Pre-flight checks: the run row exists and is in `pending` /
+  `processing` (or `completed` / `failed` with `--force`), Java 8+ is
+  on PATH (parsed from `java -version`), and the reference panel is
+  fully populated (the error points the user at `genome imputation
+  panel install`).
+- **Phase 4 Beagle pivot — reference-panel management.** New
+  `genome.imputation.reference_panel` module owns the local Beagle
+  reference-panel layout under `~/.cache/genome/imputation/` by default
+  (overridable via the new `imputation_panel_root` setting). Manages the
+  Beagle 5.5 JAR (`beagle.27Feb25.75f.jar`), the PLINK GRCh38 genetic-map
+  archive (`plink.GRCh38.map.zip` — extracted into per-chromosome `.map`
+  files), and the per-chromosome 1000 Genomes Phase 3 GRCh38 reference
+  panel VCFs (autosomes 1-22 plus X; chrY is not part of the
+  high-coverage phased release and `panel_for_chrom('Y')` returns
+  `None`). All downloads flow through the existing audited
+  `ExternalClient`, so every fetch is gated on `external_calls_enabled`
+  and produces intent + result audit rows; downloaded files land with
+  `0600` permissions, directories with `0700`. New CLI subcommands
+  `genome imputation panel status` (validates the on-disk layout) and
+  `genome imputation panel install [--force] [--chromosomes <list>]`
+  (downloads anything missing). The `--chromosomes` filter targets the
+  per-chrom panels only; the JAR and genetic-map archive are left alone
+  for partial-install / recovery flows. Documents the upstream URL
+  choice in a constants block at the top of the module: the Beagle
+  authors host pre-built bref3 panels for b37 only, so we fetch the
+  GRCh38 VCFs from EBI's 1000 Genomes high-coverage phased release —
+  Beagle 5.5 accepts either format for its `ref=` argument.
+- **Phase 4 — imputation roundtrip (TopMed era; later removed in favor
+  of local Beagle, see below).** New `genome.imputation` package and
+  `genome.privacy.external_client` introduced the workflow for sending the
+  merged genotype set through the TopMed Imputation Server and ingesting the
+  ~30M-variant imputed result. The workflow was partially manual — TopMed
+  does not expose a programmatic upload API for free-tier users — but the
+  local code handled preparation, status polling, download, decryption
+  hand-off, and ingest. Highlights:
+  - `genome imputation prepare` exports `consensus_genotypes` joined to
+    `variants_master` as per-chromosome VCFv4.2 files (gzipped, GRCh38,
+    chr-prefixed contigs, dosage-derived genotypes) under
+    `archive/imputation/run_<id>/upload/`, plus a JSON manifest, and inserts
+    an `imputation_runs` row in `status='pending'`.
+  - `genome imputation status <id> --status-url <url>` polled TopMed
+    (Cloudgene API) and mapped `state` to the `imputation_runs.status` enum
+    (`pending` / `processing` / `completed` / `failed`). Idempotent — safe
+    to re-run; stamps `submitted_at` once.
+  - `genome imputation download <id> --download-url <url> --password <pw>`
+    streamed the encrypted result archive to
+    `archive/imputation/run_<id>/result/topmed_result.zip`, recorded the
+    SHA-256 on `imputation_runs.output_file_hash_sha256`, and short-
+    circuited when the archive was already present with a matching hash.
+  - `genome imputation import <id>` streams the decrypted per-chromosome
+    VCFs through cyvcf2, batches 50K rows per Arrow Table, and bulk-inserts
+    into `variants_master` and `genotype_calls`
+    (`source='topmed_imputed'`, `is_imputed=TRUE`, `imputation_panel='topmed_r3'`,
+    `imputation_r2` from INFO/R2). Computes a `sample_qc` row for the imputed
+    sample and backfills `variants_output`, `mean_r2`,
+    `variants_above_r2_0_3`, and `variants_above_r2_0_8` on the run row.
+    Memory stays bounded by streaming per chromosome. Operational controls
+    on the command:
+      - `--r2-threshold <float>` (default `0.3`) skips variants whose
+        `INFO/R2` falls below the threshold; the value used is persisted on
+        `imputation_runs.r2_threshold` (new column, see schema change below).
+      - `--chromosomes <list>` (comma-separated) limits the import to the
+        named chromosomes — useful for partial recovery or testing.
+      - `--batch-size <int>` (default `50_000`) tunes the Arrow Table batch
+        size for memory-constrained machines.
+      - `--dry-run` parses each VCF and reports expected variant counts plus
+        an estimated wall-clock time, writing nothing to the database.
+      - `--force-reimport` is required to re-import against a run whose
+        `variants_output` is already populated; without it the command
+        aborts with a clear "already imported" error. The existing
+        supersession-over-update pattern handles the data-side semantics
+        once the flag is present.
+  - `genome imputation list` enumerates all `imputation_runs` rows for
+    quick state-of-the-world inspection.
+  - 30M extrapolation: a 1M-row benchmark test on the streaming ingest
+    completes in well under the 60-second guard ceiling, putting the
+    full TopMed roundtrip at roughly 30 minutes.
+- **Audited external HTTP client** (`genome.privacy.external_client.ExternalClient`).
+  Single chokepoint for any network call the app makes. Enforces
+  `user_preferences.external_calls_enabled` (raising a clear, actionable
+  error when disabled), hashes request bodies SHA-256 and writes the hash to
+  `audit_log.external_payload_hash` (never the body — privacy posture is
+  locked in `CLAUDE.md`), and produces one intent row plus one outcome row
+  per attempt so a process killed mid-call still leaves an audit trace.
+  Built on httpx; injectable `httpx.Client` makes mocked transports trivial
+  in tests. Future Phase-5+ consumers (MyVariant.info, PubMed, R2, etc.)
+  will reuse it untouched.
+- **`genome config get` / `genome config set`** CLI subcommands. Read and
+  write `user_preferences` rows. Every `set` writes a `config_change` row
+  to `audit_log` so preference history is auditable. The most common use is
+  flipping `external_calls_enabled` before a network-using flow such as
+  `genome imputation panel install`.
+- 81 new tests covering: the audited HTTP client's enable-check / hash /
+  audit invariants across success, network error, HTTP 4xx, HTTP 5xx,
+  retry, and download paths; `imputation_runs` CRUD round-trips; archive
+  layout (path shape, permissions, listing); VCF export field shapes and
+  TopMed-specific filters (SNV-only, biallelic, genotype rendering, contig
+  order); TopMed state-code mapping (integer codes and string labels);
+  status polling DB-state transitions and idempotence; download streaming
+  and hash-match short-circuit; the streaming ingest's schema-correct
+  writes, no-call handling, supersession-over-update on re-import; a 1M-row
+  benchmark; and CLI smoke for every new subcommand.
+- `LiftoverPyLib` engine, the `liftover`-package wrapper. The `Liftover`
+  Protocol is unchanged; `IdentityLiftover` and the renamed
+  `PyLiftoverWrapper` (formerly `PyLiftover`) still satisfy it.
+- `--liftover-engine {auto|liftover|pyliftover}` CLI flag (and matching
+  `liftover_engine=` argument on `ingest_file`). `auto` (default) prefers the
+  `liftover` package and falls back loudly to `pyliftover` with an INFO log;
+  explicit engine choices raise rather than silently falling back.
+- Engine-selection tests and a 100K-position throughput benchmark
+  (`< 60 s` ceiling) in `backend/tests/test_ingest_liftover.py`.
+- `pyarrow>=17.0.0` as an explicit runtime dependency (previously transitive
+  via DuckDB) so the writer's bulk-load path keeps working if DuckDB ever
+  drops the implicit dependency.
+- `backend/tests/test_ingest_writer.py` with a `_stage_calls` round-trip
+  correctness test (preserving `ord`, empty-allele → NULL mapping, list
+  columns) and a 100K-row benchmark (< 2 s ceiling) so the bulk-load path
+  cannot regress to `executemany` undetected.
+
+### Changed
+- **Phase 4 pivots from external TopMed imputation to local Beagle 5.5
+  imputation.** Real-data verification showed TopMed rejects single-sample
+  submissions in ~50 seconds with a 20-sample minimum that cannot be
+  worked around safely; `finding-006-topmed-not-viable-for-personal-genomics.md`
+  documents the rationale. `ROADMAP.md` Phase 4 is updated to describe
+  the local Beagle workflow (per-chromosome VCFs, 1000 Genomes Phase 3
+  reference panel on disk, `imputation_dr2` from Beagle's INFO/DR2, new
+  `genome imputation panel install | status` subcommands).
+- **`vcf_export` and `ingest` produce/consume Beagle-flavored outputs.**
+  Prepare now writes `imputation_runs.imputation_server='beagle'` and
+  `reference_panel='1000g_phase3_grch38'`, and the manifest gains an
+  `imputation_tool='beagle_5.5'` field (dropping the TopMed-era
+  `topmed_recommended_compression` / `compression_note` keys). Import
+  writes `genotype_calls.source='beagle_imputed'` and
+  `imputation_panel='1000g_phase3_grch38'` by default; the R²
+  extractor now tries `INFO/DR2` (Beagle's native dosage-R² field)
+  before falling back to `R2` / `Rsq`, so output from Beagle, TopMed,
+  and older Minimac releases all parse correctly. The imputable
+  chromosome set expands to autosomes + X + Y (Y was excluded under
+  TopMed r3, which did not impute it; under Beagle 5.5 it is included
+  at the prepare layer, and the runner warns and skips Y if the 1000G
+  Phase 3 bref3 release lacks Y coverage).
+- Migrated `[tool.uv.dev-dependencies]` to `[dependency-groups]` in
+  `pyproject.toml` per uv's deprecation notice. No behavior change.
+- Lift-over now uses the [`liftover`](https://pypi.org/project/liftover/) PyPI
+  package (C++/CFFI-backed) as the default engine. It runs ~10–50× faster than
+  `pyliftover` on whole-array exports and installs cleanly via `uv sync` with
+  no system tooling. The previous bcftools `+liftover` plugin direction was
+  abandoned because building `freeseek/score` against the user's htslib
+  required `-fPIC` rebuilds that were environmentally fragile.
+
 ### Fixed
 - **Phase 4 cleanup (session B): `consensus_v1` now handles imputed-only
   variants and treats imputation as confirming evidence.** Real-data
@@ -100,209 +309,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     submitted_at; every transition to completed stamps completed_at") is
     now documented on the helper's docstring and at each transition
     site.
-
-### Removed
-- TopMed Imputation Server client and its CLI surface: deleted
-  `backend/src/genome/imputation/topmed_client.py` (including
-  `TopMedClient`, `TopMedStatus`, `check_status`, `download_result`,
-  `TOPMED_ENDPOINT_LABEL`, `TOPMED_PANEL`, and the Cloudgene state-code
-  mapping), removed the `genome imputation status` and
-  `genome imputation download` subcommands from `genome.cli`, dropped the
-  TopMed symbols from `genome.imputation.__all__`, and deleted
-  `backend/tests/test_imputation_topmed_client.py` along with the
-  corresponding `status`/`download` plumbing checks in
-  `test_cli_phase4.py`. Phase 4 pivots from TopMed to local Beagle
-  imputation (see
-  `docs/findings/finding-006-topmed-not-viable-for-personal-genomics.md`);
-  the new flow lands in subsequent commits.
-
-### Changed
-- **Phase 4 pivots from external TopMed imputation to local Beagle 5.5
-  imputation.** Real-data verification showed TopMed rejects single-sample
-  submissions in ~50 seconds with a 20-sample minimum that cannot be
-  worked around safely; `finding-006-topmed-not-viable-for-personal-genomics.md`
-  documents the rationale. `ROADMAP.md` Phase 4 is updated to describe
-  the local Beagle workflow (per-chromosome VCFs, 1000 Genomes Phase 3
-  reference panel on disk, `imputation_dr2` from Beagle's INFO/DR2, new
-  `genome imputation panel install | status` subcommands).
-- **`vcf_export` and `ingest` produce/consume Beagle-flavored outputs.**
-  Prepare now writes `imputation_runs.imputation_server='beagle'` and
-  `reference_panel='1000g_phase3_grch38'`, and the manifest gains an
-  `imputation_tool='beagle_5.5'` field (dropping the TopMed-era
-  `topmed_recommended_compression` / `compression_note` keys). Import
-  writes `genotype_calls.source='beagle_imputed'` and
-  `imputation_panel='1000g_phase3_grch38'` by default; the R²
-  extractor now tries `INFO/DR2` (Beagle's native dosage-R² field)
-  before falling back to `R2` / `Rsq`, so output from Beagle, TopMed,
-  and older Minimac releases all parse correctly. The imputable
-  chromosome set expands to autosomes + X + Y (Y was excluded under
-  TopMed r3, which did not impute it; under Beagle 5.5 it is included
-  at the prepare layer, and the runner warns and skips Y if the 1000G
-  Phase 3 bref3 release lacks Y coverage).
-- **Imputation runbook rewritten for the local workflow.**
-  `docs/runbooks/imputation.md` now documents the four-step local
-  flow — panel install (one-time), prepare, run, import — with
-  Beagle-specific flags, OOM guidance, and the privacy posture that
-  no genome data leaves the machine.
-
-### Added
-- **Phase 4 Beagle pivot — local Beagle 5.5 runner.** New
-  `genome.imputation.beagle_runner` module pipes the per-chromosome
-  upload VCFs (produced by the existing `prepare_run`) through Beagle
-  5.5 against the local 1000 Genomes Phase 3 reference panel. Runs one
-  `java -jar beagle.jar` subprocess per chromosome with `ref=`, `map=`,
-  `gt=`, `out=`, `nthreads=`, `ne=`, and `impute=true` arguments;
-  streams Beagle's stderr line-by-line into structlog at INFO so a
-  long-running invocation is observable. Defaults: heap `-Xmx8g`,
-  `ne=1_000_000` (Beagle's outbred-human default), threads
-  `max(1, os.cpu_count() - 1)`. Resumable: a chromosome whose output
-  VCF already exists and parses cleanly with cyvcf2 is skipped unless
-  `--force` is passed. Partial failures are recoverable — one
-  chromosome's failure does not abort the rest of the run; the
-  `BeagleRunResult` reports which chromosomes succeeded, failed, and
-  were skipped. Status transitions: `pending` → `processing` on first
-  chromosome start; `completed` (stamps `completed_at`) when every
-  attempted chromosome succeeds; `failed` when every attempted
-  chromosome fails; mixed outcomes leave the run at `processing` so
-  the user can retry the failures without losing the successes.
-  chrY is intentionally skipped (the 1000G high-coverage release omits
-  chrY); the runner logs the skip and continues. Output VCFs land at
-  `archive/imputation/run_<id>/result/chr<N>.vcf.gz` with 0600 perms,
-  the same path the existing `import_result` step picks up via
-  `archive.list_result_vcfs()` (whose glob is now `chr*.vcf.gz` so
-  Beagle output and any legacy `chr*.dose.vcf.gz` are both found).
-  New CLI subcommand
-  `genome imputation run <id> [--chromosomes <list>] [--threads <n>] [--memory-gb <n>] [--ne <n>] [--force]`.
-  Pre-flight checks: the run row exists and is in `pending` /
-  `processing` (or `completed` / `failed` with `--force`), Java 8+ is
-  on PATH (parsed from `java -version`), and the reference panel is
-  fully populated (the error points the user at `genome imputation
-  panel install`).
-- **Phase 4 Beagle pivot — reference-panel management.** New
-  `genome.imputation.reference_panel` module owns the local Beagle
-  reference-panel layout under `~/.cache/genome/imputation/` by default
-  (overridable via the new `imputation_panel_root` setting). Manages the
-  Beagle 5.5 JAR (`beagle.27Feb25.75f.jar`), the PLINK GRCh38 genetic-map
-  archive (`plink.GRCh38.map.zip` — extracted into per-chromosome `.map`
-  files), and the per-chromosome 1000 Genomes Phase 3 GRCh38 reference
-  panel VCFs (autosomes 1-22 plus X; chrY is not part of the
-  high-coverage phased release and `panel_for_chrom('Y')` returns
-  `None`). All downloads flow through the existing audited
-  `ExternalClient`, so every fetch is gated on `external_calls_enabled`
-  and produces intent + result audit rows; downloaded files land with
-  `0600` permissions, directories with `0700`. New CLI subcommands
-  `genome imputation panel status` (validates the on-disk layout) and
-  `genome imputation panel install [--force] [--chromosomes <list>]`
-  (downloads anything missing). The `--chromosomes` filter targets the
-  per-chrom panels only; the JAR and genetic-map archive are left alone
-  for partial-install / recovery flows. Documents the upstream URL
-  choice in a constants block at the top of the module: the Beagle
-  authors host pre-built bref3 panels for b37 only, so we fetch the
-  GRCh38 VCFs from EBI's 1000 Genomes high-coverage phased release —
-  Beagle 5.5 accepts either format for its `ref=` argument.
-- **Phase 4 — imputation roundtrip.** New `genome.imputation` package and
-  `genome.privacy.external_client` introduce the workflow for sending the
-  merged genotype set through the TopMed Imputation Server and ingesting the
-  ~30M-variant imputed result. The workflow is partially manual — TopMed
-  does not expose a programmatic upload API for free-tier users — but the
-  local code handles preparation, status polling, download, decryption
-  hand-off, and ingest. Highlights:
-  - `genome imputation prepare` exports `consensus_genotypes` joined to
-    `variants_master` as per-chromosome VCFv4.2 files (gzipped, GRCh38,
-    chr-prefixed contigs, dosage-derived genotypes) under
-    `archive/imputation/run_<id>/upload/`, plus a JSON manifest, and inserts
-    an `imputation_runs` row in `status='pending'`.
-  - `genome imputation status <id> --status-url <url>` polls TopMed
-    (Cloudgene API) and maps `state` to the `imputation_runs.status` enum
-    (`pending` / `processing` / `completed` / `failed`). Idempotent — safe
-    to re-run; stamps `submitted_at` once.
-  - `genome imputation download <id> --download-url <url> --password <pw>`
-    streams the encrypted result archive to
-    `archive/imputation/run_<id>/result/topmed_result.zip`, records the
-    SHA-256 on `imputation_runs.output_file_hash_sha256`, and short-circuits
-    when the archive is already present with a matching hash.
-  - `genome imputation import <id>` streams the decrypted per-chromosome
-    VCFs through cyvcf2, batches 50K rows per Arrow Table, and bulk-inserts
-    into `variants_master` and `genotype_calls`
-    (`source='topmed_imputed'`, `is_imputed=TRUE`, `imputation_panel='topmed_r3'`,
-    `imputation_r2` from INFO/R2). Computes a `sample_qc` row for the imputed
-    sample and backfills `variants_output`, `mean_r2`,
-    `variants_above_r2_0_3`, and `variants_above_r2_0_8` on the run row.
-    Memory stays bounded by streaming per chromosome. Operational controls
-    on the command:
-      - `--r2-threshold <float>` (default `0.3`) skips variants whose
-        `INFO/R2` falls below the threshold; the value used is persisted on
-        `imputation_runs.r2_threshold` (new column, see schema change below).
-      - `--chromosomes <list>` (comma-separated) limits the import to the
-        named chromosomes — useful for partial recovery or testing.
-      - `--batch-size <int>` (default `50_000`) tunes the Arrow Table batch
-        size for memory-constrained machines.
-      - `--dry-run` parses each VCF and reports expected variant counts plus
-        an estimated wall-clock time, writing nothing to the database.
-      - `--force-reimport` is required to re-import against a run whose
-        `variants_output` is already populated; without it the command
-        aborts with a clear "already imported" error. The existing
-        supersession-over-update pattern handles the data-side semantics
-        once the flag is present.
-  - `genome imputation list` enumerates all `imputation_runs` rows for
-    quick state-of-the-world inspection.
-  - 30M extrapolation: a 1M-row benchmark test on the streaming ingest
-    completes in well under the 60-second guard ceiling, putting the
-    full TopMed roundtrip at roughly 30 minutes.
-- **Audited external HTTP client** (`genome.privacy.external_client.ExternalClient`).
-  Single chokepoint for any network call the app makes. Enforces
-  `user_preferences.external_calls_enabled` (raising a clear, actionable
-  error when disabled), hashes request bodies SHA-256 and writes the hash to
-  `audit_log.external_payload_hash` (never the body — privacy posture is
-  locked in `CLAUDE.md`), and produces one intent row plus one outcome row
-  per attempt so a process killed mid-call still leaves an audit trace.
-  Built on httpx; injectable `httpx.Client` makes mocked transports trivial
-  in tests. Future Phase-5+ consumers (MyVariant.info, PubMed, R2, etc.)
-  will reuse it untouched.
-- **`genome config get` / `genome config set`** CLI subcommands. Read and
-  write `user_preferences` rows. Every `set` writes a `config_change` row
-  to `audit_log` so preference history is auditable. The most common use is
-  flipping `external_calls_enabled` before the TopMed roundtrip.
-- **Imputation runbook complete.** `docs/runbooks/imputation.md` now walks
-  through every step end to end, including the TopMed web-UI form field
-  values, encryption password handling, decryption with 7-Zip, common
-  failure modes, and an audit-log review query.
-- 81 new tests covering: the audited HTTP client's enable-check / hash /
-  audit invariants across success, network error, HTTP 4xx, HTTP 5xx,
-  retry, and download paths; `imputation_runs` CRUD round-trips; archive
-  layout (path shape, permissions, listing); VCF export field shapes and
-  TopMed-specific filters (SNV-only, biallelic, genotype rendering, contig
-  order); TopMed state-code mapping (integer codes and string labels);
-  status polling DB-state transitions and idempotence; download streaming
-  and hash-match short-circuit; the streaming ingest's schema-correct
-  writes, no-call handling, supersession-over-update on re-import; a 1M-row
-  benchmark; and CLI smoke for every new subcommand.
-
-### Documentation
-- Added `docs/findings/` directory with five documents capturing real-data observations from Phase 2 and Phase 3: lift-over engine selection, platform overlap and concordance, chip composition differences, DuckDB bulk-load pattern, and deferred improvements list.
-- Documented schema-change-requires-rebuild convention in `CLAUDE.md`.
-- Documented 23andMe v5 vs Ancestry v2 chip composition differences (Y-chromosome coverage, heterozygosity rate ranges) in `CLAUDE.md`.
-- Stubbed `docs/runbooks/imputation.md` ahead of Phase 4 implementation.
-
-### Schema
-- Added `imputation_runs.r2_threshold` (`DOUBLE`, nullable) to record the
-  import-time R² filter applied to a run. Rows that predate this column
-  remain `NULL`. Schema markdown
-  (`docs/schemas/schema_group_1_genotype_data.md`) and the extracted DDL
-  (`ddl/group_1_genotype.sql`) are updated together; existing local DuckDB
-  files need a rebuild (`rm -rf data/ && uv run genome init`) per the
-  CLAUDE.md schema-change convention.
-- Added `'beagle_imputed'` to `source_enum` so post-Beagle imputed calls
-  carry a distinct source label from the existing `'topmed_imputed'` (which
-  is retained for backward compatibility per finding-006 even though
-  TopMed-imputed calls never landed in real data). Supports the Phase 4
-  pivot to local Beagle 5.5 imputation. Schema markdown
-  (`docs/schemas/schema_group_1_genotype_data.md`) and the extracted DDL
-  (`ddl/group_1_genotype.sql`) are updated together; existing local DuckDB
-  files need a rebuild (`rm -rf data/ && uv run genome init`) per the
-  CLAUDE.md schema-change convention.
-
-### Fixed
 - Seeded default for `user_preferences.external_calls_enabled`. Previously
   seeded as `true`, contradicting the locked privacy decision in CLAUDE.md
   (#9) and the documented schema. New databases now correctly seed this as
@@ -327,38 +333,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer needs to subtract resolved flips from the discordant total because
   they now live in their own bucket.
 
-### Added
-- **Phase 3 — merge & discrepancy detection.** New `genome.merge` package
-  computes `consensus_genotypes` and populates `discrepancies` from the
-  active set of `genotype_calls` via the `consensus_v1` rule. The merge
-  pipeline:
-  - Resolves each `variants_master` row using the documented branch table
-    (concordant / single-source / no-call-diff / palindromic-ambiguous /
-    non-palindromic-strand-flip / unresolvable-mismatch).
-  - Detects tier-3 strand-flip partners across `variants_master` rows at
-    the same `(chrom, pos_grch38)` and rewrites both rows' consensus to
-    `disagreement_resolved` with `flipped_strand_match` discrepancies.
-  - Is idempotent: `DELETE`s both tables and rebuilds inside one
-    transaction, so re-running after a re-ingest refreshes the merged view.
-  Severity escalation to `critical` for ACMG SF variants is deliberately
-  deferred to a Phase 5+ enrichment job (the `is_acmg_sf` flag is not yet
-  populated). Tier-2 (rsid-based matching across positions) is deferred to
-  Phase 5 once `variant_aliases` lands.
-- `genome merge` CLI command that runs the pipeline against the configured
-  DuckDB and prints per-method / per-type / per-severity rollups plus the
-  shared-call concordance rate.
-- `docs/consensus.md` documenting the `consensus_v1` rule, dosage /
-  confidence conventions, and the rule's versioning workflow so future
-  rule changes can be tracked cleanly.
-- 52 new tests covering: strand-helper unit cases (complement and
-  palindrome detection across A/T, C/G, and non-DNA tokens), every
-  `consensus_v1` branch as a direct `resolve()` call (`both_concordant`,
-  `genotype_mismatch` resolvable and unresolvable, `strand_ambiguous`,
-  `no_call_diff`, `platform_unique` both directions, double no-call), and
-  end-to-end DB round-trips for each discrepancy type plus the tier-3
-  cross-row strand-flip, idempotence, the merge-result summary counts,
-  the CLI smoke, and the `call_comparison_v` view picking up every
-  consensus row.
+### Removed
+- TopMed Imputation Server client and its CLI surface: deleted
+  `backend/src/genome/imputation/topmed_client.py` (including
+  `TopMedClient`, `TopMedStatus`, `check_status`, `download_result`,
+  `TOPMED_ENDPOINT_LABEL`, `TOPMED_PANEL`, and the Cloudgene state-code
+  mapping), removed the `genome imputation status` and
+  `genome imputation download` subcommands from `genome.cli`, dropped the
+  TopMed symbols from `genome.imputation.__all__`, and deleted
+  `backend/tests/test_imputation_topmed_client.py` along with the
+  corresponding `status`/`download` plumbing checks in
+  `test_cli_phase4.py`. Phase 4 pivots from TopMed to local Beagle
+  imputation (see
+  `docs/findings/finding-006-topmed-not-viable-for-personal-genomics.md`);
+  the new flow lands in subsequent commits.
+
+### Schema
+- Added `imputation_runs.r2_threshold` (`DOUBLE`, nullable) to record the
+  import-time R² filter applied to a run. Rows that predate this column
+  remain `NULL`. Schema markdown
+  (`docs/schemas/schema_group_1_genotype_data.md`) and the extracted DDL
+  (`ddl/group_1_genotype.sql`) are updated together; existing local DuckDB
+  files need a rebuild (`rm -rf data/ && uv run genome init`) per the
+  CLAUDE.md schema-change convention.
+- Added `'beagle_imputed'` to `source_enum` so post-Beagle imputed calls
+  carry a distinct source label from the existing `'topmed_imputed'` (which
+  is retained for backward compatibility per finding-006 even though
+  TopMed-imputed calls never landed in real data). Supports the Phase 4
+  pivot to local Beagle 5.5 imputation. Schema markdown
+  (`docs/schemas/schema_group_1_genotype_data.md`) and the extracted DDL
+  (`ddl/group_1_genotype.sql`) are updated together; existing local DuckDB
+  files need a rebuild (`rm -rf data/ && uv run genome init`) per the
+  CLAUDE.md schema-change convention.
 
 ### Performance
 - Rewrote `writer._stage_calls` to bulk-load via PyArrow Table registration +
@@ -371,33 +377,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   producing byte-identical rows in `variants_master`, `genotype_calls`,
   `consensus_genotypes`, and `discrepancies`.
 
-### Changed
-- Migrated `[tool.uv.dev-dependencies]` to `[dependency-groups]` in
-  `pyproject.toml` per uv's deprecation notice. No behavior change.
-- Lift-over now uses the [`liftover`](https://pypi.org/project/liftover/) PyPI
-  package (C++/CFFI-backed) as the default engine. It runs ~10–50× faster than
-  `pyliftover` on whole-array exports and installs cleanly via `uv sync` with
-  no system tooling. The previous bcftools `+liftover` plugin direction was
-  abandoned because building `freeseek/score` against the user's htslib
-  required `-fPIC` rebuilds that were environmentally fragile.
+### Documentation
+- Added `docs/findings/` directory capturing real-data observations from
+  Phase 2, Phase 3, and Phase 4: lift-over engine selection, platform
+  overlap and concordance, chip composition differences, DuckDB bulk-load
+  pattern, deferred improvements list, TopMed-not-viable rationale for
+  the Beagle pivot, and the Phase 4 Beagle real-data cleanup write-up.
+- Documented schema-change-requires-rebuild convention in `CLAUDE.md`.
+- Documented 23andMe v5 vs Ancestry v2 chip composition differences
+  (Y-chromosome coverage, heterozygosity rate ranges) in `CLAUDE.md`.
+- Added `docs/consensus.md` documenting the `consensus_v1` rule, dosage /
+  confidence conventions, and the rule's versioning workflow so future
+  rule changes can be tracked cleanly.
+- Stubbed `docs/runbooks/imputation.md` ahead of Phase 4 implementation,
+  then rewrote it for the local Beagle workflow: panel install (one-time),
+  prepare, run, import — with Beagle-specific flags, OOM guidance, and the
+  privacy posture that no genome data leaves the machine.
 
-### Added
-- `LiftoverPyLib` engine, the `liftover`-package wrapper. The `Liftover`
-  Protocol is unchanged; `IdentityLiftover` and the renamed
-  `PyLiftoverWrapper` (formerly `PyLiftover`) still satisfy it.
-- `--liftover-engine {auto|liftover|pyliftover}` CLI flag (and matching
-  `liftover_engine=` argument on `ingest_file`). `auto` (default) prefers the
-  `liftover` package and falls back loudly to `pyliftover` with an INFO log;
-  explicit engine choices raise rather than silently falling back.
-- Engine-selection tests and a 100K-position throughput benchmark
-  (`< 60 s` ceiling) in `backend/tests/test_ingest_liftover.py`.
-- `pyarrow>=17.0.0` as an explicit runtime dependency (previously transitive
-  via DuckDB) so the writer's bulk-load path keeps working if DuckDB ever
-  drops the implicit dependency.
-- `backend/tests/test_ingest_writer.py` with a `_stage_calls` round-trip
-  correctness test (preserving `ord`, empty-allele → NULL mapping, list
-  columns) and a 100K-row benchmark (< 2 s ceiling) so the bulk-load path
-  cannot regress to `executemany` undetected.
+Phase 3 (merge & discrepancy detection) and Phase 4 (local imputation
+via Beagle 5.5) closed.
 
 ## [0.2.3] — 2026-05-07
 
@@ -553,7 +551,8 @@ Phase 1: project bootstrap ([PR #1](https://github.com/vidalcastaneda12-source/d
 - Project metadata (`pyproject.toml`), `.env.example`, `.gitignore`,
   README.md, CLAUDE.md, and ROADMAP.md.
 
-[Unreleased]: https://github.com/vidalcastaneda12-source/dna_insights_v1/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/vidalcastaneda12-source/dna_insights_v1/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/vidalcastaneda12-source/dna_insights_v1/compare/v0.2.3...v0.4.0
 [0.2.3]: https://github.com/vidalcastaneda12-source/dna_insights_v1/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/vidalcastaneda12-source/dna_insights_v1/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/vidalcastaneda12-source/dna_insights_v1/compare/v0.2.0...v0.2.1

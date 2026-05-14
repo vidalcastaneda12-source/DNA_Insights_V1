@@ -43,18 +43,21 @@ manageable. This document tracks them so they aren't forgotten.
    job re-walks discrepancies and bumps severity once ACMG SF flags are in
    place.
 
-6. **TopMed upload misses hom-only positions until canonical REF/ALT is
+6. **Imputation input misses hom-only positions until canonical REF/ALT is
    loaded.** Phase 4's `genome imputation prepare` filters out variants
    where `ref_allele == alt_allele`, because Phase 2's alphabetical-ordering
    normalize sets both fields to the same base for positions where every
-   observation is homozygous. TopMed cannot impute against `ref=A alt=A`
-   rows, so they are dropped from the upload. In practice this excludes a
-   large fraction of the chip — typical individuals are hom-ref at most
-   common SNPs. Imputation still works against the polymorphic subset.
-   *Recommended fix point:* Phase 5 dbSNP load populates `variant_aliases`
-   with canonical REF/ALT; a follow-on prepare step can rewrite the
-   filtered positions and recover the dropped rows. Tracked in the Phase 4
-   runbook's "compression note" section.
+   observation is homozygous. Imputation engines reject `ref=A alt=A`
+   rows on input — they carry no allele to impute against — so they are
+   dropped before the per-chromosome VCFs are emitted. In practice this
+   excludes a large fraction of the chip — typical individuals are
+   hom-ref at most common SNPs. Imputation still works against the
+   polymorphic subset. (The observation was originally surfaced against
+   the TopMed upload contract, but the same input requirement applies
+   identically to the local Beagle 5.5 workflow that replaced it per
+   `finding-006`.) *Recommended fix point:* Phase 5 dbSNP load populates
+   `variant_aliases` with canonical REF/ALT; a follow-on prepare step
+   can rewrite the filtered positions and recover the dropped rows.
 
 ## Implication
 

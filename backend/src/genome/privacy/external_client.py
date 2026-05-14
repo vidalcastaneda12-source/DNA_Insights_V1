@@ -11,8 +11,10 @@ Every external network call this app performs flows through here. The client:
 * Returns the parsed response to the caller. Network / HTTP / parse errors
   raise :class:`ExternalCallError`.
 
-The client is intentionally generic. Phase 4 uses it for TopMed; Phase 5 will
-use it for MyVariant.info, PubMed, and any other external lookups.
+The client is intentionally generic. Phase 4 used it for the (now-removed)
+TopMed flow and currently sees use only for the Phase 4 reference-panel
+downloads (Beagle JAR, PLINK genetic map, 1000G Phase 3 panel VCFs); Phase 5
+will use it for MyVariant.info, PubMed, and any other external lookups.
 """
 
 from __future__ import annotations
@@ -323,7 +325,7 @@ class ExternalClient:
         timeout_s: float = _DEFAULT_TIMEOUT_S,
         profile_id: int | None = None,
     ) -> None:
-        """Build a client bound to one logical ``endpoint_label`` (e.g. ``'topmed'``).
+        """Build a client bound to one logical ``endpoint_label`` (e.g. ``'1000g_panel'``).
 
         ``endpoint_label`` is what lands in ``audit_log.external_endpoint`` —
         keep it short and stable. The full URL goes into the request line and
@@ -426,7 +428,8 @@ class ExternalClient:
     ) -> str:
         """Stream a binary response to ``dest`` and return its SHA-256.
 
-        Used for large artifacts (the TopMed result archive is gigabytes).
+        Used for large artifacts (per-chromosome 1000G Phase 3 reference VCFs
+        and the PLINK genetic-map archive are each hundreds of MB to GBs).
         Memory usage stays constant — bytes are written straight to disk.
         Returns the hex-encoded SHA-256 of the saved file so the caller can
         record provenance.

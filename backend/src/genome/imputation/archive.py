@@ -53,12 +53,17 @@ class ImputationArchive:
 
     @property
     def upload_dir(self) -> Path:
-        """``<root>/upload/`` — VCFs the user pushes to TopMed live here."""
+        """``<root>/upload/`` — per-chromosome VCFs the prepare step emits for Beagle.
+
+        Named ``upload/`` for historical reasons (Phase 4 originally
+        uploaded these to TopMed; the local Beagle workflow that replaced
+        it consumes them in place from this same directory).
+        """
         return self.root / "upload"
 
     @property
     def result_dir(self) -> Path:
-        """``<root>/result/`` — the decrypted TopMed output lives here."""
+        """``<root>/result/`` — Beagle's imputed per-chromosome VCFs land here."""
         return self.root / "result"
 
     @property

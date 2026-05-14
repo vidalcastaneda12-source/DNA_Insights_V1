@@ -2,10 +2,17 @@
 
 Phases are sequential. Do not start phase N+1 until phase N's verification passes.
 
+**Current phase:** Phase 5 (reference annotation loaders) — not yet started.
+
 ## Phase 1 — Foundation (this is the bootstrap)
+
+**Status:** complete.
+
 Project layout, DDL extraction, DB initialization, config, CLI, basic tests. **Verification:** `genome init` works on a clean checkout; `pytest` green; `mypy --strict` clean.
 
 ## Phase 2 — Ingestion
+
+**Status:** complete (see findings 001, 003, 004).
 - Parse 23andMe and Ancestry raw exports
 - Normalize to GRCh38 (lift-over via `pyliftover` or chain files)
 - Strand resolution (with palindrome flagging)
@@ -17,6 +24,9 @@ Project layout, DDL extraction, DB initialization, config, CLI, basic tests. **V
 **Verification:** ingest both fixture files; `variants_master` populated; `sample_qc` row produced; tests cover format edge cases.
 
 ## Phase 3 — Merge & discrepancy detection
+
+**Status:** complete (see findings 002, 005).
+
 - Variant matching via three-tier strategy (chr:pos:ref:alt → rsid → fuzzy with strand)
 - Compute `consensus_genotypes` via `consensus_v1` rule
 - Detect and catalog discrepancies (six types, four severity levels)
@@ -25,6 +35,9 @@ Project layout, DDL extraction, DB initialization, config, CLI, basic tests. **V
 **Verification:** known mismatches in fixture data are correctly flagged; concordance rate computed; per-source counts match the Venn-diagram view.
 
 ## Phase 4 — Local imputation (Beagle 5.5)
+
+**Status:** complete (see findings 006, 007).
+
 - Export merged consensus calls to per-chromosome VCFs (autosomes + X + Y)
 - Run Beagle 5.5 locally against the 1000 Genomes Phase 3 reference
   panel on GRCh38, with the corresponding PLINK genetic map
@@ -40,6 +53,9 @@ Project layout, DDL extraction, DB initialization, config, CLI, basic tests. **V
 completes against real 23andMe + Ancestry corpus.
 
 ## Phase 5 — Reference annotation loaders
+
+**Status:** next.
+
 - Per-source downloaders (ClinVar, GWAS Catalog, PharmGKB, CPIC, PGS Catalog metadata, gnomAD filtered, dbSNP filtered, genes, traits, pathways)
 - Each writes to `annotation_source_versions` and the per-source table
 - VEP runs locally on user variants

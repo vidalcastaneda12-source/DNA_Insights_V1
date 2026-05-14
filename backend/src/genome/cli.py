@@ -372,9 +372,11 @@ def imputation_prepare(
 ) -> None:
     """Export the merged consensus genotype set as per-chromosome VCFs.
 
-    Writes files under archive/imputation/run_<id>/upload/. After this completes,
-    the user uploads the files to TopMed's web UI (the runbook describes the form
-    fields). Polling and download are subsequent commands.
+    Writes files under archive/imputation/run_<id>/upload/. After this
+    completes, run ``genome imputation run <id>`` to pipe those VCFs
+    through local Beagle 5.5 against the 1000 Genomes Phase 3 reference
+    panel, then ``genome imputation import <id>`` to ingest the imputed
+    output. See ``docs/runbooks/imputation.md`` for the end-to-end flow.
     """
     result = prepare_run(sample_id=sample_id, force_new=force_new)
     typer.echo(
