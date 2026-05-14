@@ -716,14 +716,24 @@ def _write_vcf_without_contig_header(dest: Path, chrom: str) -> None:
         out.write(body)
 
 
-def test_vcf_parses_cleanly_suppresses_contig_warning(
+def test_vcf_parses_cleanly_returns_true_on_beagle_style_output(
     tmp_path: Path,
-    capfd: pytest.CaptureFixture[str],
 ) -> None:
-    """A Beagle-style VCF (no ##contig header) parses without flooding stderr.
+    """Regression: a Beagle-style VCF (no ##contig header) is accepted.
 
-    Uses ``capfd`` because htslib writes to the C-level stderr (fd 2),
-    not Python's ``sys.stderr`` — ``capsys`` wouldn't see the warning.
+    Real-data verification surfaced a regression where wrapping the
+    validator's open + iterate in ``silence_htslib_contig_warnings``
+    caused it to return False on a parsable 1M-record Beagle output.
+    We can't reproduce the exact failure with synthetic data, but the
+    fix is to keep the validator wrapper-free (the warning fires at
+    most once per call here, since the function reads a single record)
+    and scope the suppression to the per-record streaming reads in
+    :mod:`genome.imputation.ingest` instead.
+
+    This test guards against re-introducing the regression by verifying
+    that ``_vcf_parses_cleanly`` returns True on a header-less Beagle-
+    shaped VCF — the same provocation that exposed the failure in real
+    use.
     """
     from genome.imputation.beagle_runner import (  # noqa: PLC0415 — late import keeps top-level minimal
         _vcf_parses_cleanly,
@@ -733,45 +743,15 @@ def test_vcf_parses_cleanly_suppresses_contig_warning(
     _write_vcf_without_contig_header(vcf_path, "22")
 
     assert _vcf_parses_cleanly(vcf_path) is True
-    captured = capfd.readouterr()
-    assert "Contig" not in captured.err
-    assert "is not defined in the header" not in captured.err
-
-
-def test_vcf_parses_cleanly_warning_actually_fires_without_suppression(
-    tmp_path: Path,
-    capfd: pytest.CaptureFixture[str],
-) -> None:
-    """Sanity check: without our suppression, htslib does emit the warning.
-
-    Confirms that the suppression test above isn't a false positive (i.e.
-    that the test fixture really does provoke the warning when htslib's
-    default log level is in effect).
-    """
-    import cyvcf2  # noqa: PLC0415
-
-    vcf_path = tmp_path / "headerless.vcf.gz"
-    _write_vcf_without_contig_header(vcf_path, "22")
-
-    reader = cyvcf2.VCF(str(vcf_path))
-    for _ in reader:
-        pass
-    reader.close()
-
-    captured = capfd.readouterr()
-    assert "Contig 'chr22'" in captured.err
-    assert "is not defined in the header" in captured.err
 
 
 def test_vcf_parses_cleanly_returns_false_on_truncated_file(
     tmp_path: Path,
 ) -> None:
-    """Real parse errors (truncated body) still surface despite suppression.
+    """Real parse errors (truncated body) surface as False.
 
-    The htslib log level we set silences warnings (HTS_LOG_WARNING), but
-    error-level messages still fire. ``_vcf_parses_cleanly`` returns
-    False for any cyvcf2 exception, so the caller treats a truncated
-    output as a failed re-run.
+    ``_vcf_parses_cleanly`` returns False for any cyvcf2 exception so
+    the caller treats a truncated output as a failed re-run.
     """
     from genome.imputation.beagle_runner import (  # noqa: PLC0415
         _vcf_parses_cleanly,

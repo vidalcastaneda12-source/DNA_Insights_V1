@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Phase 4 cleanup (session A) follow-up: stop wrapping
+  `_vcf_parses_cleanly` with the htslib log-level suppression.** Real-
+  data re-run on chr22 after the first cleanup landed showed the
+  post-Beagle validator rejecting a 1M-record output as invalid even
+  though direct cyvcf2 iteration of the same file succeeded. The
+  validator reads at most one record per call (vs. the streaming ingest
+  which reads millions), so the contig warning fires at most once per
+  chromosome there — not spam. Removed the
+  `silence_htslib_contig_warnings()` wrapper from
+  `beagle_runner._vcf_parses_cleanly`; the suppression remains in place
+  at the per-record streaming sites (`ingest._stream_chromosome`,
+  `_count_chromosome_variants`) where it actually matters. Added a
+  regression test that asserts `_vcf_parses_cleanly` returns True on a
+  Beagle-shaped header-less VCF — the exact provocation that surfaced
+  the failure.
 - **Phase 4 cleanup (session A): three small Beagle-pipeline defects surfaced
   by real-data verification.** See
   `docs/findings/finding-007-beagle-real-data-cleanup.md` for the full
