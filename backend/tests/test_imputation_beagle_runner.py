@@ -31,6 +31,7 @@ from genome.imputation.beagle_runner import (
     default_threads,
     run_imputation,
 )
+from genome.imputation.ingest import import_result
 from genome.imputation.reference_panel import (
     PANEL_CHROMOSOMES,
     ReferencePanel,
@@ -684,3 +685,268 @@ def test_run_imputation_output_vcf_is_owner_read_write_only(
     archive = ImputationArchive.for_run(archive_root, imp_id)
     out = archive.result_dir / "chr1.vcf.gz"
     assert stat.S_IMODE(out.stat().st_mode) == 0o600
+
+
+# ---------------------------------------------------------------------------
+# Beagle output parses cleanly despite missing ##contig headers.
+# ---------------------------------------------------------------------------
+
+
+_HEADERLESS_VCF_HEADER = (
+    "##fileformat=VCFv4.2\n"
+    '##INFO=<ID=DR2,Number=1,Type=Float,Description="Dosage R-squared">\n'
+    '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n'
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMPLE\n"
+)
+
+
+def _write_vcf_without_contig_header(dest: Path, chrom: str) -> None:
+    """Write a tiny VCF with NO ``##contig`` line, mimicking Beagle output.
+
+    cyvcf2 emits ``[W::vcf_parse] Contig 'chr<N>' is not defined in the
+    header`` once per file open when the contig isn't declared. The
+    parse itself succeeds.
+    """
+    body = (
+        f"chr{chrom}\t100\trs1\tA\tG\t.\tPASS\tDR2=0.95\tGT\t0|1\n"
+        f"chr{chrom}\t200\trs2\tA\tG\t.\tPASS\tDR2=0.99\tGT\t1|1\n"
+    )
+    with gzip.open(dest, "wt", encoding="ascii") as out:
+        out.write(_HEADERLESS_VCF_HEADER)
+        out.write(body)
+
+
+def test_vcf_parses_cleanly_returns_true_on_beagle_style_output(
+    tmp_path: Path,
+) -> None:
+    """A Beagle-style VCF (no ##contig header) is accepted by the validator."""
+    from genome.imputation.beagle_runner import (  # noqa: PLC0415 — late import keeps top-level minimal
+        _vcf_parses_cleanly,
+    )
+
+    vcf_path = tmp_path / "headerless.vcf.gz"
+    _write_vcf_without_contig_header(vcf_path, "22")
+
+    assert _vcf_parses_cleanly(vcf_path) is True
+
+
+def test_vcf_parses_cleanly_returns_false_on_truncated_file(
+    tmp_path: Path,
+) -> None:
+    """Real parse errors (truncated body) surface as False.
+
+    ``_vcf_parses_cleanly`` returns False for any cyvcf2 exception so
+    the caller treats a truncated output as a failed re-run.
+    """
+    from genome.imputation.beagle_runner import (  # noqa: PLC0415
+        _vcf_parses_cleanly,
+    )
+
+    bad = tmp_path / "truncated.vcf.gz"
+    bad.write_bytes(b"not a vcf at all")
+    assert _vcf_parses_cleanly(bad) is False
+
+
+# ---------------------------------------------------------------------------
+# submitted_at / completed_at stamping (Phase 4 cleanup, session A).
+# ---------------------------------------------------------------------------
+
+
+def test_run_imputation_fresh_run_stamps_submitted_and_completed(
+    isolated_settings: dict[str, str],
+    panel_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stubbed_java: None,  # noqa: ARG001 — fixture stubs check_java_available
+) -> None:
+    """Fresh ``pending`` → ``completed`` path stamps both timestamps.
+
+    Invariant: every transition out of pending stamps ``submitted_at``;
+    every transition to completed stamps ``completed_at``. A fresh full
+    run crosses both transitions.
+    """
+    archive_root = _archive_root(isolated_settings)
+    _seed_panel(panel_root)
+    imp_id = _seed_run(archive_root=archive_root, chromosomes=("1",), status="pending")
+
+    popen_mock, _ = _make_popen_factory()
+    monkeypatch.setattr(subprocess, "Popen", popen_mock)
+
+    run_imputation(imp_id)
+
+    with duckdb_connection() as conn:
+        run = fetch_run(conn, imp_id)
+    assert run is not None
+    assert run.status == "completed"
+    assert run.submitted_at is not None
+    assert run.completed_at is not None
+
+
+def test_run_imputation_force_rerun_preserves_existing_timestamps(
+    isolated_settings: dict[str, str],
+    panel_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stubbed_java: None,  # noqa: ARG001 — fixture stubs check_java_available
+) -> None:
+    """A ``--force`` re-run of a stamped row leaves both timestamps unchanged.
+
+    ``update_status`` uses ``COALESCE(..., CURRENT_TIMESTAMP)`` so any
+    re-stamp is a no-op when the column was already set.
+    """
+    archive_root = _archive_root(isolated_settings)
+    _seed_panel(panel_root)
+    imp_id = _seed_run(
+        archive_root=archive_root,
+        chromosomes=("1",),
+        status="completed",
+    )
+    # Stamp submitted_at + completed_at via the helper so we have a
+    # known-good baseline. Re-running with force=True must preserve these.
+    with duckdb_connection() as conn:
+        update_status(conn, imp_id, status="completed", set_submitted=True, set_completed=True)
+        before = fetch_run(conn, imp_id)
+    assert before is not None
+    assert before.submitted_at is not None
+    assert before.completed_at is not None
+
+    popen_mock, _ = _make_popen_factory()
+    monkeypatch.setattr(subprocess, "Popen", popen_mock)
+
+    run_imputation(imp_id, force=True)
+
+    with duckdb_connection() as conn:
+        after = fetch_run(conn, imp_id)
+    assert after is not None
+    assert after.status == "completed"
+    assert after.submitted_at == before.submitted_at
+    assert after.completed_at == before.completed_at
+
+
+def test_run_imputation_partial_failure_stamps_submitted_not_completed(
+    isolated_settings: dict[str, str],
+    panel_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stubbed_java: None,  # noqa: ARG001 — fixture stubs check_java_available
+) -> None:
+    """Mixed success/failure leaves status=processing, stamps submitted only.
+
+    ``completed_at`` must remain NULL until every attempted chromosome
+    succeeded — partial success is recoverable, so a stale stamp would
+    confuse downstream callers.
+    """
+    archive_root = _archive_root(isolated_settings)
+    _seed_panel(panel_root)
+    imp_id = _seed_run(
+        archive_root=archive_root,
+        chromosomes=("1", "2"),
+        status="pending",
+    )
+
+    popen_mock, _ = _make_popen_factory(returncodes={"2": 1})
+    monkeypatch.setattr(subprocess, "Popen", popen_mock)
+
+    result = run_imputation(imp_id)
+    assert set(result.chromosomes_completed) == {"1"}
+    assert set(result.chromosomes_failed) == {"2"}
+
+    with duckdb_connection() as conn:
+        run = fetch_run(conn, imp_id)
+    assert run is not None
+    assert run.status == "processing"
+    # Transition pending → processing stamped submitted_at.
+    assert run.submitted_at is not None
+    # Mixed outcome means we never transition to completed; completed_at NULL.
+    assert run.completed_at is None
+
+
+def test_run_imputation_all_skip_path_does_not_stamp_completed(
+    isolated_settings: dict[str, str],
+    panel_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stubbed_java: None,  # noqa: ARG001 — fixture stubs check_java_available
+) -> None:
+    """All-skip re-entry from ``pending`` stamps submitted but not completed.
+
+    When every chrom's output VCF already parses cleanly, the runner
+    skips them all (``attempted == 0``) and ``_stamp_status_after_run``
+    is a no-op. The pending → processing transition still fires (we
+    moved past pending before discovering the skips), so ``submitted_at``
+    is stamped — but ``completed_at`` must remain NULL because we never
+    reached the ``completed`` state.
+    """
+    archive_root = _archive_root(isolated_settings)
+    _seed_panel(panel_root)
+    imp_id = _seed_run(archive_root=archive_root, chromosomes=("1",), status="pending")
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+    # Pre-populate the result so the chrom is skipped.
+    _write_minimal_vcf(archive.result_dir / "chr1.vcf.gz", "1")
+
+    popen_mock, captured = _make_popen_factory()
+    monkeypatch.setattr(subprocess, "Popen", popen_mock)
+
+    result = run_imputation(imp_id)
+    assert result.chromosomes_skipped == ("1",)
+    assert result.chromosomes_attempted == ()
+    # Popen must not have been called — every chrom was skipped.
+    assert len(captured) == 0
+
+    with duckdb_connection() as conn:
+        run = fetch_run(conn, imp_id)
+    assert run is not None
+    # status: the pending→processing transition fires before the skip
+    # discovery, so the DB row sits at 'processing'.
+    assert run.status == "processing"
+    assert run.submitted_at is not None
+    assert run.completed_at is None
+
+
+def test_import_result_completed_path_stamps_completed_at(
+    isolated_settings: dict[str, str],
+) -> None:
+    """The import step transitions ``processing`` → ``completed`` and stamps.
+
+    Importer reaches `_execute_import`'s update_status call and must
+    pass ``set_completed=True`` so a run finishing import has its
+    ``completed_at`` populated. The Beagle runner ordinarily stamps
+    completed_at when the run finishes; the import re-stamp here is
+    idempotent via COALESCE.
+    """
+    init_databases()
+    archive_root = Path(isolated_settings["ARCHIVE_PATH"])
+
+    # Hand-seed a run in 'processing' (the state import_result accepts) without
+    # going through the Beagle runner — this isolates the test to the import
+    # path's update_status invariants.
+    with duckdb_connection() as conn:
+        imp_id = insert_run(
+            conn,
+            input_run_ids=(1,),
+            imputation_server="beagle",
+            reference_panel="1000g_phase3_grch38",
+            pipeline_version="imputation_prepare_v0.1.0",
+            variants_input=10,
+        )
+        update_status(conn, imp_id, status="processing", set_submitted=True)
+
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+    archive.ensure_layout()
+    # Write a minimal valid imputed VCF so the ingest path has something
+    # to stream.
+    vcf_path = archive.result_dir / "chr22.dose.vcf.gz"
+    with gzip.open(vcf_path, "wt", encoding="ascii") as out:
+        out.write(
+            "##fileformat=VCFv4.2\n"
+            "##contig=<ID=chr22,length=50818468,assembly=GRCh38>\n"
+            '##INFO=<ID=DR2,Number=1,Type=Float,Description="Dosage R-squared">\n'
+            '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n'
+            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMPLE\n"
+            "chr22\t100\trs1\tA\tG\t.\tPASS\tDR2=0.95\tGT\t0|1\n",
+        )
+
+    import_result(imp_id, archive_root=archive_root)
+
+    with duckdb_connection() as conn:
+        run = fetch_run(conn, imp_id)
+    assert run is not None
+    assert run.status == "completed"
+    assert run.submitted_at is not None  # set by our seed update_status
+    assert run.completed_at is not None  # set by import_result's update_status

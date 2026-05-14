@@ -345,6 +345,12 @@ def _install_genetic_map(
             with zf.open(info) as src, open(dest, "wb") as out:  # noqa: PTH123
                 out.writelines(iter(lambda: src.read(1 << 16), b""))
             dest.chmod(_OWNER_RW_ONLY)
+            # The Browning Lab's PLINK GRCh38 maps label chromosomes in
+            # column 1 without a `chr` prefix (e.g. `22`, `23`), but Beagle
+            # 5.5's reference panels and our prepared input VCFs both use
+            # `chr`-prefixed labels. Beagle does exact-string chromosome
+            # matching, so we normalize the maps once at install time.
+            _rewrite_map_with_chr_prefix(dest, log)
 
 
 def _install_panel_vcf(
@@ -374,6 +380,50 @@ def _install_panel_vcf(
         resource_id=chrom,
     )
     dest.chmod(_OWNER_RW_ONLY)
+
+
+def _rewrite_map_with_chr_prefix(
+    path: Path,
+    log: structlog.stdlib.BoundLogger,
+) -> bool:
+    """Rewrite ``path`` so column 1 of every non-blank line is ``chr``-prefixed.
+
+    Idempotent: lines whose column 1 already starts with ``chr`` are left
+    unchanged, so re-running on an already-prefixed file is a no-op and
+    the file is byte-identical afterwards. Blank lines and comment lines
+    (``#``-prefixed, defensive — PLINK maps don't typically have them) are
+    passed through verbatim. The rewrite is atomic (write to ``<path>.tmp``
+    then rename) and preserves the ``0600`` permission on the rewritten
+    file.
+
+    Returns True when the file was rewritten, False when no rewrite was
+    necessary.
+    """
+    text = path.read_bytes().decode("ascii")
+    out_chunks: list[str] = []
+    changed = False
+    for line in text.splitlines(keepends=True):
+        stripped = line.rstrip("\r\n")
+        if not stripped.strip() or stripped.lstrip().startswith("#"):
+            out_chunks.append(line)
+            continue
+        tab_idx = stripped.find("\t")
+        col1 = stripped if tab_idx == -1 else stripped[:tab_idx]
+        rest = "" if tab_idx == -1 else stripped[tab_idx:]
+        ending = line[len(stripped) :]
+        if col1.startswith("chr"):
+            out_chunks.append(line)
+            continue
+        out_chunks.append(f"chr{col1}{rest}{ending}")
+        changed = True
+    if not changed:
+        return False
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes("".join(out_chunks).encode("ascii"))
+    tmp.chmod(_OWNER_RW_ONLY)
+    tmp.replace(path)
+    log.info("reference_panel.genetic_map.chr_prefix_added", path=str(path))
+    return True
 
 
 def _missing_map_files(panel: ReferencePanel) -> bool:

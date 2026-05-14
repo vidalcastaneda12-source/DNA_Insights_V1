@@ -216,6 +216,11 @@ def _vcf_parses_cleanly(path: Path) -> bool:
     will fail at the cyvcf2 open or first iteration with an exception.
     The function returns ``False`` on any parse failure so the caller can
     treat the file as missing and re-run.
+
+    Note: Beagle's output VCFs omit canonical ``##contig`` headers, so
+    cyvcf2 may emit one ``[W::vcf_parse] Contig 'chr<N>' is not defined
+    in the header`` line per call. The warning is cosmetic — the parse
+    succeeds — and is documented in ``docs/runbooks/imputation.md``.
     """
     if not path.is_file():
         return False
@@ -414,8 +419,12 @@ def _move_to_processing_if_pending(
     """Move ``pending`` → ``processing`` exactly once at the start of work."""
     if current_status != "pending":
         return
+    # Every transition out of ``pending`` stamps ``submitted_at``. For a
+    # local Beagle run this is the moment the first chromosome's
+    # subprocess is about to start; for re-entries that already moved
+    # past pending the helper is a no-op (status check above).
     with duckdb_connection(duckdb_path) as conn:
-        update_status(conn, imputation_id, status="processing")
+        update_status(conn, imputation_id, status="processing", set_submitted=True)
 
 
 def _impute_one_chromosome(  # noqa: PLR0913 — per-call configuration is irreducible

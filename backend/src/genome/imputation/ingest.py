@@ -336,8 +336,8 @@ def _stream_chromosome(
     """
     log = logger.bind(path=str(path), chrom=chrom)
     log.info("imputation.import.chrom.start")
-    reader = _open_imputed_vcf(path)
     batch = _Batch()
+    reader = _open_imputed_vcf(path)
     try:
         for v in reader:
             mapped = _normalize_chrom_label(str(v.CHROM))
@@ -783,9 +783,9 @@ def _count_chromosome_variants(
     Used by the dry-run path. Mirrors ``_stream_chromosome``'s filter rules
     (chromosome match, biallelic SNV, R²-threshold) but writes nothing.
     """
-    reader = _open_imputed_vcf(path)
     kept = 0
     dropped = 0
+    reader = _open_imputed_vcf(path)
     try:
         for v in reader:
             mapped = _normalize_chrom_label(str(v.CHROM))
@@ -1022,7 +1022,12 @@ def _execute_import(  # noqa: PLR0913 — options pass through directly to the w
                 variants_above_r2_0_8=counters.variants_above_r2_0_8,
                 r2_threshold=r2_threshold,
             )
-            update_status(conn, imputation_id, status="completed")
+            # Every transition to ``completed`` stamps ``completed_at``.
+            # The Beagle runner stamps this when the run finishes
+            # imputation; the import step re-stamps idempotently here so
+            # an import that flips a still-``processing`` run to
+            # ``completed`` doesn't leave the timestamp NULL.
+            update_status(conn, imputation_id, status="completed", set_completed=True)
             conn.execute("COMMIT")
         except Exception:
             conn.execute("ROLLBACK")

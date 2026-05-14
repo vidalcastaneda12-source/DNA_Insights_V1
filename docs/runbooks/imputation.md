@@ -61,6 +61,12 @@ What this does:
   `data/` deliberately so it survives a database rebuild.
 - Resumable: any component already on disk is left alone. Pass `--force`
   to re-download everything, or `--chromosomes 1,22,X` to grab a subset.
+- Rewrites each extracted PLINK `.map` so column 1 carries the `chr`
+  prefix. The Browning Lab archive ships bare numeric labels (`22`,
+  `23`), but Beagle 5.5 does exact-string chromosome matching against
+  its reference panel and refuses to run with mismatched labels. The
+  rewrite is idempotent — files whose column 1 already starts with
+  `chr` are left byte-identical.
 
 Approximate size on disk: 30–50 GB total. The download requires
 `user_preferences.external_calls_enabled = true`:
@@ -238,6 +244,14 @@ The consensus needs to be refreshed across all three sources now that
 
 After this step, the entire downstream pipeline (Phases 5+) operates on
 the unified imputed set.
+
+## Expected log output
+
+cyvcf2 emits `[W::vcf_parse] Contig 'chr<N>' is not defined in the header.`
+once per file open during the run, import, and dry-run steps. Beagle's
+output VCFs do not declare contigs in their headers; cyvcf2 parses the
+files correctly regardless. The warning is informational — about 23
+lines per full-genome import — and can be ignored.
 
 ## Troubleshooting
 
