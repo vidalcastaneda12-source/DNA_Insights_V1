@@ -145,4 +145,7 @@ pytest
 
 ## Status
 
-Phase 1 (foundation) — complete. See `ROADMAP.md` for what's next.
+Phases 1–4 complete (foundation, ingestion, merge & discrepancy detection,
+local imputation via Beagle 5.5). Phase 5 (reference annotation loaders) is
+next. See `ROADMAP.md` for the phase plan and `CHANGELOG.md` for release-level
+detail.

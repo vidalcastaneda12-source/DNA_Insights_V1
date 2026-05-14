@@ -79,10 +79,11 @@ def insert_run(  # noqa: PLR0913 — schema fields are not collapsible
 ) -> int:
     """Insert a fresh ``imputation_runs`` row in ``status='pending'``.
 
-    Returns the new ``imputation_id``. ``submitted_at`` is left NULL — it's
-    set when :func:`mark_submitted` is called after the user has actually
-    uploaded the file to TopMed. ``status='pending'`` therefore means
-    "VCFs prepared locally; user has not yet uploaded".
+    Returns the new ``imputation_id``. ``submitted_at`` is left NULL — it
+    is stamped on the ``pending`` → ``processing`` transition when the
+    local Beagle runner starts the first chromosome's subprocess (see
+    ``beagle_runner._move_to_processing_if_pending``). ``status='pending'``
+    therefore means "VCFs prepared locally; Beagle has not yet run".
     """
     imputation_id = _next_imputation_id(conn)
     conn.execute(

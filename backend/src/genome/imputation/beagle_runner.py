@@ -5,8 +5,8 @@ upload VCFs from the merged consensus; this module pipes each of those
 through Beagle 5.5 against the local 1000 Genomes Phase 3 reference panel
 and lands one imputed VCF per chromosome under
 ``archive/imputation/run_<id>/result/``. The subsequent ``import_result``
-step (existing, still labelled ``topmed_imputed`` until session 6) then
-streams those imputed VCFs into ``genotype_calls`` and ``variants_master``.
+step streams those imputed VCFs into ``genotype_calls`` (with
+``source='beagle_imputed'``) and ``variants_master``.
 
 Key design points:
 
