@@ -10,9 +10,13 @@ consensus rows can be regenerated from history when the rule changes.
 - All active rows in `genotype_calls` (one active call per `(variant_id, source)`).
 - The corresponding rows in `variants_master` (chrom, pos_grch38, ref, alt, rsid).
 
-Phase 3 only resolves the two raw-export sources, `23andme` and `ancestry`.
-`topmed_imputed` is reserved for Phase 4; an `imputed_only` consensus method
-already exists in the schema and will be exercised then.
+Three sources feed the merge: the two chip platforms (`23andme`, `ancestry`)
+and the Phase 4 imputed source (`beagle_imputed`). The chip platforms are
+resolved exactly as in Phase 3; the imputed source is treated as confirming
+evidence when at least one chip call is also active at the same variant, or
+as the sole evidence (`imputed_only`) when no chip call is present.
+`topmed_imputed` is still in the enum but no longer ingested — the local
+Beagle workflow superseded it (see `finding-006`).
 
 ## Variant matching strategy
 
@@ -51,12 +55,12 @@ Three lookup keys, applied in order:
 
 ## `consensus_v1` rule
 
-For each `variants_master` row, given the (possibly absent) `23andme` and
-`ancestry` active calls:
+For each `variants_master` row, given the (possibly absent) `23andme`,
+`ancestry`, and `beagle_imputed` active calls:
 
 | `23andme` | `ancestry` | Resolution                                                                                                    |
 | --------- | ---------- | ------------------------------------------------------------------------------------------------------------- |
-| absent    | absent     | `consensus_method = 'unresolvable'`, no-call. Defensive — should not occur in well-formed state.              |
+| absent    | absent     | If `beagle_imputed` is also absent: `consensus_method = 'unresolvable'`, no-call (defensive — should not occur in well-formed state). If `beagle_imputed` is present, see the imputed-only rows below. |
 | present   | absent     | `single_source` using 23andme's call. `platform_unique` discrepancy at `info` severity (or `no_call_diff` at `minor` if 23andme's call itself is a no-call). |
 | absent    | present    | Symmetric.                                                                                                    |
 | no-call   | no-call    | `both_concordant` with `is_no_call = true`. No discrepancy — both sides agree on the absence of a call.       |
@@ -67,11 +71,49 @@ For each `variants_master` row, given the (possibly absent) `23andme` and
 | called    | called, alleles differ, non-palindromic, complement matches | `disagreement_resolved` using the alleles in this row's frame. `strand_flip_resolved` discrepancy with `resolution = 'flipped_strand_match'` at `info` severity. The discrepancy row is an audit trail of a successful reconciliation, not a disagreement. |
 | called    | called, alleles differ, non-palindromic, complement does not match | `unresolvable` no-call. `genotype_mismatch` discrepancy at `major` severity. |
 
+Phase 4 extension — imputed source:
+
+| `23andme` | `ancestry` | `beagle_imputed` | Resolution |
+| --------- | ---------- | ---------------- | ---------- |
+| absent    | absent     | called           | `imputed_only` using the imputed call's alleles; `is_imputed = true`; `consensus_r2` carries the imputed call's `imputation_r2`. No discrepancy. |
+| absent    | absent     | no-call          | `imputed_only` with `is_no_call = true`; `is_imputed = true`; `consensus_r2` carries the imputed call's `imputation_r2`. No discrepancy. |
+| any chip call present | (any) | present          | The chip-only resolution above prevails byte-for-byte (method, alleles, dosage, `is_imputed = false`). The imputed call's `call_id` is appended to `contributing_calls` as confirming evidence. No new discrepancy is emitted. |
+
 After the per-row resolve, a tier-3 pass detects strand-flip partners across
 `variants_master` rows at the same `(chrom, pos_grch38)`. Matched pairs have
 their two `single_source` consensus rows rewritten to
 `disagreement_resolved`, with `strand_flip_resolved` discrepancies whose
-`resolution = 'flipped_strand_match'`.
+`resolution = 'flipped_strand_match'`. Rows that also carry an active
+`beagle_imputed` call are excluded from tier-3 candidacy: the tier-3 rewrite
+replaces `contributing_calls` with just the two paired chip call_ids, which
+would drop the imputed call from the audit trail. Preserving the imputed
+call as confirming evidence on the per-row consensus is the higher-priority
+invariant. This is a rare case in practice — imputed-only variants land at
+different `(chrom, pos_grch38)` than the chip data by construction, and a
+chip+imputed variant whose strand-flip partner is a separate chip-only
+`variants_master` row is the only shape the exclusion affects.
+
+## Imputation as confirming evidence
+
+The Phase 4 rule extension is anchored on one design choice: imputation
+adds confidence, it does not override. When `23andme` and `ancestry` agree,
+the consensus method stays `both_concordant`; when they disagree on a
+non-palindromic site whose complement flip succeeds, the consensus method
+stays `disagreement_resolved`; when only one chip platform reports the
+site, the consensus method stays `single_source`. In all three cases an
+active `beagle_imputed` call at the same variant is appended to
+`contributing_calls` so the dashboard can show that imputation independently
+re-derived the same genotype, but the consensus's method, alleles, dosage,
+and `is_imputed` flag are not touched. Imputation only becomes the consensus
+when no chip call is active — the `imputed_only` branch, by far the most
+common shape in real-data merges (~2.3M of ~3.2M consensus rows on the
+user's corpus).
+
+The rule label remains `consensus_v1` because the chip-only branches are
+unchanged byte-for-byte. The extension was anticipated by Phase 3's
+forward-pointing language — `imputed_only` was already an enum member of
+`consensus_method_enum` and `beagle_imputed` already an enum member of
+`source_enum`. No schema migration was required.
 
 ## Discrepancy type catalog
 
@@ -140,7 +182,9 @@ tables in their previous consistent state.
   `both_concordant` ⇒ 0.99, `disagreement_resolved` (strand-flip) ⇒ 0.90,
   `single_source` (true `platform_unique`) ⇒ 0.85, `single_source` (with a
   `no_call_diff` against the other platform) ⇒ 0.75, `unresolvable` ⇒
-  `NULL`. The evidence-weighted rollup arrives in Phase 7.
+  `NULL`, `imputed_only` ⇒ `NULL` (the per-variant `consensus_r2` carries
+  the imputation quality signal until the Phase 7 rollup folds it in). The
+  evidence-weighted rollup arrives in Phase 7.
 
 ## Versioning
 

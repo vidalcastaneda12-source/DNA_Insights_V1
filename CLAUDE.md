@@ -57,6 +57,17 @@ A local-first personal DNA insights application that ingests 23andMe + Ancestry 
 
 2. **Heterozygosity rate is chip-dependent.** 23andMe v5 typically lands ~0.17, Ancestry v2 ~0.34 — for the same sample. The two chips target different SNP populations: 23andMe's broader panel includes many common variants where most individuals are homozygous-reference, while Ancestry's panel is curated for ancestry-informative markers with higher MAF and consequently higher heterozygosity. The QC `het_outlier` threshold (if/when introduced) should be calibrated per source or use a wide tolerance that accommodates both ranges. Cross-platform het differences are chip-design signal, not biological signal.
 
+3. **Phase 4 Beagle imputation produces ~2.37M variants at DR² > 0.3 from ~204K polymorphic chip inputs.** Real-data verification (see finding-007) established these durable numbers for the user's 23andMe v5 + Ancestry v2 merged corpus:
+   - Input to Beagle: 204,153 polymorphic SNVs across chromosomes 1-22 + X. Hom-only positions are filtered at prepare per finding-005 #6.
+   - Imputed output at DR² > 0.3: 2,369,171 variants.
+   - Mean DR²: 0.8242. High-quality (DR² > 0.8): 1,592,735 (~67% of imported).
+   - chrX imputed variants: 0 for males, because hemizygous positions land as `ref==alt` at the prepare layer (finding-005 #6) and so are dropped before Beagle ever sees them.
+   - Full-genome runtime: ~30 min on Linux, 16 threads, 8 GB heap.
+   - Post-merge `consensus_genotypes`: 3,210,371 rows (942,620 chip-derived; 2,267,751 imputed-only under the `consensus_v1` Phase 4 extension; the 101,420 chip+imputed overlap variants stay chip-derived with the imputed call appended to `contributing_calls` as confirming evidence).
+   - Phase 3 numbers preserved exactly through Phase 4: `both_concordant=120,516`, `disagreement_resolved=106`, `single_source=821,998`, shared-call concordance=1.0000, `strand_flip_resolutions=106`, palindromic shared variants=31.
+
+   These numbers are stable identifiers. Drift in any of them on a re-run against the same input corpus is a regression signal.
+
 ## Environment requirements
 
 - **SQLCipher must be built with FTS5.** `app.db` includes a `notes_fts` virtual

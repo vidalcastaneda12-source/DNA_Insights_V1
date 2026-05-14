@@ -4,8 +4,13 @@ The rule is intentionally simple and intentionally versioned. Every consensus
 row stamps ``resolution_rule = 'consensus_v1'`` so a later session can rebuild
 history when the rule changes. See ``docs/consensus.md`` for the prose version.
 
-Phase 3 only sees ``23andme`` and ``ancestry`` calls. ``topmed_imputed`` is a
-Phase 4 concern; the imputation-only branch is sketched but not exercised.
+Phase 3 introduced the chip-only branches (``23andme`` + ``ancestry``). Phase 4
+extends the same rule in place to handle ``beagle_imputed`` calls: imputation
+is treated as confirming evidence that appends to ``contributing_calls`` when
+a chip call is present, and as the sole evidence (``imputed_only``) when no
+chip call is present at the variant. The rule label remains ``consensus_v1``
+— no version bump — because the chip-only resolutions are unchanged
+byte-for-byte.
 """
 
 from __future__ import annotations
@@ -84,6 +89,8 @@ def _consensus(  # noqa: PLR0913 — every arg comes straight off the schema
     method: ConsensusMethod,
     contributing: tuple[int, ...],
     confidence: float | None,
+    is_imputed: bool = False,
+    consensus_r2: float | None = None,
 ) -> ConsensusRow:
     return ConsensusRow(
         variant_id=variant_id,
@@ -92,11 +99,37 @@ def _consensus(  # noqa: PLR0913 — every arg comes straight off the schema
         is_no_call=is_no_call,
         dosage=_dosage(a1, a2, alt_allele, is_no_call=is_no_call),
         consensus_method=method,
-        is_imputed=False,
-        consensus_r2=None,
+        is_imputed=is_imputed,
+        consensus_r2=consensus_r2,
         contributing_calls=contributing,
         resolution_rule=MERGE_VERSION,
         confidence=confidence,
+    )
+
+
+def _append_imputed_call(
+    consensus: ConsensusRow,
+    imputed_call_id: int,
+) -> ConsensusRow:
+    """Return a new ConsensusRow with ``imputed_call_id`` appended to ``contributing_calls``.
+
+    ``ConsensusRow`` is frozen, so this returns a fresh instance. The chip
+    consensus's method, alleles, dosage, and ``is_imputed=False`` are
+    preserved exactly — imputation adds confidence as confirming evidence
+    only, never overrides chip-source resolution.
+    """
+    return ConsensusRow(
+        variant_id=consensus.variant_id,
+        consensus_allele_1=consensus.consensus_allele_1,
+        consensus_allele_2=consensus.consensus_allele_2,
+        is_no_call=consensus.is_no_call,
+        dosage=consensus.dosage,
+        consensus_method=consensus.consensus_method,
+        is_imputed=consensus.is_imputed,
+        consensus_r2=consensus.consensus_r2,
+        contributing_calls=(*consensus.contributing_calls, imputed_call_id),
+        resolution_rule=consensus.resolution_rule,
+        confidence=consensus.confidence,
     )
 
 
@@ -397,21 +430,80 @@ def _resolve_no_active_calls(pair: VariantPair) -> tuple[ConsensusRow, list[Disc
     )
 
 
+def _resolve_imputed_only(pair: VariantPair, imputed: CallView) -> ConsensusRow:
+    """Only the ``beagle_imputed`` call is active at this variant.
+
+    The consensus method is ``imputed_only`` and ``consensus_r2`` carries the
+    imputed call's per-variant R² so downstream consumers can filter by
+    imputation quality. ``confidence`` is left ``None`` as a placeholder for
+    the Phase 7 evidence-weighted rollup. No discrepancy is emitted: an
+    imputed-only call is not a disagreement with anything, just a thin source.
+    """
+    if imputed.is_no_call:
+        return _consensus(
+            variant_id=pair.variant_id,
+            a1=None,
+            a2=None,
+            is_no_call=True,
+            alt_allele=pair.alt_allele,
+            method="imputed_only",
+            contributing=(imputed.call_id,),
+            confidence=None,
+            is_imputed=True,
+            consensus_r2=imputed.imputation_r2,
+        )
+    a_alleles = sorted_pair(imputed.allele_1 or "", imputed.allele_2 or "")
+    return _consensus(
+        variant_id=pair.variant_id,
+        a1=a_alleles[0],
+        a2=a_alleles[1],
+        is_no_call=False,
+        alt_allele=pair.alt_allele,
+        method="imputed_only",
+        contributing=(imputed.call_id,),
+        confidence=None,
+        is_imputed=True,
+        consensus_r2=imputed.imputation_r2,
+    )
+
+
 def resolve(pair: VariantPair) -> tuple[ConsensusRow, list[DiscrepancyRow]]:
     """Apply ``consensus_v1`` to one variant pair.
 
     Returns the consensus row destined for ``consensus_genotypes`` and zero or
     more discrepancy rows destined for ``discrepancies``.
+
+    Branch order:
+
+    1. If any chip call (``23andme`` and/or ``ancestry``) is active, the
+       chip-only Phase 3 resolution runs unchanged. If an active
+       ``beagle_imputed`` call is also present at the same variant, it is
+       appended to the resulting consensus's ``contributing_calls`` as
+       confirming evidence — the consensus method, alleles, dosage, and
+       ``is_imputed`` flag are not touched.
+    2. If only the imputed call is active, produce an ``imputed_only``
+       consensus carrying the imputed call's alleles and ``imputation_r2``.
+    3. Otherwise defensively produce an ``unresolvable`` no-call.
     """
     a = pair.twentythree
     b = pair.ancestry
+    imputed = pair.imputed
 
     if a is not None and b is not None:
-        return _resolve_both_present(pair, a, b)
+        consensus, discs = _resolve_both_present(pair, a, b)
+        if imputed is not None:
+            consensus = _append_imputed_call(consensus, imputed.call_id)
+        return (consensus, discs)
     if a is not None:
         consensus, disc = _resolve_single_source(pair, a, other_call=None)
+        if imputed is not None:
+            consensus = _append_imputed_call(consensus, imputed.call_id)
         return (consensus, [disc])
     if b is not None:
         consensus, disc = _resolve_single_source(pair, b, other_call=None)
+        if imputed is not None:
+            consensus = _append_imputed_call(consensus, imputed.call_id)
         return (consensus, [disc])
+    if imputed is not None:
+        return (_resolve_imputed_only(pair, imputed), [])
     return _resolve_no_active_calls(pair)

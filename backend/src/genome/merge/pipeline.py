@@ -43,12 +43,16 @@ _STRAND_FLIP_CONFIDENCE: Final[float] = 0.90
 
 
 def _fetch_variant_pairs(conn: DuckDBPyConnection) -> list[VariantPair]:
-    """Return one row per ``variants_master`` row with paired 23andme + ancestry calls.
+    """Return one row per ``variants_master`` row with paired chip + imputed calls.
 
     The aggregation uses ``MAX(... is_active)`` on each per-source call to
     pivot into a single wide row — there is at most one active call per
     ``(variant_id, source)`` by the writer's invariant, so ``MAX`` is just a
-    "the value if it exists" extractor.
+    "the value if it exists" extractor. Three sources are pivoted: the two
+    chip platforms (``23andme``, ``ancestry``) and the Phase 4 imputed source
+    (``beagle_imputed``). The imputed pivot also carries the per-variant
+    ``imputation_r2`` so it can propagate to ``consensus_genotypes.consensus_r2``
+    when only the imputed call is present.
     """
     rows = conn.execute(
         """
@@ -58,19 +62,24 @@ def _fetch_variant_pairs(conn: DuckDBPyConnection) -> list[VariantPair]:
             vm.pos_grch38,
             vm.ref_allele,
             vm.alt_allele,
-            MAX(CASE WHEN gc.source = '23andme'  THEN gc.call_id END)    AS call_id_23,
-            MAX(CASE WHEN gc.source = '23andme'  THEN gc.allele_1 END)   AS a1_23,
-            MAX(CASE WHEN gc.source = '23andme'  THEN gc.allele_2 END)   AS a2_23,
-            BOOL_OR(gc.source = '23andme'  AND gc.is_no_call)            AS nc_23,
-            MAX(CASE WHEN gc.source = 'ancestry' THEN gc.call_id END)    AS call_id_anc,
-            MAX(CASE WHEN gc.source = 'ancestry' THEN gc.allele_1 END)   AS a1_anc,
-            MAX(CASE WHEN gc.source = 'ancestry' THEN gc.allele_2 END)   AS a2_anc,
-            BOOL_OR(gc.source = 'ancestry' AND gc.is_no_call)            AS nc_anc
+            MAX(CASE WHEN gc.source = '23andme'        THEN gc.call_id END)        AS call_id_23,
+            MAX(CASE WHEN gc.source = '23andme'        THEN gc.allele_1 END)       AS a1_23,
+            MAX(CASE WHEN gc.source = '23andme'        THEN gc.allele_2 END)       AS a2_23,
+            BOOL_OR(gc.source = '23andme'              AND gc.is_no_call)          AS nc_23,
+            MAX(CASE WHEN gc.source = 'ancestry'       THEN gc.call_id END)        AS call_id_anc,
+            MAX(CASE WHEN gc.source = 'ancestry'       THEN gc.allele_1 END)       AS a1_anc,
+            MAX(CASE WHEN gc.source = 'ancestry'       THEN gc.allele_2 END)       AS a2_anc,
+            BOOL_OR(gc.source = 'ancestry'             AND gc.is_no_call)          AS nc_anc,
+            MAX(CASE WHEN gc.source = 'beagle_imputed' THEN gc.call_id END)        AS call_id_imp,
+            MAX(CASE WHEN gc.source = 'beagle_imputed' THEN gc.allele_1 END)       AS a1_imp,
+            MAX(CASE WHEN gc.source = 'beagle_imputed' THEN gc.allele_2 END)       AS a2_imp,
+            BOOL_OR(gc.source = 'beagle_imputed'       AND gc.is_no_call)          AS nc_imp,
+            MAX(CASE WHEN gc.source = 'beagle_imputed' THEN gc.imputation_r2 END)  AS r2_imp
         FROM variants_master vm
         LEFT JOIN genotype_calls gc
             ON gc.variant_id = vm.variant_id
            AND gc.is_active
-           AND gc.source IN ('23andme', 'ancestry')
+           AND gc.source IN ('23andme', 'ancestry', 'beagle_imputed')
         GROUP BY vm.variant_id, vm.chrom, vm.pos_grch38, vm.ref_allele, vm.alt_allele
         ORDER BY vm.variant_id
         """,
@@ -79,7 +88,7 @@ def _fetch_variant_pairs(conn: DuckDBPyConnection) -> list[VariantPair]:
     pairs: list[VariantPair] = []
     for row in rows:
         # DuckDB returns each row as an untyped tuple; per the SELECT shape it
-        # is exactly the 13 columns above in order. Build the pair eagerly so
+        # is exactly the 18 columns above in order. Build the pair eagerly so
         # mypy never has to see an opaque-typed intermediate flow back out.
         (
             variant_id,
@@ -95,6 +104,11 @@ def _fetch_variant_pairs(conn: DuckDBPyConnection) -> list[VariantPair]:
             a1_anc,
             a2_anc,
             nc_anc,
+            call_id_imp,
+            a1_imp,
+            a2_imp,
+            nc_imp,
+            r2_imp,
         ) = row
         pairs.append(
             VariantPair(
@@ -105,24 +119,35 @@ def _fetch_variant_pairs(conn: DuckDBPyConnection) -> list[VariantPair]:
                 alt_allele=str(alt_allele),
                 twentythree=_build_call_view("23andme", call_id_23, a1_23, a2_23, nc_23),
                 ancestry=_build_call_view("ancestry", call_id_anc, a1_anc, a2_anc, nc_anc),
+                imputed=_build_call_view(
+                    "beagle_imputed",
+                    call_id_imp,
+                    a1_imp,
+                    a2_imp,
+                    nc_imp,
+                    imputation_r2=r2_imp,
+                ),
             ),
         )
     return pairs
 
 
-def _build_call_view(
+def _build_call_view(  # noqa: PLR0913 — pivoted-column wrapper, one arg per column
     source: Source,
     call_id: object,
     allele_1: object,
     allele_2: object,
     is_no_call: object,
+    imputation_r2: object = None,
 ) -> CallView | None:
     """Wrap one source's pivoted columns into a :class:`CallView` (or ``None``).
 
     ``object`` is used in the signature (not ``Any``) because the values come
     straight off a DuckDB row tuple and ruff's ``ANN401`` forbids ``Any``
     annotations. The ``int(...)`` / ``str(...)`` / ``bool(...)`` casts accept
-    ``object`` at type-check time and validate at runtime.
+    ``object`` at type-check time and validate at runtime. ``imputation_r2``
+    is ``None`` for chip sources by design and a ``float`` for the imputed
+    source.
     """
     if call_id is None:
         return None
@@ -132,6 +157,7 @@ def _build_call_view(
         allele_1=None if allele_1 is None else str(allele_1),
         allele_2=None if allele_2 is None else str(allele_2),
         is_no_call=bool(is_no_call),
+        imputation_r2=None if imputation_r2 is None else float(imputation_r2),  # type: ignore[arg-type]
     )
 
 
@@ -145,9 +171,19 @@ def _single_source_call(pair: VariantPair) -> CallView | None:
     """Return the sole called (non-no-call) ``CallView`` for a candidate pair.
 
     A pair qualifies for tier-3 strand-flip matching only when exactly one
-    source has an active call AND that call is not a no-call. Returns ``None``
-    for any other shape so the caller can skip the row.
+    chip source has an active call AND that call is not a no-call. Returns
+    ``None`` for any other shape so the caller can skip the row.
+
+    Variants that also carry an active ``beagle_imputed`` call are excluded
+    from tier-3 candidacy: tier-3 pairing reconciles two chip platforms that
+    disagreed on strand at the same ``(chrom, pos_grch38)``, but the chip
+    resolution already prevails over the imputed call (which lands in
+    ``contributing_calls`` of the existing consensus). Pairing a chip+imputed
+    row with a chip-only row across position would double-count the imputed
+    call's contribution.
     """
+    if pair.imputed is not None:
+        return None
     has_23 = pair.twentythree is not None
     has_anc = pair.ancestry is not None
     if has_23 == has_anc:  # both or neither — not a single-source candidate
