@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Phase 4 cleanup (session A): three small Beagle-pipeline defects surfaced
+  by real-data verification.** See
+  `docs/findings/finding-007-beagle-real-data-cleanup.md` for the full
+  write-up.
+  - `reference_panel._install_genetic_map` now rewrites each extracted
+    PLINK GRCh38 `.map` file so column 1 is `chr`-prefixed
+    (`22` → `chr22`, `23` → `chr23`). The upstream Browning Lab archive
+    ships bare numeric labels, but Beagle 5.5's reference panels and our
+    prepared input VCFs both use `chr`-prefixed contigs, and Beagle does
+    exact-string chromosome matching. The rewrite is atomic (write
+    `<path>.tmp`, rename), preserves `0600` permissions, and is
+    idempotent (already chr-prefixed files are left byte-identical).
+  - htslib's per-record `[W::vcf_parse] Contig 'chr<N>' is not defined
+    in the header` warning is now suppressed at the imputation module's
+    cyvcf2 read sites (`beagle_runner._vcf_parses_cleanly`,
+    `imputation/ingest.py` `_stream_chromosome` / dry-run
+    `_count_chromosome_variants`). A new private
+    `genome.imputation._htslib.silence_htslib_contig_warnings()` context
+    manager lowers htslib's global log level to `HTS_LOG_ERROR` for the
+    duration of one read and restores `HTS_LOG_WARNING` (htslib default)
+    on exit, so real parse errors continue to surface and unrelated
+    cyvcf2 readers elsewhere are unaffected.
+  - `imputation_runs.submitted_at` is now stamped on the
+    `pending` → `processing` transition in the local Beagle runner
+    (`beagle_runner._move_to_processing_if_pending`), and
+    `imputation_runs.completed_at` is now stamped on the
+    `processing` → `completed` transition in the import step
+    (`ingest._execute_import`). The `update_status` helper's
+    `COALESCE(..., CURRENT_TIMESTAMP)` semantics are unchanged; the bug
+    was call sites omitting the `set_submitted=True` / `set_completed=True`
+    flags. The invariant ("every transition out of pending stamps
+    submitted_at; every transition to completed stamps completed_at") is
+    now documented on the helper's docstring and at each transition
+    site.
+
 ### Removed
 - TopMed Imputation Server client and its CLI surface: deleted
   `backend/src/genome/imputation/topmed_client.py` (including

@@ -216,6 +216,12 @@ def update_status(
     columns to ``CURRENT_TIMESTAMP`` only if they were previously NULL. This
     preserves idempotence — re-running a status check that already advanced
     a run does not bump the timestamp.
+
+    Invariant the callers must honour: every transition out of ``pending``
+    passes ``set_submitted=True`` and every transition to ``completed``
+    passes ``set_completed=True``. ``COALESCE`` semantics here are what
+    make re-entry safe; the helper itself does not infer the flags from
+    the status.
     """
     parts = ["status = ?"]
     params: list[object] = [status]

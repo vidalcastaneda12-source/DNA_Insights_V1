@@ -51,6 +51,7 @@ import structlog
 
 from genome.config import get_settings
 from genome.db.duckdb_conn import duckdb_connection
+from genome.imputation._htslib import silence_htslib_contig_warnings
 from genome.imputation.archive import ImputationArchive, restrict_file
 from genome.imputation.reference_panel import (
     PANEL_CHROMOSOMES,
@@ -219,22 +220,25 @@ def _vcf_parses_cleanly(path: Path) -> bool:
     """
     if not path.is_file():
         return False
+    # Beagle output is missing canonical ##contig headers, so cyvcf2 prints
+    # a per-record contig warning. Suppress it for this read; real errors
+    # still surface because htslib emits them at HTS_LOG_ERROR.
     try:
-        import cyvcf2  # noqa: PLC0415 — import deferred so module loads without cyvcf2 at type-check time
+        with silence_htslib_contig_warnings():
+            import cyvcf2  # noqa: PLC0415 — import deferred so module loads without cyvcf2 at type-check time
 
-        reader = cyvcf2.VCF(str(path))
+            reader = cyvcf2.VCF(str(path))
+            try:
+                # Reading one record is enough to confirm the body is intact.
+                # An empty body (no records) is acceptable — Beagle can
+                # produce one for a tiny input. The header-only open above
+                # already passed.
+                for _ in reader:
+                    break
+            finally:
+                reader.close()
     except Exception:  # noqa: BLE001 — any cyvcf2 error means "not clean"
         return False
-    try:
-        # Reading one record is enough to confirm the body is intact. An empty
-        # body (no records) is acceptable — Beagle can produce one for a tiny
-        # input. The header-only open above already passed.
-        for _ in reader:
-            break
-    except Exception:  # noqa: BLE001
-        return False
-    finally:
-        reader.close()
     return True
 
 
@@ -414,8 +418,12 @@ def _move_to_processing_if_pending(
     """Move ``pending`` → ``processing`` exactly once at the start of work."""
     if current_status != "pending":
         return
+    # Every transition out of ``pending`` stamps ``submitted_at``. For a
+    # local Beagle run this is the moment the first chromosome's
+    # subprocess is about to start; for re-entries that already moved
+    # past pending the helper is a no-op (status check above).
     with duckdb_connection(duckdb_path) as conn:
-        update_status(conn, imputation_id, status="processing")
+        update_status(conn, imputation_id, status="processing", set_submitted=True)
 
 
 def _impute_one_chromosome(  # noqa: PLR0913 — per-call configuration is irreducible

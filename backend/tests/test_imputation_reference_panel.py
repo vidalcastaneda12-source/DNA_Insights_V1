@@ -64,11 +64,25 @@ def _audit_rows() -> list[tuple[object, ...]]:
 
 
 def _build_map_zip_bytes(chroms: list[str]) -> bytes:
-    """Build a minimal in-memory zip mimicking plink.GRCh38.map.zip."""
+    """Build a minimal in-memory zip mimicking plink.GRCh38.map.zip.
+
+    Mirrors the real upstream archive: column 1 of every line is the bare
+    chromosome label (``22``, ``23``), without a ``chr`` prefix. The
+    install step is expected to rewrite each extracted file in place so
+    column 1 becomes ``chr``-prefixed.
+    """
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for c in chroms:
-            zf.writestr(f"plink.chr{c}.GRCh38.map", f"chr{c} 0 0.0 0\n")
+            # PLINK chr labels Y as 24 and X as 23 in the upstream maps;
+            # we only carry X here (chrY is intentionally absent from the
+            # panel set), so we use ``23`` to mimic the upstream encoding
+            # for that one chromosome.
+            col1 = "23" if c == "X" else c
+            zf.writestr(
+                f"plink.chr{c}.GRCh38.map",
+                f"{col1}\t.\t0.0\t1\n{col1}\t.\t1.0\t1000\n",
+            )
     return buf.getvalue()
 
 
@@ -397,3 +411,124 @@ def test_install_panel_rejects_unknown_chromosome(
     panel = ReferencePanel.resolve()
     with pytest.raises(ValueError, match="unknown panel chromosome"):
         install_panel(panel, chromosomes=frozenset({"Y"}))
+
+
+# -----------------------------------------------------------------------------
+# Genetic-map chr-prefix normalization (Beagle 5.5 compat)
+# -----------------------------------------------------------------------------
+
+
+def test_install_panel_rewrites_genetic_map_with_chr_prefix(
+    panel_root: Path,  # noqa: ARG001
+    mock_transport: dict[str, list[httpx.Request]],  # noqa: ARG001 — keep the patch active
+) -> None:
+    """The Browning Lab archive's column-1 is unprefixed; the install
+    step must rewrite each extracted .map so column 1 carries ``chr``.
+
+    Beagle 5.5 does exact-string chromosome matching and refuses to run
+    when the genetic map's labels don't match the panel/input VCFs'
+    ``chr``-prefixed labels.
+    """
+    init_databases()
+    _enable_external_calls()
+    panel = ReferencePanel.resolve()
+
+    install_panel(panel)
+
+    for c in PANEL_CHROMOSOMES:
+        mfile = panel.map_for_chrom(c)
+        assert mfile.is_file()
+        # Every non-blank line's first column must be chr-prefixed.
+        lines = mfile.read_text().splitlines()
+        non_blank = [line for line in lines if line.strip() and not line.lstrip().startswith("#")]
+        assert non_blank, f"no data lines for chr{c} in {mfile}"
+        for line in non_blank:
+            col1 = line.split("\t", 1)[0]
+            assert col1.startswith("chr"), f"chr{c}: line column 1 is not chr-prefixed: {line!r}"
+        # Permissions survive the in-place rewrite.
+        assert stat.S_IMODE(mfile.stat().st_mode) == 0o600
+
+
+def test_install_panel_chr_prefix_rewrite_is_idempotent(
+    panel_root: Path,  # noqa: ARG001
+    mock_transport: dict[str, list[httpx.Request]],  # noqa: ARG001
+) -> None:
+    """Re-running ``--force`` on already chr-prefixed maps leaves them byte-identical.
+
+    Important because ``panel install`` is idempotent overall — a user
+    who runs install twice (or once with ``--force``) must not see the
+    prefix doubled (``chrchr22``) on the second pass.
+    """
+    init_databases()
+    _enable_external_calls()
+    panel = ReferencePanel.resolve()
+    install_panel(panel)
+
+    # Snapshot the rewritten files' bytes.
+    pre_rewrite: dict[str, bytes] = {
+        c: panel.map_for_chrom(c).read_bytes() for c in PANEL_CHROMOSOMES
+    }
+
+    # Force re-install. The map archive is re-extracted (because force=True
+    # triggers needs_extract), then the prefix rewrite runs again. The
+    # rewrite step is a no-op on already chr-prefixed files, but the
+    # re-extraction from the zip writes the upstream (unprefixed) bytes
+    # first — so the final result after the rewrite must still match the
+    # first install's bytes.
+    install_panel(panel, force=True)
+
+    for c in PANEL_CHROMOSOMES:
+        post = panel.map_for_chrom(c).read_bytes()
+        assert post == pre_rewrite[c], f"chr{c}: rewrite is not idempotent across re-install"
+
+
+def test_install_panel_chr_prefix_rewrite_preserves_existing_chr(
+    panel_root: Path,  # noqa: ARG001 — fixture sets settings override
+    mock_transport: dict[str, list[httpx.Request]],
+) -> None:
+    """A map archive that already ships chr-prefixed lines is left alone.
+
+    Some future upstream release may switch the maps to chr-prefixed
+    labels; the rewrite must be a no-op in that case rather than
+    producing ``chrchr<N>``.
+    """
+    init_databases()
+    _enable_external_calls()
+    panel = ReferencePanel.resolve()
+
+    # Swap the mock transport's map zip for one whose column 1 is already
+    # chr-prefixed (and uses tabs, matching the real format).
+    chr_prefixed_zip = io.BytesIO()
+    with zipfile.ZipFile(chr_prefixed_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+        for c in PANEL_CHROMOSOMES:
+            zf.writestr(
+                f"plink.chr{c}.GRCh38.map",
+                f"chr{c}\t.\t0.0\t1\nchr{c}\t.\t1.0\t1000\n",
+            )
+    real_handler = mock_transport  # keep reference
+
+    # Replace the GENETIC_MAP_URL handler on the existing transport.
+    # The fixture is keyed by the captured requests, so the simplest
+    # path is to monkeypatch httpx.Client one more time. Instead, we
+    # reuse the fixture's transport by directly seeding the archive
+    # cache to bypass the download.
+    panel.ensure_layout()
+    panel.genetic_map_archive.write_bytes(chr_prefixed_zip.getvalue())
+    panel.genetic_map_archive.chmod(0o600)
+    # _build_map_zip_bytes-style: write the JAR + per-chrom VCFs via the
+    # existing transport so we don't trip the no-network check.
+    install_panel(panel)
+    assert real_handler["requests"]  # the transport was exercised
+
+    for c in PANEL_CHROMOSOMES:
+        mfile = panel.map_for_chrom(c)
+        text = mfile.read_text()
+        # Must not have a doubled prefix anywhere.
+        assert "chrchr" not in text
+        # Column 1 starts with chr — single prefix.
+        for line in text.splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            col1 = line.split("\t", 1)[0]
+            assert col1.startswith("chr")
+            assert not col1.startswith("chrchr")
