@@ -21,6 +21,11 @@ Public entry points for sub-phase 5.0:
 
 from __future__ import annotations
 
+# Side-effect import: every module under ``genome.annotate.loaders``
+# registers its ``refresh`` function with the registry at import time,
+# so ``genome annotate refresh --source <db>`` can dispatch without
+# the CLI having to know about each loader individually.
+from genome.annotate import loaders  # noqa: F401 — must run after registry import
 from genome.annotate.cli import annotate_app
 from genome.annotate.downloads import (
     DownloadResult,

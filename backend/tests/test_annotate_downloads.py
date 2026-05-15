@@ -293,3 +293,116 @@ def test_download_to_cache_blocked_when_external_calls_disabled(
     assert intent[1] == blocked[1] == "annotation_source"
     assert intent[2] == blocked[2] == "clinvar_full"
     assert intent[5] == blocked[5] == "annotations_clinvar"
+
+
+# -----------------------------------------------------------------------------
+# 303 redirect handling — the scaffold must transparently follow redirects
+# -----------------------------------------------------------------------------
+
+
+def test_download_to_cache_follows_303_redirect(
+    annotations_root: Path,  # noqa: ARG001 — needed to pin ANNOTATIONS_DOWNLOAD_ROOT
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``download_to_cache`` follows a 303 → 200 redirect end-to-end.
+
+    Public dataset distribution endpoints (PharmGKB, ClinVar, GWAS
+    Catalog, dbSNP, gnomAD) routinely 303-redirect to signed S3 / CDN
+    URLs. The scaffold injects an
+    ``httpx.Client(follow_redirects=True)`` so per-source loaders can
+    write the canonical upstream URL into their constants and rely on
+    the scaffold to land the actual file on disk. This test mocks a
+    303 → 200 chain and asserts the cached file holds the second
+    endpoint's bytes (not the redirect-response body) and that the
+    returned :class:`DownloadResult` carries the SHA-256 of those
+    bytes.
+    """
+    import hashlib  # noqa: PLC0415
+
+    canonical = "https://api.example.invalid/v1/download/file/clinvar.vcf.gz"
+    redirect_target = "https://s3.example.invalid/data/clinvar.vcf.gz"
+    final_payload = b"CLINVAR_VCF_BYTES_via_S3_redirect"
+    expected_digest = hashlib.sha256(final_payload).hexdigest()
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        if str(request.url) == canonical:
+            return httpx.Response(303, headers={"location": redirect_target})
+        if str(request.url) == redirect_target:
+            return httpx.Response(200, content=final_payload)
+        return httpx.Response(404, content=b"unexpected URL")
+
+    transport = httpx.MockTransport(handler)
+    real_init = httpx.Client.__init__
+
+    def patched_init(self: httpx.Client, *args: object, **kwargs: object) -> None:
+        kwargs["transport"] = transport
+        real_init(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(httpx.Client, "__init__", patched_init)
+
+    init_databases()
+    _enable_external_calls()
+
+    result = download_to_cache(
+        "clinvar",
+        canonical,
+        "clinvar.vcf.gz",
+        resource_id="clinvar_full",
+    )
+
+    # The cached file holds the redirected payload (not the 303 body).
+    cached_bytes = result.path.read_bytes()
+    assert cached_bytes == final_payload
+    assert result.sha256 == expected_digest
+    assert result.size_bytes == len(final_payload)
+    # Both endpoints were hit, in order.
+    urls = [str(r.url) for r in captured]
+    assert urls == [canonical, redirect_target]
+
+
+def test_download_to_cache_without_redirect_following_would_write_empty_body(
+    annotations_root: Path,  # noqa: ARG001 — needed to pin ANNOTATIONS_DOWNLOAD_ROOT
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Negative complement: a 303 with no body must still land non-empty bytes.
+
+    This pins the regression that surfaced during the PharmGKB
+    real-data verification: prior to the scaffold fix,
+    ``download_to_cache`` instantiated :class:`ExternalClient` with
+    httpx's default ``follow_redirects=False``, so a 303 with an
+    empty body would write a 0-byte file to disk and downstream ZIP
+    reads failed with ``BadZipFile``. The redirect-following path
+    must put non-zero bytes on disk for the same scenario.
+    """
+    canonical = "https://api.example.invalid/v1/download/file/x.zip"
+    redirect_target = "https://cdn.example.invalid/x.zip"
+    payload = b"PHARMGKB_ZIP_SHAPED_BYTES_OF_REASONABLE_SIZE" * 8
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == canonical:
+            return httpx.Response(303, headers={"location": redirect_target}, content=b"")
+        return httpx.Response(200, content=payload)
+
+    transport = httpx.MockTransport(handler)
+    real_init = httpx.Client.__init__
+
+    def patched_init(self: httpx.Client, *args: object, **kwargs: object) -> None:
+        kwargs["transport"] = transport
+        real_init(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(httpx.Client, "__init__", patched_init)
+
+    init_databases()
+    _enable_external_calls()
+
+    result = download_to_cache(
+        "clinvar",
+        canonical,
+        "x.zip",
+        resource_id="clinvar_full",
+    )
+
+    assert result.size_bytes == len(payload)
+    assert result.path.read_bytes() == payload
