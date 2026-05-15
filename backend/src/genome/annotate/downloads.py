@@ -24,10 +24,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+import httpx
 import structlog
 
 from genome.config import get_settings
-from genome.privacy.external_client import ExternalClient
+from genome.privacy.external_client import _DEFAULT_TIMEOUT_S, ExternalClient
 
 logger = structlog.get_logger(__name__)
 
@@ -110,6 +111,20 @@ def download_to_cache(
     source. ``resource_type`` on the audit row is the literal
     ``"annotation_source"``; ``resource_id`` is the caller-supplied
     label (e.g. ``'clinvar_full'``, ``'pharmgkb_clinical_ann'``).
+
+    Public dataset distribution endpoints (PharmGKB, ClinVar, GWAS
+    Catalog, dbSNP, gnomAD) routinely 303-redirect to signed S3 / CDN
+    URLs. We inject an ``httpx.Client(follow_redirects=True)`` here so
+    the scaffold abstracts that detail away from per-source loaders:
+    every loader gets to write the canonical upstream URL into its
+    constants and rely on the scaffold to land the actual file on
+    disk. :class:`ExternalClient` itself stays redirect-agnostic
+    because it serves both annotation downloads (where redirects are
+    expected) and other workflows — e.g. Phase 4 reference-panel
+    downloads — where the upstream URL is final and silently
+    following a redirect would mask a misconfiguration. The injected
+    client's timeout mirrors :data:`_DEFAULT_TIMEOUT_S` so behaviour
+    matches the un-injected path.
     """
     dest_dir = source_download_dir(source_db)
     dest = dest_dir / filename
@@ -129,7 +144,13 @@ def download_to_cache(
     endpoint_label = f"{_ENDPOINT_LABEL_PREFIX}{source_db}"
     log = logger.bind(source_db=source_db, filename=filename, url=url)
     log.info("annotate.download.start")
-    with ExternalClient(endpoint_label) as client:
+    with (
+        httpx.Client(
+            follow_redirects=True,
+            timeout=_DEFAULT_TIMEOUT_S,
+        ) as http_client,
+        ExternalClient(endpoint_label, client=http_client) as client,
+    ):
         digest = client.download(
             url,
             str(dest),

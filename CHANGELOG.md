@@ -41,15 +41,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   etc.) will mirror. CLI invocation:
   `genome annotate refresh --source pharmgkb`; `genome annotate
   status` reports the loaded version, ingested_at, and record_count.
-  Because PharmGKB's canonical `api.pharmgkb.org` URL serves a 303
-  redirect to its S3 host and the scaffold's
-  `download_to_cache` instantiates an `httpx.Client` with the default
-  `follow_redirects=False`, this loader bypasses the scaffold's
-  downloader and uses `ExternalClient` directly with an injected
-  `httpx.Client(follow_redirects=True)`. Audit row pair, enable-check,
-  SHA-256 hashing, 0600 chmod, and skip-if-exists semantics are all
-  preserved; the divergence is local to the loader and documented in
-  the function's docstring. Real-data verification against
+  PharmGKB's canonical `api.pharmgkb.org` URL serves a 303 redirect
+  to its S3 host; the scaffold's `download_to_cache` now injects an
+  `httpx.Client(follow_redirects=True)` into its `ExternalClient` so
+  the loader writes the canonical URL into its constants and the
+  redirect is followed transparently (see the matching CHANGELOG
+  bullet below). Real-data verification against
   PharmGKB release `2025_07_05` (`URL_VERIFIED_DATE = 2026-05-15`):
   7,013 active rows, 5,186 distinct `pgkb_accession`, evidence-level
   distribution 1A=566 / 1B=25 / 2A=48 / 2B=29 / 3=5,976 / 4=369,
@@ -63,6 +60,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   No schema rebuild required — `pharmgkb_annotations` and
   `annotation_source_versions` were already created by the 5.0
   scaffold. (PR #XX)
+- Scaffold fix: `genome.annotate.downloads.download_to_cache` now
+  injects an `httpx.Client(follow_redirects=True)` into its
+  `ExternalClient`. Public dataset distribution endpoints (PharmGKB,
+  ClinVar, GWAS Catalog, dbSNP, gnomAD) routinely 303-redirect to
+  signed S3 / CDN URLs; without redirect-following the scaffold
+  silently wrote redirect-response bodies (typically 0 bytes) to
+  disk, breaking the downstream ZIP / VCF reads with `BadZipFile` or
+  empty-record iteration. PharmGKB surfaced this; ClinVar / GWAS /
+  dbSNP / gnomAD downloads in later sub-phases will share the fix.
+  `ExternalClient` itself stays redirect-agnostic — other workflows
+  (e.g. Phase 4 reference-panel downloads) use final URLs where
+  silently following a redirect would mask a misconfiguration. Two
+  new tests in `test_annotate_downloads.py` pin the 303 → 200
+  end-to-end behaviour. (PR #XX)
 - **Sub-phase 5.0 — annotation loader scaffold.** New
   `genome.annotate` package containing the
   `annotation_source_versions` upsert helper, the on-disk download

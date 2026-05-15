@@ -150,31 +150,25 @@ path with a separate UPDATE.
 
 **Download mechanism.** PharmGKB's canonical
 `api.pharmgkb.org/v1/download/file/data/clinicalAnnotations.zip` URL
-serves a 303 redirect to its S3-hosted bucket. The 5.0 scaffold's
-`download_to_cache` instantiates `httpx.Client` with the default
-`follow_redirects=False`, which would write a 0-byte file on a 303
-response and fail downstream with `BadZipFile`. This loader bypasses
-`download_to_cache` for the actual download path and uses
-`genome.privacy.external_client.ExternalClient` directly with an
-injected `httpx.Client(follow_redirects=True)`. The audit row pair,
-the `external_calls_enabled` enable-check, SHA-256 hashing,
-`0600` chmod, and skip-if-exists cache semantics are all preserved
-(see `_download_clinical_annotations_zip` in
-`backend/src/genome/annotate/loaders/pharmgkb.py`). Future loaders
-that hit redirect-heavy endpoints should mirror this helper until
-the scaffold's downloader grows a `follow_redirects` parameter.
+serves a 303 redirect to its S3-hosted bucket. The scaffold's
+`download_to_cache` injects an `httpx.Client(follow_redirects=True)`
+into the audited `ExternalClient` so the redirect chain is followed
+transparently and the loader writes the canonical URL into its
+constants. Every later loader (CPIC, ClinVar, GWAS, dbSNP, gnomAD)
+inherits the same handling for free.
 
 **Troubleshooting.**
 
 * **`ExternalCallsDisabledError`** — `user_preferences.external_calls_enabled`
   is `false`. Run `genome config set external_calls_enabled true`.
   The blocked attempt is still recorded in `audit_log` for review.
-* **0-byte `clinicalAnnotations.zip` / `BadZipFile`** — Symptom of
-  the scaffold's downloader silently swallowing the 303 redirect.
-  Should not occur for PharmGKB because the loader uses its own
-  redirect-following client; if you see it, confirm the loader is
-  actually entering `_download_clinical_annotations_zip` (not
-  `download_to_cache`).
+* **0-byte `clinicalAnnotations.zip` / `BadZipFile`** — Pre-fix
+  symptom: the scaffold's downloader used `follow_redirects=False`
+  and wrote the empty redirect body to disk. Fixed in the same PR
+  that shipped this loader. If you encounter this on a future
+  loader, check whether `download_to_cache` still injects a
+  redirect-following client (the regression test
+  `test_download_to_cache_follows_303_redirect` pins the contract).
 * **`PharmGKB clinical_annotations.tsv is missing expected columns`**
   — the TSV header has shifted. Open the cached ZIP at
   `~/.cache/genome/annotations/pharmgkb/clinicalAnnotations.zip` and

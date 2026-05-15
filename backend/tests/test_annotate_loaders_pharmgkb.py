@@ -269,11 +269,15 @@ def _patch_download_to_cache(
     monkeypatch: pytest.MonkeyPatch,
     zip_path: Path,
 ) -> dict[str, int]:
-    """Replace ``_download_clinical_annotations_zip`` with a stub.
+    """Replace ``download_to_cache`` with a stub that returns ``zip_path``.
 
-    The stub avoids any real HTTP. It records the call count so tests
-    can assert "download was / was not invoked" semantics. The returned
-    ``DownloadResult`` uses the actual file's size and SHA-256.
+    Patches the symbol where the loader looks it up (``pharmgkb_loader``)
+    rather than the scaffold module, mirroring pytest's "patch at the
+    call site" convention. The stub avoids any real HTTP and records
+    the call count so tests can assert "download was / was not invoked"
+    semantics. The returned :class:`DownloadResult` uses the actual
+    fixture file's size and SHA-256 so the loader's downstream
+    ``annotation_source_versions`` row carries realistic provenance.
     """
     import hashlib  # noqa: PLC0415
 
@@ -281,7 +285,14 @@ def _patch_download_to_cache(
     digest = hashlib.sha256(zip_path.read_bytes()).hexdigest()
     size = zip_path.stat().st_size
 
-    def _stub(*, force: bool = False) -> annotate_downloads.DownloadResult:  # noqa: ARG001
+    def _stub(
+        source_db: str,  # noqa: ARG001
+        url: str,  # noqa: ARG001
+        filename: str,  # noqa: ARG001
+        *,
+        resource_id: str,  # noqa: ARG001
+        force: bool = False,  # noqa: ARG001
+    ) -> annotate_downloads.DownloadResult:
         counter["calls"] += 1
         return annotate_downloads.DownloadResult(
             path=zip_path,
@@ -289,7 +300,7 @@ def _patch_download_to_cache(
             size_bytes=size,
         )
 
-    monkeypatch.setattr(pharmgkb_loader, "_download_clinical_annotations_zip", _stub)
+    monkeypatch.setattr(pharmgkb_loader, "download_to_cache", _stub)
     return counter
 
 

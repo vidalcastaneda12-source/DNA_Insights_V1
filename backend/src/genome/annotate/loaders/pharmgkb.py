@@ -28,20 +28,17 @@ next loaders inherit the shape verbatim.
 from __future__ import annotations
 
 import csv
-import hashlib
 import io
 import re
-import stat
 import zipfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
-import httpx
 import pyarrow as pa
 import structlog
 
-from genome.annotate.downloads import DownloadResult, source_download_dir
+from genome.annotate.downloads import download_to_cache
 from genome.annotate.registry import RefreshResult, register_loader
 from genome.annotate.source_versions import (
     get_current_version,
@@ -49,7 +46,6 @@ from genome.annotate.source_versions import (
 )
 from genome.annotate.supersession import deactivate_prior_versions
 from genome.db.duckdb_conn import duckdb_connection
-from genome.privacy.external_client import ExternalClient
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -62,9 +58,11 @@ logger = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 # Upstream URLs (verified 2026-05-15).
 #
-# PharmGKB redirects this canonical api.pharmgkb.org URL to its S3-hosted
-# clinicalAnnotations.zip. The 303 redirect is followed transparently by
-# httpx, so the audited download lands the file the same way.
+# PharmGKB's canonical ``api.pharmgkb.org`` URL 303-redirects to its
+# S3-hosted ``clinicalAnnotations.zip``. The scaffold's
+# ``download_to_cache`` injects an ``httpx.Client(follow_redirects=True)``
+# so the redirect is followed transparently and the loader can rely on
+# the canonical URL — no per-loader workaround needed.
 # Last upstream release at verification time: 2025-07-05 (encoded in the
 # ZIP's ``CREATED_YYYY-MM-DD.txt`` marker file — see ``_resolve_version``).
 # ---------------------------------------------------------------------------
@@ -96,13 +94,6 @@ _RSID_RE: Final[re.Pattern[str]] = re.compile(r"^rs\d+$")
 # 2025-07-05 release (919 multi-drug rows used ``;``; 49 single-drug rows
 # carried embedded commas with no ``;``).
 _DRUG_SEPARATOR: Final[str] = ";"
-
-# File permission mask matching the scaffold's ``downloads.py``: 0o600
-# for downloaded artifacts so the on-disk cache stays user-only.
-_OWNER_RW_ONLY: Final[int] = stat.S_IRUSR | stat.S_IWUSR
-_DOWNLOAD_TIMEOUT_S: Final[float] = 60.0
-_HASH_CHUNK_SIZE: Final[int] = 1 << 20  # 1 MiB
-_ENDPOINT_LABEL: Final[str] = "annotations_pharmgkb"
 
 # Mapping from the PharmGKB header to ``_ParsedRow`` fields. Captured at
 # module scope so the mapping is reviewable at a glance and the parser's
@@ -170,73 +161,6 @@ class _ParsedRow:
     evidence_level: str | None
     guideline_summary: str | None
     guideline_url: str | None
-
-
-def _hash_file(path: Path) -> str:
-    """SHA-256 hex of a file, streamed so memory stays bounded."""
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        while True:
-            chunk = f.read(_HASH_CHUNK_SIZE)
-            if not chunk:
-                break
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _download_clinical_annotations_zip(force: bool) -> DownloadResult:  # noqa: FBT001
-    """Audited download of ``clinicalAnnotations.zip`` with redirect support.
-
-    The scaffold's :func:`genome.annotate.downloads.download_to_cache`
-    instantiates :class:`ExternalClient` with the default
-    :class:`httpx.Client`, whose ``follow_redirects`` defaults to
-    ``False``. PharmGKB's canonical
-    ``api.pharmgkb.org/v1/download/file/...`` URL serves a 303 redirect
-    to its S3-hosted bucket, so the scaffold's default download writes a
-    0-byte file and the downstream ZIP read fails with ``BadZipFile``.
-
-    Rather than (a) hard-coding the redirect target — which would couple
-    us to PharmGKB's current CDN — or (b) modifying the locked scaffold,
-    this loader uses :class:`ExternalClient` directly with an injected
-    ``httpx.Client(follow_redirects=True)``. The audit-row pair, the
-    enable-check, the SHA-256, the 0600 chmod, and the skip-if-exists
-    cache semantics are all preserved.
-
-    Future loaders that hit redirect-heavy endpoints should mirror this
-    helper; if the pattern becomes common, the scaffold's downloader can
-    grow a ``follow_redirects`` parameter in a later sub-phase.
-    """
-    dest_dir = source_download_dir(SOURCE_DB)
-    dest = dest_dir / "clinicalAnnotations.zip"
-    if dest.exists() and not force:
-        digest = _hash_file(dest)
-        size = dest.stat().st_size
-        logger.debug(
-            "pharmgkb.download.skip_existing",
-            sha256=digest[:12],
-            size_bytes=size,
-        )
-        return DownloadResult(path=dest, sha256=digest, size_bytes=size)
-
-    log = logger.bind(url=CLINICAL_ANN_ZIP_URL, dest=str(dest))
-    log.info("pharmgkb.download.start")
-    with (
-        httpx.Client(
-            follow_redirects=True,
-            timeout=_DOWNLOAD_TIMEOUT_S,
-        ) as http_client,
-        ExternalClient(_ENDPOINT_LABEL, client=http_client) as audited,
-    ):
-        digest = audited.download(
-            CLINICAL_ANN_ZIP_URL,
-            str(dest),
-            resource_type="annotation_source",
-            resource_id="clinical_annotations",
-        )
-    dest.chmod(_OWNER_RW_ONLY)
-    size = dest.stat().st_size
-    log.info("pharmgkb.download.complete", sha256=digest[:12], size_bytes=size)
-    return DownloadResult(path=dest, sha256=digest, size_bytes=size)
 
 
 def _resolve_version(zip_path: Path) -> str:
@@ -587,8 +511,18 @@ def refresh(force: bool) -> RefreshResult:  # noqa: FBT001 — registry RefreshF
     """
     log = logger.bind(source=SOURCE_DB)
 
-    # 1. Download (skip-if-exists; ``force`` re-downloads).
-    download_result = _download_clinical_annotations_zip(force=force)
+    # 1. Download (skip-if-exists; ``force`` re-downloads). The scaffold's
+    # ``download_to_cache`` handles the 303 redirect from PharmGKB's
+    # canonical URL to its S3-hosted bucket via its injected
+    # ``httpx.Client(follow_redirects=True)`` — the loader does not need
+    # to know about it.
+    download_result = download_to_cache(
+        SOURCE_DB,
+        CLINICAL_ANN_ZIP_URL,
+        "clinicalAnnotations.zip",
+        resource_id="clinical_annotations",
+        force=force,
+    )
     log.info("pharmgkb.download.audited", sha256=download_result.sha256[:12])
 
     # 2. Resolve version label.
