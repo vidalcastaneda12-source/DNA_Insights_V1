@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `platform_coverage_v.in_imputed`, `call_comparison_v.gt_imputed`, and
+  `call_comparison_v.imputed_r2` filter on `'beagle_imputed'` instead of
+  `'topmed_imputed'`. The three filter expressions in
+  `docs/schemas/schema_group_1_genotype_data.md` were left pointing at
+  `'topmed_imputed'` after the Phase 4 pivot from TopMed to local Beagle
+  (see
+  `docs/findings/finding-006-topmed-not-viable-for-personal-genomics.md`),
+  so the affected columns returned NULL/FALSE for every variant in the
+  real corpus despite ~2.37M active `beagle_imputed` calls. The
+  `'topmed_imputed'` enum value is retained on `source_enum` per
+  finding-006's backward-compat decision; only the view filters change.
+  Re-extracted DDL into `ddl/group_1_genotype.sql`. Added a semantic
+  test (`backend/tests/test_views_genotype_imputed.py`) that pins both
+  the positive case (an active `beagle_imputed` call surfaces in
+  `in_imputed` / `gt_imputed` / `imputed_r2`) and the negative case (a
+  `topmed_imputed` call does NOT, so the filter cannot regress to an
+  `IN ('beagle_imputed', 'topmed_imputed')` shape that would propagate
+  dead-enum reads). Schema change: requires the standard
+  `rm -rf data/` + `uv run genome init` rebuild per the CLAUDE.md
+  schema-change convention.
 - `genome imputation prepare` no longer references the abandoned TopMed
   Imputation Server in its `--sample-id` help text or its post-prepare
   "next step" echoes. The command now points the user at
