@@ -8,6 +8,124 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Sub-phase 5.2 — ClinVar clinical-significance annotations loader.**
+  New `genome.annotate.loaders.clinvar` registers a `refresh` function
+  at module-import time that downloads ClinVar's
+  `variant_summary.txt.gz` (the canonical tab-delimited per-variant
+  release, ~9M rows in a 419 MB gzipped TSV) via the audited scaffold,
+  parses it with a streaming `csv.DictReader` over `gzip.open(..., 'rt')`,
+  and chunk-loads it into `clinvar_annotations` via PyArrow Table
+  registration + `INSERT ... SELECT` (the project's locked bulk-load
+  convention). Three orders of magnitude bigger than 5.1's PharmGKB
+  (~7K rows) and CPIC (~3.5K rows), so the parser is a generator and
+  the bulk insert is chunked at 250,000 rows per chunk; all chunks land
+  inside one DuckDB transaction so a mid-stream failure rolls back the
+  deactivation of prior active rows along with every partial chunk
+  insert. Version label is resolved via a HEAD request against the
+  variant_summary URL, parsing the upstream HTTP `Last-Modified` header
+  via `email.utils.parsedate_to_datetime` and rendering as `YYYY_MM_DD`;
+  unparseable / missing header falls back to today's UTC date in the
+  same format. The HEAD is the loader's first audited call -- placed
+  before the download so a fresh refresh against an unchanged release
+  short-circuits without re-fetching the 419 MB body, and a disabled
+  master switch surfaces `ExternalCallsDisabledError` after one intent
+  + blocked audit pair (matching 5.1a/b's audited refusal pattern).
+  ClinVar publishes one row per `(VariationID, Assembly)` pair, so
+  every row lands in the table (no clinical-significance / variant-type
+  filtering -- that's a query concern), but `Assembly == 'GRCh38'` rows
+  populate the GRCh38-specific columns (`pos_grch38`, `ref_allele`,
+  `alt_allele`) while `Assembly == 'GRCh37'` rows leave them NULL --
+  the schema's `pos_grch38` column name is constraining and storing
+  GRCh37 coordinates under it would mislead position-based joins.
+  Per-field coercions: ClinVar's `RS# (dbSNP)` column encodes a
+  missing rsID as the literal `"-1"` (an integer sentinel from the
+  dbSNP era, not the empty string), so the loader coerces both `"-1"`
+  and the standard empty / dash variants to NULL and prefixes
+  non-missing digits with `"rs"` to match the project-wide rsID format
+  (`variants_master`, `pharmgkb_annotations`, the dbSNP loader landing
+  in 5.4); `PhenotypeList` (single pipe `|` separators) populates
+  `conditions VARCHAR[]`; `PhenotypeIDS` (two-level `||` between
+  phenotypes plus `,` within one phenotype's IDs) flattens into
+  `condition_ids VARCHAR[]`; `SubmitterCategories` (a single integer
+  per ClinVar docs) wraps as `[str(int)]` in `submitter_categories
+  VARCHAR[]`; `LastEvaluated` (e.g. `"Dec 17, 2024"`) parses via
+  `datetime.strptime(..., "%b %d, %Y")`; the `Name` column splits on
+  the trailing `(p.…)` block into `hgvs_c` + `hgvs_p`; `star_rating`
+  derives from `review_status` via the locked
+  `_REVIEW_STATUS_TO_STAR` mapping (`practice guideline → 4`,
+  `reviewed by expert panel → 3`, etc.) with unmapped review-status
+  strings yielding NULL `star_rating` (intentional loud-fail for a
+  future ClinVar wording change); `inheritance` is always NULL
+  (variant_summary.txt does not carry inheritance pattern). The
+  refresh is idempotent on `(source_db='clinvar', version)`: a second
+  call without `--force` short-circuits with
+  `was_already_current=True`. `--force` blanket-deactivates every
+  prior active ClinVar row (tagging them with `superseded_by =
+  new_source_version_id`) before re-inserting; `clinvar_annotations`
+  carries both `is_active` and `superseded_by` (the only Phase-5
+  source loader so far that populates `superseded_by`), so the
+  standard supersession helper's `has_superseded_by=True` path is
+  used. The supersede + chunked-insert pair runs inside one DuckDB
+  transaction; a failure rolls every chunk back along with the
+  deactivation, and best-effort deletes the orphan
+  `annotation_source_versions` row that `upsert_source_version` had
+  committed in its inner transaction. End-of-load structlog summary
+  emits the locked drift identifiers (`active_total`,
+  `distinct_variation_id`, `distinct_rsid_non_null`, full
+  `clinical_significance_distribution`, full
+  `review_status_distribution`) plus elapsed wall-clock so a
+  cross-release diff is one log scrape away. CLI invocation:
+  `genome annotate refresh --source clinvar`; `genome annotate
+  status` now reports clinvar alongside cpic and pharmgkb. Real-data
+  verification against ClinVar release `2026_05_10`
+  (`URL_VERIFIED_DATE = 2026-05-15`): 8,978,989 active rows from
+  4,523,355 distinct ClinVar VariationIDs (~2x because each variant
+  carries one row per assembly) and 2,645,685 distinct non-NULL
+  rsIDs; clinical_significance distribution top-5
+  Uncertain significance=4,673,230 / Likely benign=2,182,511 /
+  NULL=490,998 / Benign=425,621 / Pathogenic=404,221; review_status
+  distribution top-5 criteria provided, single submitter=6,522,322 /
+  criteria provided, multiple submitters, no conflicts=1,321,678 /
+  NULL=490,998 / criteria provided, conflicting classifications=326,436
+  / no assertion criteria provided=257,206; reviewed by expert
+  panel=43,740 and practice guideline=116 carrying the 3- and 4-star
+  rows respectively. Source provenance: SHA-256 prefix
+  `61e2b1fd3123bdc4`, byte size 439,003,062, recorded `record_count =
+  8,978,989` on `annotation_source_versions`. First-load wall-clock:
+  280 s (~4.7 min), of which ~25 s was the audited streaming download
+  and ~255 s was 36 chunks of parse + insert. Same-version `--force`
+  re-refresh wall-clock: 1,699 s (~28.3 min), dominated by the 8.98M-
+  row deactivate UPDATE on `is_active` (which is part of
+  `idx_cv_active` and `idx_cv_significance`, so DuckDB's MVCC rewrites
+  it as DELETE+INSERT and the index updates serialize) and the
+  multi-million-row checkpoint at commit; the chunked insert phase
+  itself remained ~5 min. The `--force` cycle preserved the drift
+  identifiers byte-exactly: 8,978,989 active rows / 4,523,355 distinct
+  variation_id / 2,645,685 distinct non-NULL rsid match the first run,
+  and every clinical_significance and review_status bucket count
+  matches. Post-`--force` state: 17,957,978 total rows (8,978,989
+  is_active=TRUE under source_version_id=3, 8,978,989
+  is_active=FALSE also under source_version_id=3 with superseded_by=3),
+  proving the supersession transaction landed atomically at full
+  scale. Note: the prompt's "2 source_version rows" expectation
+  assumes a real upstream release transition (different
+  `Last-Modified` header → different version label → fresh
+  source_version_id), which we cannot simulate against the same
+  archive; the new-version supersession path is covered exactly at
+  fixture scale by `test_refresh_supersedes_prior_rows_on_new_version`
+  in the integration suite. PharmGKB / CPIC regression check after
+  the ClinVar load: 7,013 active `pharmgkb_annotations` rows
+  preserved exactly; 3,591 active `cpic_guidelines` rows preserved
+  exactly. Documentation: new ClinVar section in
+  `docs/runbooks/annotations.md` covering the URL choice (TSV vs XML
+  trade-off), version-label semantics, the assembly-row split, the
+  per-field coercion contract, the chunked-insert + supersession
+  shape, drift identifiers, and the troubleshooting paths
+  (`ExternalCallsDisabledError`, header drift, mid-stream
+  `MemoryError`, disk-space failure, partial-failure recovery). No
+  schema rebuild required -- `clinvar_annotations` and
+  `annotation_source_versions` were already created by the 5.0
+  scaffold. Sub-phase 5.2 closes; 5.3 (GWAS Catalog) follows. (PR #XX)
 - **Sub-phase 5.1b — CPIC clinical guidelines loader.** New
   `genome.annotate.loaders.cpic` registers a `refresh` function at
   module-import time that downloads CPIC's `/guideline`, `/pair`,
