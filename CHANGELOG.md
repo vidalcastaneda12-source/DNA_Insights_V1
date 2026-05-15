@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   supersession helper for evolving sources, the per-source loader
   registry, and the `genome annotate refresh|status` CLI subcommands.
   No source-specific loaders ship in this PR — those land in 5.1+.
-  No DDL changes. (PR #XX)
+  No DDL changes. (PR #33)
 
 ### Fixed
 - `platform_coverage_v.in_imputed`, `call_comparison_v.gt_imputed`, and
