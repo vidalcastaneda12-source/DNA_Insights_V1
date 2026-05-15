@@ -8,6 +8,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Sub-phase 5.1b — CPIC clinical guidelines loader.** New
+  `genome.annotate.loaders.cpic` registers a `refresh` function at
+  module-import time that downloads CPIC's `/guideline`, `/pair`,
+  `/recommendation`, and `/drug` JSON endpoints via the audited
+  scaffold and joins them client-side into (gene × drug × phenotype)
+  rows in `cpic_guidelines`. Multi-gene recommendations split into one
+  row per gene, all sharing the same `cpic_id` (the CPIC
+  recommendation primary key) and differing only in `gene_symbol` and
+  `phenotype`. Recommendations without a parseable lookupkey, without
+  a known drug id, or without a drug name are skipped (with a debug
+  log line per skip carrying the recommendation id for forensic
+  traceability). The `pediatric` flag is set strictly:
+  `True` iff `recommendation.population == 'pediatrics'`, otherwise
+  `None` — CPIC's `population` column overloads age and condition
+  axes, so `None` (not `False`) keeps `pediatric IS TRUE` semantics
+  free of false negatives. `publication_pmid` is the first PMID from
+  the pair's `citations` array; `cpic_level` and `publication_pmid`
+  are per (gene, drug) and therefore differ across multi-gene splits
+  of the same recommendation. Version label is resolved from a single
+  `/change_log?order=date.desc&limit=1&select=date` canary download
+  (separate from the four data endpoints, also audited) and falls
+  back to retrieval date in `YYYY_MM_DD` form if the canary fails.
+  The `annotation_source_versions` row records `source_url =
+  GUIDELINE_URL`, a combined SHA-256 over the four data files' hashes
+  (so the fingerprint changes iff any endpoint's data changes), and
+  the sum of the four data files' byte sizes; per-endpoint detail is
+  in the structlog `cpic.download.audited` events. The refresh is
+  idempotent on `(source_db='cpic', version)`; `--force`
+  blanket-deactivates every prior active CPIC row before re-inserting
+  so re-runs against the same version label don't produce duplicate
+  active rows. The supersede + bulk-insert pair runs inside one
+  DuckDB transaction; a failure rolls both back and best-effort
+  deletes the orphan `annotation_source_versions` row that
+  `upsert_source_version` committed in its inner transaction. CLI
+  invocation: `genome annotate refresh --source cpic`;
+  `genome annotate status` now reports both PharmGKB and CPIC.
+  Real-data verification against CPIC release `2026_05_14`
+  (`URL_VERIFIED_DATE = 2026-05-15`): 3,591 active rows from 2,159
+  distinct CPIC recommendation IDs across 19 distinct genes and 109
+  distinct drugs; cpic_level distribution A=1,638 / B=1,828 / C=125;
+  classification_strength distribution
+  Optional=1,971 / Strong=957 / Moderate=505 / "No Recommendation"=134 /
+  n/a=24; 30 rows with `pediatric = TRUE` and 3,561 with `pediatric IS
+  NULL`. Idempotent re-refresh: 0 new rows, `already_current=True`.
+  `--force` re-refresh: 3,591 prior rows deactivated, 3,591 new rows
+  inserted (same `source_version_id`, version label unchanged).
+  PharmGKB regression check after the CPIC load: 7,013 active
+  `pharmgkb_annotations` rows preserved exactly. Documentation: new
+  CPIC section in `docs/runbooks/annotations.md` with the URL list,
+  version-label semantics, per-row mapping notes, and troubleshooting
+  paths. No schema rebuild required — `cpic_guidelines` was already
+  created by the 5.0 scaffold. Sub-phase 5.1 (PharmGKB + CPIC) is
+  complete with this PR; 5.2 (ClinVar) follows. (PR #XX)
 - **Sub-phase 5.1a — PharmGKB clinical annotations loader.** New
   `genome.annotate.loaders.pharmgkb` registers a `refresh` function
   at module-import time that downloads PharmGKB's Clinical Annotations
