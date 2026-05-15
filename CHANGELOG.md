@@ -8,6 +8,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Sub-phase 5.1a — PharmGKB clinical annotations loader.** New
+  `genome.annotate.loaders.pharmgkb` registers a `refresh` function
+  at module-import time that downloads PharmGKB's Clinical Annotations
+  ZIP (`clinicalAnnotations.zip`) via the audited external client,
+  parses `clinical_annotations.tsv`, and bulk-loads
+  (clinical annotation × drug) rows into `pharmgkb_annotations`
+  via PyArrow Table registration + `INSERT ... SELECT`. Multi-drug
+  rows are split into one row per drug (semicolon-separated; commas
+  inside single drug names like `"Ace Inhibitors, Plain"` are
+  preserved). The `Variant/Haplotypes` column is bucketed by the
+  strict regex `^rs\d+$` — rsIDs land in `rsid`, everything else
+  (star alleles like `CYP2D6*4`, HLA alleles like `HLA-B*57:01`,
+  descriptive haplotypes like
+  `G6PD A- 202A_376G, G6PD B (reference)`) lands in `star_allele`.
+  `chrom` and `pos_grch38` are written as NULL; the dbSNP loader in
+  sub-phase 5.4 will cross-reference rsIDs into positions. Version
+  label is read from the ZIP's `CREATED_YYYY-MM-DD.txt` marker file
+  (reformatted as `YYYY_MM_DD`) and falls back to retrieval date in
+  the same shape if absent. The refresh is idempotent on
+  `(source_db='pharmgkb', version)`: a second call without `--force`
+  short-circuits with `was_already_current=True` and no new rows.
+  `--force` blanket-deactivates every prior active PharmGKB row
+  before re-inserting so re-runs against the same version label do
+  not produce duplicate active rows. The supersede + bulk-insert
+  pair runs inside one DuckDB transaction; a failure in either step
+  rolls both back and best-effort deletes the orphan
+  `annotation_source_versions` row that `upsert_source_version`
+  committed in its own (scaffold-mandated) inner transaction.
+  Establishes the loader template every subsequent Phase 5 source
+  loader (CPIC in 5.1b, ClinVar in 5.2, GWAS in 5.3, dbSNP in 5.4,
+  etc.) will mirror. CLI invocation:
+  `genome annotate refresh --source pharmgkb`; `genome annotate
+  status` reports the loaded version, ingested_at, and record_count.
+  Because PharmGKB's canonical `api.pharmgkb.org` URL serves a 303
+  redirect to its S3 host and the scaffold's
+  `download_to_cache` instantiates an `httpx.Client` with the default
+  `follow_redirects=False`, this loader bypasses the scaffold's
+  downloader and uses `ExternalClient` directly with an injected
+  `httpx.Client(follow_redirects=True)`. Audit row pair, enable-check,
+  SHA-256 hashing, 0600 chmod, and skip-if-exists semantics are all
+  preserved; the divergence is local to the loader and documented in
+  the function's docstring. Real-data verification against
+  PharmGKB release `2025_07_05` (`URL_VERIFIED_DATE = 2026-05-15`):
+  7,013 active rows, 5,186 distinct `pgkb_accession`, evidence-level
+  distribution 1A=566 / 1B=25 / 2A=48 / 2B=29 / 3=5,976 / 4=369,
+  6,358 rows with non-NULL `rsid`, 655 rows with non-NULL
+  `star_allele` (and 7,013 rows with NULL `chrom` — coordinates will
+  populate via the 5.4 dbSNP cross-reference). Idempotent
+  re-refresh: 0 new rows; `--force` re-refresh: 7,013 prior rows
+  deactivated, 7,013 new rows inserted (same `source_version_id`).
+  New `docs/runbooks/annotations.md` documents the workflow, the
+  per-source PharmGKB notes, and the troubleshooting paths.
+  No schema rebuild required — `pharmgkb_annotations` and
+  `annotation_source_versions` were already created by the 5.0
+  scaffold. (PR #XX)
 - **Sub-phase 5.0 — annotation loader scaffold.** New
   `genome.annotate` package containing the
   `annotation_source_versions` upsert helper, the on-disk download
