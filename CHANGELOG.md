@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `genome imputation prepare` no longer references the abandoned TopMed
+  Imputation Server in its `--sample-id` help text or its post-prepare
+  "next step" echoes. The command now points the user at
+  `genome imputation run <id>` and the `docs/runbooks/imputation.md`
+  prepare → run → import flow, matching the Phase 4 pivot to local
+  Beagle 5.5 documented in
+  `docs/findings/finding-006-topmed-not-viable-for-personal-genomics.md`.
+  Adds a stdout-scraping test in `backend/tests/test_cli_phase4.py` so a
+  future regression of this text is caught by the suite.
+
 ## [0.4.0] — 2026-05-14
 
 ### Added
