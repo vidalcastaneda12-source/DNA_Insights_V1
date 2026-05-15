@@ -12,6 +12,7 @@ import structlog
 import typer
 
 from genome import __version__
+from genome.annotate import annotate_app
 from genome.config import get_settings
 from genome.db.duckdb_conn import duckdb_connection
 from genome.db.init_schema import init_databases
@@ -69,6 +70,7 @@ panel_app = typer.Typer(
 )
 app.add_typer(imputation_app, name="imputation")
 app.add_typer(config_app, name="config")
+app.add_typer(annotate_app, name="annotate")
 imputation_app.add_typer(panel_app, name="panel")
 
 
