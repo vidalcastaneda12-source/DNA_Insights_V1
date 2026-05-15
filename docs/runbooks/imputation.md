@@ -245,6 +245,55 @@ The consensus needs to be refreshed across all three sources now that
 After this step, the entire downstream pipeline (Phases 5+) operates on
 the unified imputed set.
 
+## Rebuilding from a preserved archive
+
+PRs that touch `docs/schemas/` or `ddl/` require the schema-change
+rebuild documented in `CLAUDE.md` ("Schema changes require rebuilding
+local databases"): `rm -rf data/`, `uv run genome init`, re-ingest both
+sources, `genome merge`. When that rebuild happens after a Phase 4
+imputed corpus has already been produced, the on-disk Beagle output at
+`archive/imputation/run_<id>/result/chr<N>.vcf.gz` survives (the
+archive lives outside `data/` deliberately), but the
+`imputation_runs` row does not. The fresh `genome imputation prepare`
+that follows the rebuild lands a new row in `status='pending'`.
+
+The correct sequence is **prepare → run → import**, not the
+prepare → import shortcut one might expect when the result VCFs are
+already on disk. `genome imputation import` guards on
+`status='completed'` and aborts with:
+
+    RuntimeError: imputation_id <id> is in status 'pending'; download
+    the result first (status must be 'completed' before import)
+
+`genome imputation run <id>` is the step that moves the row from
+`pending` → `processing` → `completed` (the local Beagle replacement
+for the legacy "download the result" phrasing — see
+`docs/findings/finding-006-topmed-not-viable-for-personal-genomics.md`).
+The runner is resumable: any `result/chr<N>.vcf.gz` that already
+exists and parses cleanly with cyvcf2 is skipped (logged at INFO as
+`imputation.beagle.chrom.skip_existing`), and anything missing is
+re-imputed for real against the on-disk panel.
+
+The wall-clock cost scales with how much of the archive survived:
+
+- **Full archive preserved** — seconds: the runner parse-checks every
+  chromosome and skips them all; no Beagle subprocess runs. Total
+  rebuild cost is dominated by the re-ingest and merge.
+- **Partial archive preserved** — minutes per missing chromosome.
+  Beagle re-imputes only the missing set against the existing panel.
+  A real verification session with only chr22 preserved (residue of an
+  earlier smoke test) re-imputed chr1–chr21 + chrX in ~21 minutes.
+- **No archive preserved** — ~30 minutes for a full-genome re-run on
+  the typical 23andMe v5 + Ancestry v2 corpus (per CLAUDE.md
+  "Real-data observations" #3).
+
+In every case the import that follows is a pure DuckDB load — no
+external work — so it costs whatever the existing import normally
+costs (a few minutes for a few-million-variant Beagle output).
+
+See `docs/findings/finding-008-phase4-rebuild-and-chrx-observations.md`
+for the durable real-data write-up.
+
 ## Expected log output
 
 cyvcf2 emits `[W::vcf_parse] Contig 'chr<N>' is not defined in the header.`
@@ -289,6 +338,51 @@ The 1000 Genomes Phase 3 `bref3` release has limited Y-chromosome
 coverage. If the runner emits a `no panel for chrY` warning and skips Y,
 that is expected and not a bug. The merged set will continue to carry
 the chip-derived Y calls.
+
+### Known issues: chrX hemizygous-haploid Beagle failure
+
+chrX imputation against the 1000 Genomes Phase 3 GRCh38 reference panel
+(EBI's high-coverage phased release) currently fails in Beagle 5.5
+with:
+
+    java.lang.IllegalArgumentException: Reference sample HG00096 has an
+    inconsistent number of alleles. The first genotype is diploid, but
+    the genotype at position chrX:2785078 is haploid
+
+`HG00096` is a male 1000 Genomes reference sample; `chrX:2785078` sits
+just outside PAR1 (PAR1 ends at chrX:2,781,479 on GRCh38). The 1000G
+panel correctly represents non-PAR chrX as haploid for males and
+diploid for females, but Beagle 5.5's reference loader requires uniform
+ploidy per sample across the whole chromosome and rejects the panel at
+the first non-PAR position.
+
+Operational symptoms:
+
+- The chrX Beagle subprocess exits with returncode 1 after writing a
+  truncated `result/chrX.vcf.gz` (no BGZF EOF marker).
+- The downstream `genome imputation import <id>` reads the truncated
+  file via cyvcf2, which emits `[W::bgzf_read_block] EOF marker is
+  absent. The input may be truncated` and iterates zero variants
+  without raising.
+- Autosomes (chr1–chr22) succeed normally. Because chrX failed while
+  the autosomes succeeded, `imputation_runs.status` stays at
+  `processing` per the partial-failure convention from
+  `docs/findings/finding-007-beagle-real-data-cleanup.md`.
+
+This is the mechanism behind the "chrX imputed variants: 0 for males"
+behavior recorded in CLAUDE.md "Real-data observations" #3. The
+hemizygous `ref==alt` filter at `prepare` (see
+`docs/findings/finding-005-deferred-improvements.md` #6) contributes
+to the empty chrX result but is not the proximate cause; Beagle's
+reference loader fails before any user variant is imputed.
+
+There is no fix yet. Two options — pre-processing the panel to "fake
+diploid" male non-PAR X, and a sex-aware PAR1/PAR2/non-PAR split — are
+documented in
+`docs/findings/finding-008-phase4-rebuild-and-chrx-observations.md`
+and deferred. Until one of them lands, expect chrX imputed counts to
+be zero for male users and treat the truncated `result/chrX.vcf.gz`
+as the known-bad signal of this issue.
 
 ### Audit log review
 

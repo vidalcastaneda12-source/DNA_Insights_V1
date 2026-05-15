@@ -38,6 +38,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Adds a stdout-scraping test in `backend/tests/test_cli_phase4.py` so a
   future regression of this text is caught by the suite.
 
+### Documentation
+- Added `docs/findings/finding-008-phase4-rebuild-and-chrx-observations.md`
+  capturing two durable Phase 4 real-data observations surfaced by the
+  PR #31 schema-change rebuild: (1) the rebuild-from-preserved-archive
+  workflow requires `prepare → run → import` rather than the
+  prepare → import shortcut, because the runner is the step that
+  flips `imputation_runs.status` from `pending` to `completed` (the
+  runner is resumable, so on-disk chromosomes are parse-checked and
+  skipped); and (2) chrX Beagle runs fail with
+  `IllegalArgumentException: Reference sample HG00096 has an
+  inconsistent number of alleles` because the 1000G Phase 3 panel
+  represents non-PAR chrX as haploid for males, which Beagle 5.5's
+  reference loader rejects — this is the mechanism behind the
+  previously-documented "chrX imputed variants: 0 for males" symptom in
+  CLAUDE.md "Real-data observations" #3. Two fix options
+  (pre-process the panel to fake-diploid male non-PAR X, or a
+  sex-aware PAR1/PAR2/non-PAR split) are documented and explicitly
+  deferred, as is a `register-existing-result` CLI command that would
+  collapse the full-archive-preserved rebuild case to a single command.
+- Updated `docs/runbooks/imputation.md` with a "Rebuilding from a
+  preserved archive" section walking through the schema-change rebuild
+  scenario and the expected wall-clock cost at each preservation level
+  (full archive: seconds; partial: minutes; none: ~30 minutes), and a
+  "Known issues: chrX hemizygous-haploid Beagle failure" subsection
+  under Troubleshooting that documents the
+  `java.lang.IllegalArgumentException`, the truncated
+  `result/chrX.vcf.gz`, the zero-variant cyvcf2 read on import, and
+  the deferred status of the two known fixes. Pure docs: no code,
+  schema, DDL, CLI, or test changes.
+
 ## [0.4.0] — 2026-05-14
 
 ### Added
