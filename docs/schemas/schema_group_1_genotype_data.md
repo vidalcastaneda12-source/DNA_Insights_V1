@@ -433,7 +433,7 @@ SELECT
   vm.chrom,
   BOOL_OR(gc.source = '23andme'       AND gc.is_active) AS in_23andme,
   BOOL_OR(gc.source = 'ancestry'      AND gc.is_active) AS in_ancestry,
-  BOOL_OR(gc.source = 'topmed_imputed' AND gc.is_active) AS in_imputed
+  BOOL_OR(gc.source = 'beagle_imputed' AND gc.is_active) AS in_imputed
 FROM variants_master vm
 LEFT JOIN genotype_calls gc ON gc.variant_id = vm.variant_id
 GROUP BY vm.variant_id, vm.rsid, vm.chrom;
@@ -449,8 +449,8 @@ SELECT
   vm.alt_allele,
   MAX(CASE WHEN gc.source = '23andme'       THEN gc.allele_1 || '/' || gc.allele_2 END) AS gt_23andme,
   MAX(CASE WHEN gc.source = 'ancestry'      THEN gc.allele_1 || '/' || gc.allele_2 END) AS gt_ancestry,
-  MAX(CASE WHEN gc.source = 'topmed_imputed' THEN gc.allele_1 || '/' || gc.allele_2 END) AS gt_imputed,
-  MAX(CASE WHEN gc.source = 'topmed_imputed' THEN gc.imputation_r2 END)                  AS imputed_r2,
+  MAX(CASE WHEN gc.source = 'beagle_imputed' THEN gc.allele_1 || '/' || gc.allele_2 END) AS gt_imputed,
+  MAX(CASE WHEN gc.source = 'beagle_imputed' THEN gc.imputation_r2 END)                  AS imputed_r2,
   cg.consensus_allele_1 || '/' || cg.consensus_allele_2                                  AS consensus,
   cg.consensus_method
 FROM variants_master vm
