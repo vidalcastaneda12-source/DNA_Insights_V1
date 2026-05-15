@@ -355,7 +355,7 @@ def imputation_prepare(
         str,
         typer.Option(
             "--sample-id",
-            help="Sample name for the VCF sample column. Used by TopMed as a label.",
+            help="Sample name for the VCF sample column.",
         ),
     ] = "sample",
     force_new: Annotated[  # noqa: FBT002 — typer boolean flag, --force-new is opt-in
@@ -386,10 +386,11 @@ def imputation_prepare(
         f"upload_dir={result.archive.upload_dir}",
     )
     typer.echo(
-        "Next step: upload the per-chromosome VCFs to the TopMed Imputation Server.",
+        f"Next step: run `genome imputation run {result.imputation_id}` "
+        f"to pipe these VCFs through local Beagle 5.5.",
     )
     typer.echo(
-        "See docs/runbooks/imputation.md for the exact web-UI form fields.",
+        "See docs/runbooks/imputation.md for the prepare → run → import flow.",
     )
 
 
