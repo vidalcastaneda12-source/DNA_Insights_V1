@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     # Override the default reference panel root (~/.cache/genome/imputation/).
     # Useful for shared-storage setups where the panel lives on an external drive.
     imputation_panel_root: Path | None = Field(default=None)
+    # Override the default annotations download cache root
+    # (~/.cache/genome/annotations/). Sibling of imputation_panel_root.
+    annotations_download_root: Path | None = Field(default=None)
     llm_model: str = Field(default="claude-opus-4-7")
     anthropic_api_key: SecretStr | None = Field(default=None)
     log_level: str = Field(default="INFO")

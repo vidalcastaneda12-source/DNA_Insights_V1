@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Sub-phase 5.0 — annotation loader scaffold.** New
+  `genome.annotate` package containing the
+  `annotation_source_versions` upsert helper, the on-disk download
+  cache layout under `~/.cache/genome/annotations/`, the audited
+  download wrapper over the existing `ExternalClient`, the generic
+  supersession helper for evolving sources, the per-source loader
+  registry, and the `genome annotate refresh|status` CLI subcommands.
+  No source-specific loaders ship in this PR — those land in 5.1+.
+  No DDL changes. (PR #XX)
+
 ### Fixed
 - `platform_coverage_v.in_imputed`, `call_comparison_v.gt_imputed`, and
   `call_comparison_v.imputed_r2` filter on `'beagle_imputed'` instead of
