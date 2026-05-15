@@ -334,9 +334,193 @@ duplicate-active rows.
   manually `DELETE FROM annotation_source_versions WHERE source_db =
   'cpic' AND version = <the affected version>` before retrying.
 
-### ClinVar (sub-phase 5.2 — deferred)
+### ClinVar (sub-phase 5.2)
 
-Placeholder section.
+**What's loaded.** ClinVar's `variant_summary.txt.gz` (the canonical
+tab-delimited per-variant release, ~3M rows in a 400+ MB gzipped TSV)
+parsed and chunk-loaded into `clinvar_annotations`. ClinVar publishes
+one row per `(VariationID, Assembly)` pair, so a variant carrying both
+GRCh37 and GRCh38 positions appears twice. Every row is persisted (no
+clinical-significance / variant-type filter at the loader -- that's a
+query concern), but only `Assembly == 'GRCh38'` rows populate the
+GRCh38-specific columns (`pos_grch38`, `ref_allele`, `alt_allele`).
+GRCh37 rows still land in the table with those columns NULL so the
+distinct-VariationID drift identifier covers every variant ClinVar
+ships.
+
+**Upstream URL.**
+`https://ftp.ncbi.nlm.nih.gov/pub/clinvar/tab_delimited/variant_summary.txt.gz`.
+NCBI's FTP host serves the file directly; the scaffold's
+redirect-following client absorbs any future redirect transparently.
+`URL_VERIFIED_DATE` in `backend/src/genome/annotate/loaders/clinvar.py`
+records when the URL was last confirmed to work; bump it on any URL
+change. The XML alternative
+(`ClinVarVariationRelease_*.xml.gz`) is explicitly out of scope; if a
+future sub-phase needs per-submitter SCV detail, that lives in a
+separate evidence table, not in `clinvar_annotations`.
+
+**Version label.** Resolved via a HEAD request to the variant_summary
+URL. The HTTP `Last-Modified` response header (RFC 822 form, e.g.
+`Sun, 10 May 2026 15:15:44 GMT`) is parsed via
+`email.utils.parsedate_to_datetime` and rendered as `YYYY_MM_DD` to
+match the schema's `annotation_source_versions.version` shape. When
+the header is absent or unparseable, the loader falls back to today's
+UTC date in the same format and logs the fallback loudly at INFO
+(`clinvar.version.last_modified_missing` /
+`clinvar.version.last_modified_unparseable`). The HEAD is the
+loader's first audited call -- placed before the download so a fresh
+refresh against an unchanged release short-circuits before re-fetching
+the 400+ MB body.
+
+**Provenance shape.** One file lands in the cache at
+`~/.cache/genome/annotations/clinvar/variant_summary.txt.gz`. The
+`annotation_source_versions` row records `source_url =
+VARIANT_SUMMARY_URL`, the SHA-256 over the downloaded bytes (computed
+during `download_to_cache`'s streaming write), and the byte size from
+`stat()`. `record_count` is backfilled at the end of streaming with
+the actual inserted row count (the count isn't known up front because
+the parser is a generator).
+
+**Runtime + disk.** ~10 GB free recommended under
+`~/.cache/genome/annotations/clinvar/` -- the compressed file alone is
+~440 MB; the supersession transaction's MVCC working set on a re-run
+holds both the prior ~3M active rows (now flipped to inactive) and
+the new ~3M active rows in the same WAL window. End-to-end on a
+laptop is ~3-5 minutes wall-clock for parse + chunked insert against
+the locked 250K-row chunk size, plus the network time to download the
+gzipped TSV (a few seconds to a few minutes depending on link speed).
+
+**Two-row-per-variant assembly split.** Each variant ID appears in
+two rows (one per assembly) when ClinVar has positions for both
+GRCh37 and GRCh38 -- which is the common case. The schema's
+`pos_grch38` / `ref_allele` / `alt_allele` columns are only populated
+for `Assembly == 'GRCh38'` rows; the GRCh37 row carries the same
+identifiers (variation_id, rsid, conditions, clinical interpretation,
+HGVS expressions) but NULLs out the position-specific columns. The
+schema deliberately does not carry a `pos_grch37` column or an
+`assembly` column, so the load contract preserves every TSV row but
+keeps `pos_grch38` semantically clean.
+
+**rsID coercion.** ClinVar encodes a missing rsID as the literal
+string `"-1"` (an integer sentinel from the dbSNP era), not as the
+empty string. The loader coerces both `"-1"` and the standard empty /
+dash variants to NULL. Non-missing values are bare digit strings; the
+loader prefixes them with `"rs"` to match the project-wide rsID
+format (`variants_master`, `pharmgkb_annotations`, the dbSNP loader
+that lands in 5.4). The distinct non-NULL rsID drift identifier
+(`SELECT COUNT(DISTINCT rsid) ... WHERE is_active AND rsid IS NOT
+NULL`) is the durable test that the `-1 → NULL` coercion stayed
+correct across releases.
+
+**Phenotype list fields.** Two list columns:
+
+* `conditions VARCHAR[]` ← `PhenotypeList`. Single pipe `|` separates
+  phenotype names. Empty / dash maps to NULL.
+* `condition_ids VARCHAR[]` ← `PhenotypeIDS`. Two-level ClinVar
+  encoding: `||` between phenotypes, `,` within one phenotype's IDs.
+  The loader flattens both levels into one list of IDs because the
+  schema's `condition_ids` is a flat array; consumers querying "is
+  OMIM:613647 in condition_ids?" don't care which phenotype the ID
+  belonged to.
+
+**SubmitterCategories encoding.** ClinVar's source value is a single
+integer (1-4 in observed releases) that bitmask-encodes which
+submitter classes contributed (per ClinVar docs: 1 = literature only,
+2 = at least one clinical lab, 3 = at least one expert panel /
+practice guideline, 4 = practice guideline). The destination column
+`submitter_categories VARCHAR[]` has a comment naming label-form
+values like `'expert_panel'` / `'clinical_lab'` / `'lit_only'` but the
+source data is integer-encoded. The loader preserves the integer
+code as a single-element list (`["3"]`) rather than guessing at a
+label mapping; consumers can map to canonical labels via a versioned
+function once the label set is formally agreed.
+
+**HGVS split.** ClinVar's `Name` column carries the full HGVS
+expression for the variant (e.g.
+`NM_014855.3(AP5Z1):c.80_83delinsTGCT… (p.Arg27_Ile28delinsLeuLeuTer)`).
+The loader splits on the trailing `(p.…)` block: everything before
+goes into `hgvs_c`, the `p.…` body itself goes into `hgvs_p`. When
+no protein block is present, `hgvs_p` is NULL and `hgvs_c` is the
+full `Name` value.
+
+**`star_rating`.** Derived from `review_status` via the locked
+mapping in `_REVIEW_STATUS_TO_STAR` (mirrors the official ClinVar
+documentation at https://www.ncbi.nlm.nih.gov/clinvar/docs/review_status/).
+Unmapped review-status strings yield NULL `star_rating` -- intentional
+loud-fail so a future ClinVar wording change shows up in the post-load
+`review_status_distribution` summary alongside a NULL `star_rating`
+column instead of silently mapping to a wrong star count.
+
+**`inheritance` is always NULL.** `variant_summary.txt` does not carry
+inheritance pattern (the column lives in the per-variation XML
+release). Setting it NULL for every row preserves the schema column
+for a future XML-based loader that doesn't need to refactor the table.
+
+**Chunked bulk insert.** Locked at 250,000 rows per chunk. The
+streaming parser is a generator; `_stream_bulk_insert` drains it,
+accumulates a chunk, registers it as a PyArrow Table, runs
+`INSERT INTO clinvar_annotations (...) SELECT ... FROM <temp>`,
+unregisters the table, and repeats. All chunks run inside one DuckDB
+transaction (the same `conn.begin()` ... `conn.commit()` block that
+brackets the `_deactivate_for_refresh` UPDATE). A mid-stream failure
+rolls every chunk back together with the deactivation, preserving the
+supersession-over-update invariant.
+
+**Force-mode semantics.** `--force` bypasses the idempotence
+short-circuit, re-downloads (via the cache's force flag), and
+blanket-deactivates every existing active ClinVar row before
+re-inserting the new corpus. Mirrors PharmGKB and CPIC's force path:
+the standard `deactivate_prior_versions` helper's `source_version_id
+< new` predicate would skip a same-version re-run, so the loader
+issues a separate UPDATE that also tags `superseded_by = new_version`
+(ClinVar carries `superseded_by`; PharmGKB and CPIC do not).
+
+**Drift identifiers (locked).** The end-of-load structlog summary
+emits the durable signals real-data verification will compare across
+releases:
+
+* `active_total` — `COUNT(*) WHERE is_active`
+* `distinct_variation_id` — `COUNT(DISTINCT variation_id) WHERE is_active`
+* `distinct_rsid_non_null` — `COUNT(DISTINCT rsid) WHERE is_active AND rsid IS NOT NULL`
+* `clinical_significance_distribution` — group-by-and-count
+* `review_status_distribution` — group-by-and-count
+
+A drift in any of these on a re-run against the same release is a
+regression signal; verify against the captured numbers in the 5.2
+CHANGELOG entry.
+
+**Troubleshooting.**
+
+* **`ExternalCallsDisabledError`** — `user_preferences.external_calls_enabled`
+  is `false`. Run `genome config set external_calls_enabled true`.
+  The blocked attempt is still recorded in `audit_log` for review;
+  the HEAD request is the loader's first audited call, so a disabled
+  switch surfaces before any download bandwidth is spent.
+* **`ClinVar variant_summary.txt is missing expected columns`** — the
+  TSV header has shifted. Open the cached gz at
+  `~/.cache/genome/annotations/clinvar/variant_summary.txt.gz` and
+  inspect with
+  `zcat .../variant_summary.txt.gz | head -1 | tr '\\t' '\\n' | nl`.
+  Update `_REQUIRED_HEADERS` / `_row_to_parsed` in `clinvar.py` to
+  match and add a CHANGELOG entry.
+* **Mid-stream `MemoryError`** — chunk size is too large for the
+  available RAM. The default 250K rows ≈ 125 MB working set; lower
+  `_CHUNK_SIZE` if you hit OOM on a small machine.
+* **Disk space failure mid-supersession** — the supersession
+  transaction holds both the prior active rowset (now flipped to
+  inactive) and the new active rowset in the same WAL window, so the
+  on-disk DuckDB file roughly doubles in size during a re-run. Free
+  ~5-10 GB before running a refresh against the prior corpus.
+* **Recovery after a partial-failure refresh.** Same shape as
+  PharmGKB / CPIC: if any chunk insert raises, the loader rolls the
+  per-source insert (every chunk + the prior-version deactivation)
+  back atomically and best-effort deletes the orphan
+  `annotation_source_versions` row that `upsert_source_version` had
+  already committed. A subsequent `refresh` starts clean. If the
+  cleanup itself fails (the loader logs
+  `clinvar.cleanup.orphan_version_row_delete_failed`),
+  manually `DELETE FROM annotation_source_versions WHERE source_db =
+  'clinvar' AND version = <the affected version>` before retrying.
 
 ### GWAS Catalog (sub-phase 5.3 — deferred)
 
