@@ -2,7 +2,7 @@
 
 Phases are sequential. Do not start phase N+1 until phase N's verification passes.
 
-**Current phase:** Phase 5 (reference annotation loaders) — not yet started.
+**Current phase:** Phase 5 (reference annotation loaders) — in progress.
 
 ## Phase 1 — Foundation (this is the bootstrap)
 
@@ -54,13 +54,25 @@ completes against real 23andMe + Ancestry corpus.
 
 ## Phase 5 — Reference annotation loaders
 
-**Status:** next.
+**Status:** in progress.
 
 - Per-source downloaders (ClinVar, GWAS Catalog, PharmGKB, CPIC, PGS Catalog metadata, gnomAD filtered, dbSNP filtered, genes, traits, pathways)
 - Each writes to `annotation_source_versions` and the per-source table
 - VEP runs locally on user variants
 - Refresh `variant_annotations_index`
 - CLI: `genome annotate refresh [--source ...]`
+
+Sub-phase status:
+- [x] 5.0 — scaffold (PR #33)
+- [x] 5.1a — PharmGKB loader (PR #34)
+- [x] 5.1b — CPIC loader (PR #35)
+- [x] 5.2 — ClinVar loader (PR #36)
+- [ ] 5.3 — GWAS Catalog loader (next)
+- [ ] 5.4 — PGS Catalog metadata
+- [ ] 5.5 — gnomAD filtered
+- [ ] 5.6 — dbSNP filtered
+- [ ] 5.7 — genes / traits / pathways
+- [ ] 5.8 — VEP local run + variant_annotations_index refresh
 
 **Verification:** all sources loaded; `variant_annotations_index` populated; queries against `variant_full_v` view return joined annotations.
 

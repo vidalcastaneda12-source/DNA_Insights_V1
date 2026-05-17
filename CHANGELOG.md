@@ -125,7 +125,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MemoryError`, disk-space failure, partial-failure recovery). No
   schema rebuild required -- `clinvar_annotations` and
   `annotation_source_versions` were already created by the 5.0
-  scaffold. Sub-phase 5.2 closes; 5.3 (GWAS Catalog) follows. (PR #XX)
+  scaffold. Sub-phase 5.2 closes; 5.3 (GWAS Catalog) follows. (PR #36)
 - **Sub-phase 5.1b — CPIC clinical guidelines loader.** New
   `genome.annotate.loaders.cpic` registers a `refresh` function at
   module-import time that downloads CPIC's `/guideline`, `/pair`,
@@ -178,7 +178,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   version-label semantics, per-row mapping notes, and troubleshooting
   paths. No schema rebuild required — `cpic_guidelines` was already
   created by the 5.0 scaffold. Sub-phase 5.1 (PharmGKB + CPIC) is
-  complete with this PR; 5.2 (ClinVar) follows. (PR #XX)
+  complete with this PR; 5.2 (ClinVar) follows. (PR #35)
 - **Sub-phase 5.1a — PharmGKB clinical annotations loader.** New
   `genome.annotate.loaders.pharmgkb` registers a `refresh` function
   at module-import time that downloads PharmGKB's Clinical Annotations
@@ -230,7 +230,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-source PharmGKB notes, and the troubleshooting paths.
   No schema rebuild required — `pharmgkb_annotations` and
   `annotation_source_versions` were already created by the 5.0
-  scaffold. (PR #XX)
+  scaffold. (PR #34)
 - Scaffold fix: `genome.annotate.downloads.download_to_cache` now
   injects an `httpx.Client(follow_redirects=True)` into its
   `ExternalClient`. Public dataset distribution endpoints (PharmGKB,
@@ -244,7 +244,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (e.g. Phase 4 reference-panel downloads) use final URLs where
   silently following a redirect would mask a misconfiguration. Two
   new tests in `test_annotate_downloads.py` pin the 303 → 200
-  end-to-end behaviour. (PR #XX)
+  end-to-end behaviour. (PR #34)
 - **Sub-phase 5.0 — annotation loader scaffold.** New
   `genome.annotate` package containing the
   `annotation_source_versions` upsert helper, the on-disk download

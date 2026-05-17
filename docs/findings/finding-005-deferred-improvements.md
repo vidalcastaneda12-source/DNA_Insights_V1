@@ -59,6 +59,20 @@ manageable. This document tracks them so they aren't forgotten.
    `variant_aliases` with canonical REF/ALT; a follow-on prepare step
    can rewrite the filtered positions and recover the dropped rows.
 
+7. **ClinVar supersession UPDATE+checkpoint dominates same-version
+   `--force` re-runs (~28 min for ~9M rows).** Sub-phase 5.2 verification
+   surfaced that the locked supersession pattern (CLAUDE.md #7) hits real
+   friction at ClinVar scale: the chunked INSERT runs in ~5 min, but the
+   subsequent UPDATE of the prior active set plus DuckDB's post-commit
+   MVCC checkpoint takes ~23 min and emits no progress until COMMIT
+   returns. See `finding-009-clinvar-supersession-checkpoint-cost.md` for
+   the full breakdown, mechanism, rejected alternatives, and open
+   questions. *Recommended fix point:* the action items in
+   finding-009 #14 (explicit `CHECKPOINT`, progress logging, chunked-
+   UPDATE design decision, `--skip-if-same-version` short-circuit) must
+   be resolved before sub-phase 5.5 (gnomAD filtered) begins, since 5.5
+   will exercise the same path at a larger row count.
+
 ## Implication
 
 Each item is a known limitation with an identified fix point. They are not
