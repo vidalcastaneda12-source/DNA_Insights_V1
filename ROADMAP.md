@@ -67,8 +67,8 @@ Sub-phase status:
 - [x] 5.1a — PharmGKB loader (PR #34)
 - [x] 5.1b — CPIC loader (PR #35)
 - [x] 5.2 — ClinVar loader (PR #36)
-- [ ] 5.3 — GWAS Catalog loader (next)
-- [ ] 5.4 — PGS Catalog metadata
+- [x] 5.3 — GWAS Catalog loader (PR #XX)
+- [ ] 5.4 — PGS Catalog metadata (next)
 - [ ] 5.5 — gnomAD filtered
 - [ ] 5.6 — dbSNP filtered
 - [ ] 5.7 — genes / traits / pathways

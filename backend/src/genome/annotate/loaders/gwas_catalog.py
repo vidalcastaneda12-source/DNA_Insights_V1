@@ -1,0 +1,1276 @@
+"""GWAS Catalog associations loader.
+
+Downloads GWAS Catalog's "all associations" TSV (~600-700K active rows
+at the current EBI release), parses it line-by-line with a streaming
+reader, and chunk-loads into ``gwas_catalog_associations`` via PyArrow
+Table registration + ``INSERT ... SELECT`` (the project's locked
+bulk-load convention).
+
+Sub-phase 5.3 — fourth loader after PharmGKB (5.1a), CPIC (5.1b), and
+ClinVar (5.2). Mirrors the locked 5.1/5.2 template in shape:
+
+* Module-level URL constants with a sibling ``URL_VERIFIED_DATE`` so a
+  future reader can tell at a glance how stale the link is.
+* A ``_resolve_version_via_head`` step that reads the upstream's
+  ``Content-Disposition`` (canonical for GWAS Catalog: every release
+  embeds the Ensembl version and release date in the filename, e.g.
+  ``gwas_catalog_v1.0-associations_e0_r2026-05-12.tsv``) and falls
+  back to the HTTP ``Last-Modified`` header so the version label is
+  keyed to the upstream release.
+* A ``refresh(force)`` function that resolves version, downloads
+  (skip-if-exists), short-circuits when ``annotation_source_versions``
+  already names the resolved version, and otherwise upserts +
+  deactivates + chunk-bulk-inserts inside one DuckDB transaction.
+* ``register_loader(SOURCE_DB, refresh)`` at module-import time so the
+  CLI registry is populated by importing this module.
+
+What sets GWAS Catalog apart from the prior three loaders:
+
+* **Scale between CPIC and ClinVar.** CPIC ships ~3.5K rows, PharmGKB
+  ~7K, ClinVar ~9M; GWAS Catalog is ~600-700K active associations at
+  the current EBI release (one to two ClinVar chunks worth). The
+  streaming parser + 250K-row chunked insert pattern still applies,
+  even though the smaller corpus would fit in memory comfortably --
+  consistency with the ClinVar template costs little here and keeps
+  the chunked-insert code path exercised across releases.
+* **Multi-SNP expansion at parse time.** A row whose ``SNPS`` column
+  carries multiple ``;``-separated rsIDs (haplotype-style entries like
+  ``rs123; rs456``) splits into one DB row per rsID, each sharing the
+  same study accession, PMID, trait, statistics, and sample-size
+  context. The schema's ``rsid VARCHAR NOT NULL`` reflects that the
+  loader's atomic unit is (study, SNP), not (study, association entry).
+* **Coordinate-less rows are dropped at parse time.** A row whose
+  ``CHR_ID`` or ``CHR_POS`` is empty (or one of the GWAS Catalog
+  "missing" tokens ``NA`` / ``NR`` / ``-``) cannot satisfy the
+  schema's position-based join contract, so the row is dropped and
+  counted in the parser stats. Real GWAS Catalog releases ship a few
+  hundred such rows -- typically associations the curators have not
+  yet positionally mapped.
+* **Single-value mapped_trait_uri.** GWAS Catalog's ``MAPPED_TRAIT_URI``
+  cell can carry multiple comma-separated EFO URIs when an
+  association has been mapped to several EFO terms. The schema's
+  ``mapped_trait_uri VARCHAR`` is single-valued, so the loader keeps
+  the first URI (the canonical / primary mapping) and counts the
+  truncations for the end-of-load summary. ``trait_id`` is derived
+  from the same first URI.
+
+Schema asymmetry: ``gwas_catalog_associations`` carries ``is_active``
+but **not** ``superseded_by`` (matches the PharmGKB / CPIC schema
+shape; ClinVar is the outlier). The supersession helper's
+``has_superseded_by=False`` path applies here, and the
+``--force`` blanket-deactivate does the same flip without tagging
+``superseded_by``. The schema lives in
+``docs/schemas/schema_group_2_reference_annotations.md`` and is locked
+for this sub-phase.
+
+The loader does **not** touch ``variant_annotations_index`` -- that
+refresh is a separate downstream concern in sub-phase 5.8.
+"""
+
+from __future__ import annotations
+
+import csv
+import email.utils
+import re
+import time
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Final
+
+import httpx
+import pyarrow as pa
+import structlog
+
+from genome.annotate.downloads import download_to_cache
+from genome.annotate.registry import RefreshResult, register_loader
+from genome.annotate.source_versions import (
+    get_current_version,
+    upsert_source_version,
+)
+from genome.annotate.supersession import deactivate_prior_versions
+from genome.db.duckdb_conn import duckdb_connection
+from genome.ingest.models import normalize_chrom
+from genome.privacy.external_client import (
+    _DEFAULT_TIMEOUT_S,
+    ExternalCallError,
+    ExternalCallsDisabledError,
+    ExternalClient,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Iterator
+    from typing import TextIO
+
+    from duckdb import DuckDBPyConnection
+
+logger = structlog.get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# Upstream URL (verified 2026-05-17).
+#
+# The EBI GWAS Catalog publishes a single "all associations" TSV on a
+# roughly weekly cadence. The canonical download endpoint redirects
+# (303) to a versioned filename of the form
+# ``gwas_catalog_v1.0-associations_e<NN>_r<YYYY-MM-DD>.tsv`` -- the
+# Ensembl release number (``e<NN>``) and the release date encoded
+# directly in the filename. ``download_to_cache`` injects an
+# ``httpx.Client(follow_redirects=True)`` so the redirect lands
+# transparently on disk.
+# ---------------------------------------------------------------------------
+
+URL_VERIFIED_DATE: Final[str] = "2026-05-17"
+GWAS_ALL_ASSOCIATIONS_URL: Final[str] = (
+    "https://www.ebi.ac.uk/gwas/api/search/downloads/full"
+)
+
+SOURCE_DB: Final[str] = "gwas_catalog"
+_TARGET_TABLE: Final[str] = "gwas_catalog_associations"
+_CACHE_FILENAME: Final[str] = "gwas_catalog_associations.tsv"
+_HEAD_RESOURCE_ID: Final[str] = "gwas_catalog_release_metadata"
+_DOWNLOAD_RESOURCE_ID: Final[str] = "gwas_catalog_all_associations"
+
+# Chunk size for the streaming bulk insert. Matches the ClinVar loader
+# (250K rows per chunk → ~125 MB working set). GWAS Catalog ships
+# ~600-700K rows so a full release fits into 2-3 chunks; keeping the
+# same constant means the chunked-insert code path is exercised
+# identically across loaders and a future calibration touches one
+# value in one place.
+_CHUNK_SIZE: Final[int] = 250_000
+
+# Tokens GWAS Catalog uses to signal a missing cell. The TSV is
+# inconsistent about which sentinel a given column uses -- some
+# columns emit empty, others ``NA``, others ``NR`` ("not reported"),
+# others the standard dash. We treat all four as missing.
+_MISSING_VALUE_TOKENS: Final[frozenset[str]] = frozenset(
+    {"", "NA", "NR", "-"},
+)
+
+# Tokens that map to an unknown effect allele in the
+# ``STRONGEST SNP-RISK ALLELE`` column (typical: ``rs1234-?``).
+_UNKNOWN_ALLELE_TOKENS: Final[frozenset[str]] = frozenset({"?", "NR"})
+
+# Version label embedded in the released filename. Captures the
+# Ensembl release number (1+ digits) and the release date
+# (``YYYY-MM-DD``). Anchored as a substring match rather than full-
+# string because the filename also carries the ``gwas_catalog_v1.0-
+# associations_`` prefix and the ``.tsv`` extension.
+_VERSION_RE: Final[re.Pattern[str]] = re.compile(
+    r"e(?P<ensembl>\d+)_r(?P<date>\d{4}-\d{2}-\d{2})",
+)
+
+# Detection rule for individual SNPS column entries. GWAS Catalog
+# typically encodes one rsID per token; the loader accepts the bare
+# digit form (``12345``) and the prefixed form (``rs12345``) for
+# robustness across older releases and emits the prefixed form
+# downstream.
+_RSID_RE: Final[re.Pattern[str]] = re.compile(r"^rs\d+$")
+_BARE_RSID_RE: Final[re.Pattern[str]] = re.compile(r"^\d+$")
+
+# 95% CI column shape: ``[lower-upper]`` optionally followed by free
+# text (e.g. ``[1.23-1.56] unit decrease``). Captures the two
+# floating-point bounds via a non-greedy match; anything that doesn't
+# fit returns ``(None, None)``.
+_CI_RE: Final[re.Pattern[str]] = re.compile(
+    r"\[\s*(?P<lower>-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)\s*-\s*"
+    r"(?P<upper>-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)\s*\]",
+)
+
+# Trailing ``-<allele>`` block on the ``STRONGEST SNP-RISK ALLELE``
+# column (e.g. ``rs1234-A``). Captures the allele body; ``?`` and
+# other unknown sentinels are coerced to NULL downstream.
+_STRONGEST_SNP_RE: Final[re.Pattern[str]] = re.compile(
+    r"-(?P<allele>[A-Za-z0-9?]+)\s*$",
+)
+
+# Leading integer extractor for the ``INITIAL SAMPLE SIZE`` and
+# ``REPLICATION SAMPLE SIZE`` columns. GWAS Catalog ships these as
+# free-form text (``"4,512 European ancestry individuals"``); we
+# pull the first comma-stripped integer and use it as the rough
+# numeric size. NULL when no leading integer is present.
+_LEADING_INTEGER_RE: Final[re.Pattern[str]] = re.compile(r"^[^\d]*([\d,]+)")
+
+# EFO / MONDO / HP trait-ID extractor. Pulls the terminal
+# ``<PREFIX>_<digits>`` token out of an EFO URI (e.g.
+# ``http://www.ebi.ac.uk/efo/EFO_0001065`` → ``EFO_0001065``).
+_TRAIT_ID_RE: Final[re.Pattern[str]] = re.compile(r"([A-Za-z]+_\d+)\s*$")
+
+# Mapping from the GWAS Catalog TSV header to the columns the loader
+# reads. Captured at module scope so the lookup stays declarative and
+# a header drift is one place to fix.
+_REQUIRED_HEADERS: Final[tuple[str, ...]] = (
+    "PUBMEDID",
+    "STUDY ACCESSION",
+    "SNPS",
+    "CHR_ID",
+    "CHR_POS",
+    "STRONGEST SNP-RISK ALLELE",
+    "RISK ALLELE FREQUENCY",
+    "P-VALUE",
+    "OR or BETA",
+    "95% CI (TEXT)",
+    "DISEASE/TRAIT",
+    "MAPPED_TRAIT",
+    "MAPPED_TRAIT_URI",
+    "INITIAL SAMPLE SIZE",
+    "REPLICATION SAMPLE SIZE",
+)
+
+# Arrow schema used by ``_insert_chunk``. Column order matches the
+# INSERT column list constructed below; keeping the schema at module
+# scope means the structure is reviewable next to the SQL it feeds.
+_ARROW_SCHEMA: Final[pa.Schema] = pa.schema(
+    [
+        pa.field("association_id", pa.int64(), nullable=False),
+        pa.field("study_accession", pa.string()),
+        pa.field("pmid", pa.string()),
+        pa.field("rsid", pa.string(), nullable=False),
+        pa.field("chrom", pa.string()),
+        pa.field("pos_grch38", pa.int64()),
+        pa.field("trait_id", pa.string()),
+        pa.field("trait_name", pa.string()),
+        pa.field("mapped_trait_uri", pa.string()),
+        pa.field("effect_size", pa.float64()),
+        pa.field("effect_size_unit", pa.string()),
+        pa.field("effect_allele", pa.string()),
+        pa.field("other_allele", pa.string()),
+        pa.field("effect_allele_freq", pa.float64()),
+        pa.field("ci_95_lower", pa.float64()),
+        pa.field("ci_95_upper", pa.float64()),
+        pa.field("p_value", pa.float64()),
+        pa.field("sample_size_initial", pa.int32()),
+        pa.field("sample_size_replication", pa.int32()),
+        pa.field("ancestry", pa.string()),
+        pa.field("is_replicated", pa.bool_()),
+        pa.field("source_version_id", pa.int64(), nullable=False),
+        pa.field("retrieval_date", pa.timestamp("us"), nullable=False),
+        pa.field("is_active", pa.bool_(), nullable=False),
+    ],
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _ParsedRow:
+    """One row destined for ``gwas_catalog_associations``.
+
+    Mirrors the destination schema's variable columns.
+    ``association_id``, ``source_version_id``, ``retrieval_date``,
+    and ``is_active`` are assigned at bulk-insert time after parsing
+    completes.
+    """
+
+    study_accession: str | None
+    pmid: str | None
+    rsid: str
+    chrom: str | None
+    pos_grch38: int | None
+    trait_id: str | None
+    trait_name: str | None
+    mapped_trait_uri: str | None
+    effect_size: float | None
+    effect_size_unit: str | None
+    effect_allele: str | None
+    other_allele: str | None
+    effect_allele_freq: float | None
+    ci_95_lower: float | None
+    ci_95_upper: float | None
+    p_value: float | None
+    sample_size_initial: int | None
+    sample_size_replication: int | None
+    ancestry: str | None
+    is_replicated: bool | None
+
+
+@dataclass(slots=True)
+class _ParseStats:
+    """Mutable parser-level counters surfaced at end of load.
+
+    Threaded through :func:`_parse_gwas_catalog` so the caller can
+    inspect the drop / split counts after streaming completes. Keeps
+    the streaming generator surface side-effect-free w.r.t. the
+    structlog logger -- the loader logs the stats once at end of load
+    rather than per row.
+    """
+
+    rows_read: int = 0
+    rows_emitted: int = 0
+    dropped_empty_pos: int = 0
+    dropped_no_valid_snp: int = 0
+    multi_snp_expansions: int = 0
+    truncated_mapped_trait_uri: int = 0
+    extra_rows: dict[str, int] = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Field-level coercions.
+# ---------------------------------------------------------------------------
+
+
+def _empty_to_none(value: str) -> str | None:
+    """Return ``None`` for empty / standard-missing / whitespace-only values."""
+    trimmed = value.strip()
+    if trimmed in _MISSING_VALUE_TOKENS:
+        return None
+    return trimmed
+
+
+def _parse_int(value: str) -> int | None:
+    """Coerce a TSV cell to an integer; empty / missing / non-numeric → None."""
+    trimmed = value.strip()
+    if trimmed in _MISSING_VALUE_TOKENS:
+        return None
+    try:
+        return int(trimmed)
+    except ValueError:
+        return None
+
+
+def _parse_float(value: str) -> float | None:
+    """Coerce a TSV cell to a float; empty / missing / non-numeric → None.
+
+    Accepts the scientific notation forms GWAS Catalog uses for risk
+    allele frequency and odds-ratio columns (``"3.4e-2"``,
+    ``"1.23E+02"``) via :func:`float`'s native parser.
+    """
+    trimmed = value.strip()
+    if trimmed in _MISSING_VALUE_TOKENS:
+        return None
+    try:
+        return float(trimmed)
+    except ValueError:
+        return None
+
+
+def _parse_p_value(value: str) -> float | None:
+    """Parse the ``P-VALUE`` column's scientific-notation float.
+
+    GWAS Catalog ships p-values as e.g. ``"2.0E-9"`` or
+    ``"4.5e-12"``. :func:`float` handles both forms natively; the
+    helper exists so the call site is self-documenting and the
+    fixture / real-data verification have one place to assert
+    against.
+    """
+    return _parse_float(value)
+
+
+def _parse_ci(value: str) -> tuple[float | None, float | None]:
+    """Parse a ``[lower-upper]`` 95% CI string into bounds.
+
+    GWAS Catalog's ``95% CI (TEXT)`` column ships values like
+    ``"[1.23-1.56]"`` (numeric) or ``"[1.23-1.56] unit decrease"``
+    (numeric plus free-text annotation) or pure free text
+    (``"[NR] unit decrease"``). The regex captures the two
+    floating-point bounds; non-matching input returns
+    ``(None, None)``.
+    """
+    trimmed = value.strip()
+    if trimmed in _MISSING_VALUE_TOKENS:
+        return None, None
+    match = _CI_RE.search(trimmed)
+    if match is None:
+        return None, None
+    try:
+        return float(match.group("lower")), float(match.group("upper"))
+    except ValueError:
+        return None, None
+
+
+def _parse_sample_size(value: str) -> int | None:
+    """Extract the leading integer from a sample-size text cell.
+
+    GWAS Catalog ships ``INITIAL SAMPLE SIZE`` and
+    ``REPLICATION SAMPLE SIZE`` as free-form text (e.g.
+    ``"4,512 European ancestry individuals"``); the leading
+    comma-grouped integer is the rough numeric size used by the
+    schema's ``INTEGER`` columns. NULL when no leading integer is
+    present.
+    """
+    trimmed = value.strip()
+    if trimmed in _MISSING_VALUE_TOKENS:
+        return None
+    match = _LEADING_INTEGER_RE.match(trimmed)
+    if match is None:
+        return None
+    digits = match.group(1).replace(",", "")
+    try:
+        return int(digits)
+    except ValueError:
+        return None
+
+
+def _derive_is_replicated(value: str) -> bool | None:
+    """Coerce ``REPLICATION SAMPLE SIZE`` text to ``is_replicated``.
+
+    Rule: any cell whose leading integer is a positive number maps
+    to ``True``; missing / zero / unparseable maps to ``None``
+    (not ``False``) -- the column overloads "no replication
+    cohort" with "replication cohort exists but size unknown",
+    so NULL keeps ``is_replicated IS TRUE`` semantics clean
+    downstream.
+    """
+    n = _parse_sample_size(value)
+    if n is None or n <= 0:
+        return None
+    return True
+
+
+def _split_snps(value: str) -> list[str]:
+    """Split the ``SNPS`` column into individual rsIDs.
+
+    GWAS Catalog uses ``;`` to separate multiple SNPs in a haplotype-
+    style multi-SNP association. Each token is stripped, normalized
+    to the ``rs<digits>`` form, and dropped if it doesn't match the
+    expected shape. Returns the emitted rsIDs in source order; an
+    empty list signals "no valid SNP in this row".
+
+    Splits on ``;`` only; commas and ``x`` (the haplotype-
+    intersection marker) are deliberately ignored -- those forms
+    represent a single combined association rather than independent
+    rsID-per-row entries, and the schema's ``rsid VARCHAR NOT NULL``
+    contract is per-row so collapsing them to one row would lose
+    information. A future sub-phase that needs haplotype-aware
+    matching can re-parse the original SNPS string from the source
+    snapshot.
+    """
+    trimmed = value.strip()
+    if trimmed in _MISSING_VALUE_TOKENS:
+        return []
+    out: list[str] = []
+    for token in trimmed.split(";"):
+        cleaned = token.strip()
+        if not cleaned:
+            continue
+        if _RSID_RE.match(cleaned):
+            out.append(cleaned)
+            continue
+        if _BARE_RSID_RE.match(cleaned):
+            out.append(f"rs{cleaned}")
+            continue
+        # Reject anything that isn't recognizably an rsID -- the
+        # schema's ``rsid VARCHAR NOT NULL`` won't accept star alleles
+        # or haplotype text.
+    return out
+
+
+def _parse_effect_allele(strongest_snp_text: str) -> str | None:
+    """Pull the effect allele off a ``rsID-allele`` string.
+
+    GWAS Catalog encodes the strongest SNP / risk allele as
+    ``rs1234-A`` (rsID, hyphen, allele letter). The loader extracts
+    the trailing allele body; ``?`` (allele unknown) and the standard
+    missing tokens coerce to NULL.
+    """
+    trimmed = strongest_snp_text.strip()
+    if trimmed in _MISSING_VALUE_TOKENS:
+        return None
+    match = _STRONGEST_SNP_RE.search(trimmed)
+    if match is None:
+        return None
+    allele = match.group("allele")
+    if allele in _UNKNOWN_ALLELE_TOKENS:
+        return None
+    return allele
+
+
+def _parse_first_uri(value: str) -> tuple[str | None, bool]:
+    """Return ``(first_uri, was_truncated)`` from a comma-list cell.
+
+    GWAS Catalog ships ``MAPPED_TRAIT_URI`` as a single URI in the
+    common case but as a comma-separated list when an association is
+    mapped to multiple EFO terms (e.g.
+    ``"http://www.ebi.ac.uk/efo/EFO_0001065,http://www.ebi.ac.uk/efo/EFO_0009909"``).
+    The schema's ``mapped_trait_uri VARCHAR`` is single-valued, so the
+    loader keeps the first URI (the curators' primary mapping) and
+    reports the truncation count via the returned flag so the loader
+    can sum across the stream and surface the total in the end-of-load
+    summary.
+    """
+    trimmed = value.strip()
+    if trimmed in _MISSING_VALUE_TOKENS:
+        return None, False
+    parts = [p.strip() for p in trimmed.split(",") if p.strip()]
+    if not parts:
+        return None, False
+    return parts[0], len(parts) > 1
+
+
+def _extract_trait_id(mapped_trait_uri: str | None) -> str | None:
+    """Pull the EFO / MONDO / HP trait ID out of an EFO URI.
+
+    Input shapes:
+
+    * ``"http://www.ebi.ac.uk/efo/EFO_0001065"`` → ``"EFO_0001065"``
+    * ``"http://purl.obolibrary.org/obo/MONDO_0007254"``
+      → ``"MONDO_0007254"``
+    * ``""`` / ``None`` → ``None``
+    """
+    if mapped_trait_uri is None:
+        return None
+    match = _TRAIT_ID_RE.search(mapped_trait_uri)
+    if match is None:
+        return None
+    return match.group(1)
+
+
+# ---------------------------------------------------------------------------
+# Streaming parser.
+# ---------------------------------------------------------------------------
+
+
+def _row_to_parsed_rows(
+    raw: dict[str, str],
+    stats: _ParseStats,
+) -> Iterator[_ParsedRow]:
+    """Yield one ``_ParsedRow`` per rsID in a single source row.
+
+    Edge cases handled here (and counted in ``stats``):
+
+    * Empty ``CHR_ID`` or ``CHR_POS`` → drop the entire row (counted
+      as ``dropped_empty_pos``). The schema's position-based join
+      contract has no use for a coordinate-less association, and
+      every other column flows from the same source row so dropping
+      one rsID emit isn't preferable to dropping all of them.
+    * ``SNPS`` cell with no parseable rsID → drop the entire row
+      (``dropped_no_valid_snp``). The schema's ``rsid NOT NULL``
+      constraint would reject the emit anyway.
+    * ``SNPS`` with two or more ``;``-separated rsIDs → emit one
+      row per rsID, all sharing the source row's other columns
+      (``multi_snp_expansions`` is incremented once per source row,
+      so the counter reads as "how many source rows produced
+      multiple emits").
+    * ``MAPPED_TRAIT_URI`` with multiple comma-separated URIs → keep
+      the first URI; increment ``truncated_mapped_trait_uri``.
+    """
+    chr_id = _empty_to_none(raw.get("CHR_ID", ""))
+    chr_pos_int = _parse_int(raw.get("CHR_POS", ""))
+    if chr_id is None or chr_pos_int is None:
+        stats.dropped_empty_pos += 1
+        return
+
+    rsids = _split_snps(raw.get("SNPS", ""))
+    if not rsids:
+        stats.dropped_no_valid_snp += 1
+        return
+
+    if len(rsids) > 1:
+        stats.multi_snp_expansions += 1
+
+    first_uri, truncated = _parse_first_uri(raw.get("MAPPED_TRAIT_URI", ""))
+    if truncated:
+        stats.truncated_mapped_trait_uri += 1
+
+    trait_id = _extract_trait_id(first_uri)
+    trait_name = _empty_to_none(raw.get("MAPPED_TRAIT", "")) or _empty_to_none(
+        raw.get("DISEASE/TRAIT", ""),
+    )
+    effect_allele = _parse_effect_allele(raw.get("STRONGEST SNP-RISK ALLELE", ""))
+    effect_allele_freq = _parse_float(raw.get("RISK ALLELE FREQUENCY", ""))
+    p_value = _parse_p_value(raw.get("P-VALUE", ""))
+    effect_size = _parse_float(raw.get("OR or BETA", ""))
+    ci_lower, ci_upper = _parse_ci(raw.get("95% CI (TEXT)", ""))
+    sample_size_initial = _parse_sample_size(raw.get("INITIAL SAMPLE SIZE", ""))
+    sample_size_replication = _parse_sample_size(
+        raw.get("REPLICATION SAMPLE SIZE", ""),
+    )
+    is_replicated = _derive_is_replicated(raw.get("REPLICATION SAMPLE SIZE", ""))
+    pmid = _empty_to_none(raw.get("PUBMEDID", ""))
+    study_accession = _empty_to_none(raw.get("STUDY ACCESSION", ""))
+    chrom = normalize_chrom(chr_id)
+
+    # ``effect_size_unit`` and ``ancestry`` are intentionally NULL
+    # for first-version 5.3. The "OR or BETA" column does not
+    # disambiguate which it is at the row level (the unit hint
+    # sometimes lives in the "95% CI (TEXT)" free text but parsing
+    # that is brittle), and ancestry data lives in a separate GWAS
+    # Catalog ancestry TSV that this loader does not consume. Both
+    # are surfaceable in a follow-up sub-phase without a schema
+    # change.
+    effect_size_unit: str | None = None
+    ancestry: str | None = None
+
+    for rsid in rsids:
+        yield _ParsedRow(
+            study_accession=study_accession,
+            pmid=pmid,
+            rsid=rsid,
+            chrom=chrom,
+            pos_grch38=chr_pos_int,
+            trait_id=trait_id,
+            trait_name=trait_name,
+            mapped_trait_uri=first_uri,
+            effect_size=effect_size,
+            effect_size_unit=effect_size_unit,
+            effect_allele=effect_allele,
+            other_allele=None,
+            effect_allele_freq=effect_allele_freq,
+            ci_95_lower=ci_lower,
+            ci_95_upper=ci_upper,
+            p_value=p_value,
+            sample_size_initial=sample_size_initial,
+            sample_size_replication=sample_size_replication,
+            ancestry=ancestry,
+            is_replicated=is_replicated,
+        )
+
+
+def _parse_gwas_catalog(
+    text_io: TextIO,
+    stats: _ParseStats,
+) -> Iterator[_ParsedRow]:
+    """Stream rows from the GWAS Catalog "all associations" TSV.
+
+    Yields one ``_ParsedRow`` per emitted (study, rsID) tuple --
+    multi-SNP source rows fan out into multiple emits per the
+    contract documented on :func:`_row_to_parsed_rows`. The streaming
+    pattern matches the ClinVar loader: no row-level filtering beyond
+    the schema-driven drops (empty CHR_POS, invalid SNPS) so the
+    full active corpus lands and downstream filters (p-value cutoff,
+    trait selection) become query concerns.
+
+    Raises :class:`ValueError` if any column in
+    :data:`_REQUIRED_HEADERS` is missing -- the upstream contract has
+    shifted and the loader can't produce a correct mapping; loud-fail
+    is preferable to a silent column drop.
+    """
+    reader = csv.DictReader(text_io, delimiter="\t")
+    if reader.fieldnames is None:
+        msg = "GWAS Catalog associations TSV has no header row"
+        raise ValueError(msg)
+    missing = [h for h in _REQUIRED_HEADERS if h not in reader.fieldnames]
+    if missing:
+        msg = (
+            f"GWAS Catalog associations TSV is missing expected columns "
+            f"{missing!r}; got {list(reader.fieldnames)!r}"
+        )
+        raise ValueError(msg)
+    for raw in reader:
+        stats.rows_read += 1
+        for parsed in _row_to_parsed_rows(raw, stats):
+            stats.rows_emitted += 1
+            yield parsed
+
+
+# ---------------------------------------------------------------------------
+# Version resolution.
+# ---------------------------------------------------------------------------
+
+
+def _parse_version_from_filename(filename: str) -> str | None:
+    """Extract the ``e<NN>_r<YYYY-MM-DD>`` substring from a filename.
+
+    GWAS Catalog ships every release filename with the Ensembl
+    release number and the release date embedded directly (e.g.
+    ``gwas_catalog_v1.0-associations_e0_r2026-05-12.tsv``). Returns
+    the substring on a match, ``None`` otherwise.
+    """
+    match = _VERSION_RE.search(filename)
+    if match is None:
+        return None
+    return f"e{match.group('ensembl')}_r{match.group('date')}"
+
+
+def _today_label() -> str:
+    """Today's UTC date rendered as ``e0_r<YYYY-MM-DD>``.
+
+    Used as the last-resort version-resolution fallback when neither
+    the upstream filename nor the ``Last-Modified`` header is parsable.
+    ``e0`` is the project convention for "Ensembl release unknown"
+    (matches the user-prompt example in the runbook).
+    """
+    return datetime.now(UTC).strftime("e0_r%Y-%m-%d")
+
+
+def _resolve_version_via_head() -> str:
+    """Resolve the GWAS Catalog version label via HEAD.
+
+    Strategy (in order):
+
+    1. HEAD request to :data:`GWAS_ALL_ASSOCIATIONS_URL` via the
+       audited :class:`ExternalClient` with redirect-following enabled.
+       Inspect the ``Content-Disposition`` header (when present) for
+       the filename and extract the ``e<NN>_r<YYYY-MM-DD>`` substring.
+    2. Fall back to inspecting the final response URL's path
+       segment for the same pattern (the redirect target's filename
+       carries the version even when Content-Disposition is absent).
+    3. Fall back to the HTTP ``Last-Modified`` header (RFC 822 form)
+       parsed via :func:`email.utils.parsedate_to_datetime` and
+       rendered as ``e0_r<YYYY-MM-DD>``.
+    4. Final fallback: today's UTC date as ``e0_r<YYYY-MM-DD>``,
+       logged loudly at INFO so the fallback is visible in the
+       structlog output.
+
+    Failure modes:
+
+    * :class:`ExternalCallsDisabledError` propagates -- callers see
+      the audited refusal directly. The privacy gate is fail-closed;
+      we do not paper over it with a fallback.
+    * Any other :class:`ExternalCallError` (network, HTTP 4xx/5xx,
+      malformed header) → fall back to today's UTC date.
+
+    The HEAD request is the loader's first audited call -- placing
+    it before the download means a fresh refresh against an
+    unchanged release short-circuits before re-fetching the TSV
+    body.
+    """
+    try:
+        with (
+            httpx.Client(
+                follow_redirects=True,
+                timeout=_DEFAULT_TIMEOUT_S,
+            ) as http_client,
+            ExternalClient(
+                f"annotations_{SOURCE_DB}",
+                client=http_client,
+            ) as client,
+        ):
+            response = client.request(
+                "HEAD",
+                GWAS_ALL_ASSOCIATIONS_URL,
+                resource_type="annotation_source",
+                resource_id=_HEAD_RESOURCE_ID,
+            )
+    except ExternalCallsDisabledError:
+        raise
+    except ExternalCallError as exc:
+        logger.warning("gwas_catalog.version.head_failed", error=str(exc))
+        return _today_label()
+
+    # 1. Content-Disposition filename.
+    content_disposition = response.headers.get("Content-Disposition", "")
+    filename_match = re.search(
+        r'filename\*?=(?:[^\']*\'\')?\"?([^\";]+)\"?',
+        content_disposition,
+    )
+    if filename_match is not None:
+        parsed = _parse_version_from_filename(filename_match.group(1))
+        if parsed is not None:
+            return parsed
+
+    # 2. Final response URL path segment.
+    parsed_from_url = _parse_version_from_filename(str(response.url))
+    if parsed_from_url is not None:
+        return parsed_from_url
+
+    # 3. Last-Modified header fallback.
+    last_modified = response.headers.get("Last-Modified")
+    if last_modified:
+        try:
+            dt = email.utils.parsedate_to_datetime(last_modified)
+        except (TypeError, ValueError) as exc:
+            logger.info(
+                "gwas_catalog.version.last_modified_unparseable",
+                last_modified=last_modified,
+                error=str(exc),
+            )
+        else:
+            if dt is not None:
+                return dt.astimezone(UTC).strftime("e0_r%Y-%m-%d")
+
+    # 4. Final fallback.
+    logger.info("gwas_catalog.version.fallback_today")
+    return _today_label()
+
+
+# ---------------------------------------------------------------------------
+# Chunked bulk insert.
+# ---------------------------------------------------------------------------
+
+
+def _next_association_id(conn: DuckDBPyConnection) -> int:
+    """``COALESCE(MAX(association_id), 0) + 1``.
+
+    Mirrors the project-wide app-allocated BIGINT PK pattern
+    (:func:`genome.annotate.loaders.clinvar._next_clinvar_id`,
+    :func:`genome.annotate.loaders.pharmgkb._next_pharmgkb_id`).
+    Called once at the start of streaming; per-chunk base IDs are
+    advanced from the previous chunk's actual size.
+    """
+    row = conn.execute(
+        f"SELECT COALESCE(MAX(association_id), 0) FROM {_TARGET_TABLE}",  # noqa: S608
+    ).fetchone()
+    return int(row[0]) + 1 if row is not None else 1
+
+
+def _iter_chunks(
+    rows_iter: Iterable[_ParsedRow],
+    chunk_size: int,
+) -> Iterator[list[_ParsedRow]]:
+    """Yield ``chunk_size``-sized slices from ``rows_iter``.
+
+    The last chunk may be smaller than ``chunk_size`` if the iterator
+    doesn't divide evenly. Chunks are returned as fresh lists so the
+    caller can mutate or drop them without affecting subsequent
+    iterations. Mirrors the ClinVar helper so the chunking logic
+    stays unit-testable without a DuckDB connection in hand.
+    """
+    chunk: list[_ParsedRow] = []
+    for row in rows_iter:
+        chunk.append(row)
+        if len(chunk) >= chunk_size:
+            yield chunk
+            chunk = []
+    if chunk:
+        yield chunk
+
+
+def _insert_chunk(
+    conn: DuckDBPyConnection,
+    rows: list[_ParsedRow],
+    *,
+    base_id: int,
+    source_version_id: int,
+    retrieval_date: datetime,
+) -> int:
+    """Insert one chunk of ``_ParsedRow`` into ``gwas_catalog_associations``.
+
+    Builds a PyArrow Table with one column per destination column
+    (including ``association_id``, ``source_version_id``,
+    ``retrieval_date``, and ``is_active=True``), registers it under
+    a temp name, then issues
+    ``INSERT INTO gwas_catalog_associations (...) SELECT ... FROM
+    <temp>`` and unregisters. ``chrom`` is cast through
+    ``chromosome_enum`` in the SELECT so the NULLs that are correct
+    for non-canonical or missing chromosomes reach the enum-typed
+    column cleanly.
+
+    Returns the number of rows inserted (== ``len(rows)``). A
+    zero-row call inserts nothing and returns 0.
+    """
+    if not rows:
+        return 0
+
+    n = len(rows)
+    # Naive UTC datetime: pa.timestamp("us") (no tz) lines up with
+    # DuckDB's TIMESTAMP (no tz). Same convention as the PharmGKB,
+    # CPIC, and ClinVar loaders.
+    naive_retrieval = retrieval_date.astimezone(UTC).replace(tzinfo=None)
+    table = pa.table(
+        {
+            "association_id": pa.array(range(base_id, base_id + n), type=pa.int64()),
+            "study_accession": pa.array(
+                [r.study_accession for r in rows],
+                type=pa.string(),
+            ),
+            "pmid": pa.array([r.pmid for r in rows], type=pa.string()),
+            "rsid": pa.array([r.rsid for r in rows], type=pa.string()),
+            "chrom": pa.array([r.chrom for r in rows], type=pa.string()),
+            "pos_grch38": pa.array([r.pos_grch38 for r in rows], type=pa.int64()),
+            "trait_id": pa.array([r.trait_id for r in rows], type=pa.string()),
+            "trait_name": pa.array([r.trait_name for r in rows], type=pa.string()),
+            "mapped_trait_uri": pa.array(
+                [r.mapped_trait_uri for r in rows],
+                type=pa.string(),
+            ),
+            "effect_size": pa.array([r.effect_size for r in rows], type=pa.float64()),
+            "effect_size_unit": pa.array(
+                [r.effect_size_unit for r in rows],
+                type=pa.string(),
+            ),
+            "effect_allele": pa.array(
+                [r.effect_allele for r in rows],
+                type=pa.string(),
+            ),
+            "other_allele": pa.array(
+                [r.other_allele for r in rows],
+                type=pa.string(),
+            ),
+            "effect_allele_freq": pa.array(
+                [r.effect_allele_freq for r in rows],
+                type=pa.float64(),
+            ),
+            "ci_95_lower": pa.array([r.ci_95_lower for r in rows], type=pa.float64()),
+            "ci_95_upper": pa.array([r.ci_95_upper for r in rows], type=pa.float64()),
+            "p_value": pa.array([r.p_value for r in rows], type=pa.float64()),
+            "sample_size_initial": pa.array(
+                [r.sample_size_initial for r in rows],
+                type=pa.int32(),
+            ),
+            "sample_size_replication": pa.array(
+                [r.sample_size_replication for r in rows],
+                type=pa.int32(),
+            ),
+            "ancestry": pa.array([r.ancestry for r in rows], type=pa.string()),
+            "is_replicated": pa.array(
+                [r.is_replicated for r in rows],
+                type=pa.bool_(),
+            ),
+            "source_version_id": pa.array([source_version_id] * n, type=pa.int64()),
+            "retrieval_date": pa.array(
+                [naive_retrieval] * n,
+                type=pa.timestamp("us"),
+            ),
+            "is_active": pa.array([True] * n, type=pa.bool_()),
+        },
+        schema=_ARROW_SCHEMA,
+    )
+    try:
+        conn.register("_gwas_stage_arrow", table)
+        conn.execute(
+            f"""
+            INSERT INTO {_TARGET_TABLE} (
+                association_id, study_accession, pmid,
+                rsid, chrom, pos_grch38,
+                trait_id, trait_name, mapped_trait_uri,
+                effect_size, effect_size_unit, effect_allele, other_allele,
+                effect_allele_freq, ci_95_lower, ci_95_upper, p_value,
+                sample_size_initial, sample_size_replication,
+                ancestry, is_replicated,
+                source_version_id, retrieval_date, is_active
+            )
+            SELECT
+                association_id, study_accession, pmid,
+                rsid, chrom::chromosome_enum, pos_grch38,
+                trait_id, trait_name, mapped_trait_uri,
+                effect_size, effect_size_unit, effect_allele, other_allele,
+                effect_allele_freq, ci_95_lower, ci_95_upper, p_value,
+                sample_size_initial, sample_size_replication,
+                ancestry, is_replicated,
+                source_version_id, retrieval_date, is_active
+              FROM _gwas_stage_arrow
+            """,  # noqa: S608 — table name is a module constant, not user input
+        )
+    finally:
+        conn.unregister("_gwas_stage_arrow")
+    return n
+
+
+def _stream_bulk_insert(
+    conn: DuckDBPyConnection,
+    rows_iter: Iterable[_ParsedRow],
+    *,
+    source_version_id: int,
+    retrieval_date: datetime,
+    chunk_size: int = _CHUNK_SIZE,
+) -> int:
+    """Drain ``rows_iter`` into ``gwas_catalog_associations`` in chunks.
+
+    Each chunk is a separate :func:`_insert_chunk` call (PyArrow
+    Table registration + ``INSERT ... SELECT``). All chunks must run
+    inside the same DuckDB transaction -- the caller bracket-controls
+    ``conn.begin()`` / ``conn.commit()``. Chunks are deliberately
+    *not* committed individually: a mid-stream failure must roll
+    back the deactivation of prior active rows along with the
+    partial insert, or the supersession-over-update invariant is
+    broken.
+
+    Per-chunk progress is logged at INFO with the chunk index, the
+    row count, and the cumulative total. Returns the total number of
+    rows inserted.
+    """
+    base_id = _next_association_id(conn)
+    next_id = base_id
+    total = 0
+    for chunk_index, chunk in enumerate(_iter_chunks(rows_iter, chunk_size), start=1):
+        inserted = _insert_chunk(
+            conn,
+            chunk,
+            base_id=next_id,
+            source_version_id=source_version_id,
+            retrieval_date=retrieval_date,
+        )
+        total += inserted
+        next_id += inserted
+        logger.info(
+            "gwas_catalog.bulk_insert.chunk",
+            chunk_index=chunk_index,
+            rows=inserted,
+            cumulative=total,
+        )
+    return total
+
+
+# ---------------------------------------------------------------------------
+# Supersession + rollback helpers (mirror PharmGKB / CPIC).
+# ---------------------------------------------------------------------------
+
+
+def _deactivate_for_refresh(
+    conn: DuckDBPyConnection,
+    *,
+    source_version_id: int,
+    force: bool,
+) -> int:
+    """Deactivate prior GWAS Catalog rows ahead of a refresh insert.
+
+    Mirrors :func:`genome.annotate.loaders.pharmgkb._deactivate_for_refresh`
+    and :func:`genome.annotate.loaders.cpic._deactivate_for_refresh`:
+    on the normal (non-force) path defer to the schema's standard
+    supersession helper; on the force path blanket-deactivate every
+    active GWAS Catalog row so a re-run against the same version
+    label doesn't leave duplicate active rows.
+
+    ``gwas_catalog_associations`` carries ``is_active`` but **not**
+    ``superseded_by`` (schema matches PharmGKB / CPIC; ClinVar is
+    the outlier that carries both). We pass
+    ``has_superseded_by=False`` so the standard helper only flips
+    ``is_active``; the ``--force`` blanket UPDATE does the same.
+    The supersession chain is followed via the prior rows'
+    ``source_version_id`` column (which always carries the version
+    they were inserted under) rather than a per-row tag.
+
+    Returns the number of rows flipped to ``is_active=FALSE``.
+    """
+    if not force:
+        return deactivate_prior_versions(
+            conn,
+            table=_TARGET_TABLE,
+            new_source_version_id=source_version_id,
+            has_superseded_by=False,
+        )
+    # _TARGET_TABLE is a module constant, not user input — S608 is a
+    # false positive here.
+    res = conn.execute(
+        f"UPDATE {_TARGET_TABLE} SET is_active = FALSE WHERE is_active = TRUE",  # noqa: S608
+    )
+    row = res.fetchone() if hasattr(res, "fetchone") else None
+    return int(row[0]) if row is not None and row[0] is not None else 0
+
+
+def _cleanup_orphan_version_row(
+    conn: DuckDBPyConnection,
+    source_version_id: int,
+) -> None:
+    """Best-effort delete of an orphan ``annotation_source_versions`` row.
+
+    Same shape as the PharmGKB / CPIC / ClinVar helpers -- called
+    when the supersede + chunked-insert transaction rolls back so
+    the version row that :func:`upsert_source_version` committed in
+    its own transaction doesn't leave a dangling "version exists
+    but zero rows referenced" state. The DELETE is FK-safe because
+    no ``gwas_catalog_associations`` rows reference the new
+    ``source_version_id`` yet (the stream insert never committed).
+    Failures are swallowed and logged; the caller is already
+    raising the original exception.
+    """
+    try:
+        conn.execute(
+            "DELETE FROM annotation_source_versions WHERE source_version_id = ?",
+            [source_version_id],
+        )
+    except Exception:  # noqa: BLE001 — best-effort cleanup; original exc re-raised by caller
+        logger.warning(
+            "gwas_catalog.cleanup.orphan_version_row_delete_failed",
+            source_version_id=source_version_id,
+            exc_info=True,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Post-load summary (drift identifiers).
+# ---------------------------------------------------------------------------
+
+
+def _summarize_active(conn: DuckDBPyConnection) -> dict[str, object]:
+    """Compute the drift identifiers logged at end-of-load.
+
+    Returns the durable signals real-data verification will compare
+    across releases:
+
+    * ``active_total`` -- ``COUNT(*) WHERE is_active``
+    * ``distinct_study_accession`` -- ``COUNT(DISTINCT study_accession)``
+    * ``distinct_pmid`` -- ``COUNT(DISTINCT pmid)``
+    * ``distinct_rsid`` -- ``COUNT(DISTINCT rsid)``
+    * ``distinct_trait_name`` -- ``COUNT(DISTINCT trait_name)``
+
+    Run after the supersession transaction commits so only
+    ``is_active = TRUE`` rows count.
+    """
+    total_row = conn.execute(
+        f"SELECT COUNT(*) FROM {_TARGET_TABLE} WHERE is_active",  # noqa: S608
+    ).fetchone()
+    distinct_study_row = conn.execute(
+        f"SELECT COUNT(DISTINCT study_accession) FROM {_TARGET_TABLE} "  # noqa: S608
+        "WHERE is_active AND study_accession IS NOT NULL",
+    ).fetchone()
+    distinct_pmid_row = conn.execute(
+        f"SELECT COUNT(DISTINCT pmid) FROM {_TARGET_TABLE} "  # noqa: S608
+        "WHERE is_active AND pmid IS NOT NULL",
+    ).fetchone()
+    distinct_rsid_row = conn.execute(
+        f"SELECT COUNT(DISTINCT rsid) FROM {_TARGET_TABLE} WHERE is_active",  # noqa: S608
+    ).fetchone()
+    distinct_trait_row = conn.execute(
+        f"SELECT COUNT(DISTINCT trait_name) FROM {_TARGET_TABLE} "  # noqa: S608
+        "WHERE is_active AND trait_name IS NOT NULL",
+    ).fetchone()
+    return {
+        "active_total": int(total_row[0]) if total_row is not None else 0,
+        "distinct_study_accession": int(distinct_study_row[0])
+        if distinct_study_row is not None
+        else 0,
+        "distinct_pmid": int(distinct_pmid_row[0])
+        if distinct_pmid_row is not None
+        else 0,
+        "distinct_rsid": int(distinct_rsid_row[0]) if distinct_rsid_row is not None else 0,
+        "distinct_trait_name": int(distinct_trait_row[0])
+        if distinct_trait_row is not None
+        else 0,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Module entry point — refresh
+# ---------------------------------------------------------------------------
+
+
+def refresh(force: bool) -> RefreshResult:  # noqa: FBT001 — registry RefreshFn signature
+    """Refresh GWAS Catalog associations.
+
+    Pipeline:
+
+    1. Resolve version via HEAD against
+       :data:`GWAS_ALL_ASSOCIATIONS_URL` (audited; falls back to
+       today's UTC date in ``e0_r<YYYY-MM-DD>`` form when neither the
+       Content-Disposition / final URL filename nor the
+       ``Last-Modified`` header is parsable).
+    2. Short-circuit and return ``was_already_current=True`` if a row
+       in ``annotation_source_versions`` already names the resolved
+       ``(source_db='gwas_catalog', version)`` and ``force`` is
+       ``False``. This is what makes a re-run against an unchanged
+       GWAS Catalog release cheap: no download, no parse, no insert.
+    3. Download the "all associations" TSV via the audited
+       :func:`genome.annotate.downloads.download_to_cache`
+       (skip-if-exists by default; ``force=True`` re-downloads).
+    4. Inside one DuckDB transaction: upsert
+       ``annotation_source_versions``, deactivate prior GWAS Catalog
+       rows via :func:`_deactivate_for_refresh`, stream-parse the
+       TSV, chunk-insert at :data:`_CHUNK_SIZE` rows per chunk via
+       :func:`_stream_bulk_insert`, and update the version row's
+       ``record_count`` once the streaming completes.
+    5. Open a fresh read-only connection and emit a structlog summary
+       line with the locked drift identifiers (active row total,
+       distinct study_accession, distinct pmid, distinct rsid,
+       distinct trait_name) plus the parser stats (rows read /
+       emitted / dropped / multi-SNP-expansions / truncated trait
+       URIs).
+    6. Return a :class:`RefreshResult` describing what landed.
+    """
+    log = logger.bind(source=SOURCE_DB)
+
+    # 1. Resolve version via HEAD. ExternalCallsDisabledError propagates.
+    version = _resolve_version_via_head()
+    log.info("gwas_catalog.version.resolved", version=version)
+
+    # 2. Idempotence check -- short-circuit before downloading the body.
+    with duckdb_connection() as conn:
+        current = get_current_version(conn, SOURCE_DB)
+        if current is not None and current.version == version and not force:
+            log.info("gwas_catalog.skip_already_current", version=version)
+            return RefreshResult(
+                source_db=SOURCE_DB,
+                source_version_id=current.source_version_id,
+                version=version,
+                record_count=current.record_count or 0,
+                was_already_current=True,
+            )
+
+    # 3. Download (skip-if-exists; force re-downloads).
+    download_result = download_to_cache(
+        SOURCE_DB,
+        GWAS_ALL_ASSOCIATIONS_URL,
+        _CACHE_FILENAME,
+        resource_id=_DOWNLOAD_RESOURCE_ID,
+        force=force,
+    )
+    log.info(
+        "gwas_catalog.download.audited",
+        sha256=download_result.sha256[:16],
+        size_bytes=download_result.size_bytes,
+    )
+
+    # 4. Single-transaction load. Same shape as ClinVar: the version
+    # row upsert runs in its own transaction (DuckDB FK+index quirk
+    # documented in source_versions.py), then a second transaction
+    # wraps the supersession + chunked insert pair atomically.
+    started = time.monotonic()
+    retrieval_date = datetime.now(UTC)
+    stats = _ParseStats()
+    with duckdb_connection() as conn:
+        source_version_id = upsert_source_version(
+            conn,
+            source_db=SOURCE_DB,
+            version=version,
+            source_url=GWAS_ALL_ASSOCIATIONS_URL,
+            source_file_hash=download_result.sha256,
+            source_file_size=download_result.size_bytes,
+            record_count=None,
+        )
+        conn.begin()
+        try:
+            deactivated = _deactivate_for_refresh(
+                conn,
+                source_version_id=source_version_id,
+                force=force,
+            )
+            with open(  # noqa: PTH123 — explicit open keeps the type narrow
+                download_result.path,
+                encoding="utf-8",
+                newline="",
+            ) as fh:
+                inserted = _stream_bulk_insert(
+                    conn,
+                    _parse_gwas_catalog(fh, stats),
+                    source_version_id=source_version_id,
+                    retrieval_date=retrieval_date,
+                )
+            conn.execute(
+                "UPDATE annotation_source_versions "
+                "SET record_count = ? "
+                "WHERE source_version_id = ?",
+                [inserted, source_version_id],
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            _cleanup_orphan_version_row(conn, source_version_id)
+            raise
+
+    elapsed = time.monotonic() - started
+
+    # 5. Post-load summary (drift identifiers). Read-only; runs
+    # against the just-committed state.
+    with duckdb_connection(read_only=True) as conn:
+        summary = _summarize_active(conn)
+
+    log.info(
+        "gwas_catalog.refresh.complete",
+        version=version,
+        sha256=download_result.sha256[:16],
+        size_bytes=download_result.size_bytes,
+        inserted=inserted,
+        deactivated=deactivated,
+        source_version_id=source_version_id,
+        elapsed_seconds=round(elapsed, 1),
+        rows_read=stats.rows_read,
+        rows_emitted=stats.rows_emitted,
+        dropped_empty_pos=stats.dropped_empty_pos,
+        dropped_no_valid_snp=stats.dropped_no_valid_snp,
+        multi_snp_expansions=stats.multi_snp_expansions,
+        truncated_mapped_trait_uri=stats.truncated_mapped_trait_uri,
+        active_total=summary["active_total"],
+        distinct_study_accession=summary["distinct_study_accession"],
+        distinct_pmid=summary["distinct_pmid"],
+        distinct_rsid=summary["distinct_rsid"],
+        distinct_trait_name=summary["distinct_trait_name"],
+    )
+
+    return RefreshResult(
+        source_db=SOURCE_DB,
+        source_version_id=source_version_id,
+        version=version,
+        record_count=inserted,
+        was_already_current=False,
+    )
+
+
+# Register at module-import time. The loaders subpackage __init__.py
+# imports this module so the registration happens before any CLI
+# dispatch runs.
+register_loader(SOURCE_DB, refresh)
+
+
+__all__ = [
+    "GWAS_ALL_ASSOCIATIONS_URL",
+    "SOURCE_DB",
+    "URL_VERIFIED_DATE",
+    "refresh",
+]

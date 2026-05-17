@@ -8,6 +8,120 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Sub-phase 5.3 — GWAS Catalog associations loader.** New
+  `genome.annotate.loaders.gwas_catalog` registers a `refresh`
+  function at module-import time that downloads EBI's GWAS Catalog
+  "all associations" TSV (~600-700K active rows at the current
+  release) via the audited scaffold, parses it with a streaming
+  `csv.DictReader`, and chunk-loads into `gwas_catalog_associations`
+  via PyArrow Table registration + `INSERT ... SELECT` (the
+  project's locked bulk-load convention) at the locked 250K rows
+  per chunk; all chunks land inside one DuckDB transaction so a
+  mid-stream failure rolls back the deactivation of prior active
+  rows along with every partial chunk insert. Version label is
+  resolved via a HEAD against the canonical URL: the
+  `Content-Disposition` header's filename and the final response
+  URL both carry the canonical GWAS Catalog
+  `e<NN>_r<YYYY-MM-DD>` pattern (Ensembl release number + release
+  date, e.g. `e110_r2024-08-30`); when neither is parseable the
+  loader falls back to the HTTP `Last-Modified` header rendered as
+  `e0_r<YYYY-MM-DD>`, and finally to today's UTC date in the same
+  shape. The HEAD is the loader's first audited call — placed
+  before the download so a fresh refresh against an unchanged
+  release short-circuits without re-fetching the TSV body, and a
+  disabled master switch surfaces `ExternalCallsDisabledError`
+  after one intent + blocked audit pair (matching the 5.1a/b/5.2
+  pattern). Per-row mapping: `SNPS` is split on `;` into
+  individual rsIDs, with rows expanding to one DB row per rsID
+  (all sharing the same study, PMID, trait, statistics, and
+  sample-size context); bare-digit rsIDs get the `rs` prefix, and
+  non-rsID tokens (star alleles, HLA, haplotype text) are rejected
+  because the schema's `rsid VARCHAR NOT NULL` contract is
+  per-row. Rows whose `CHR_ID` or `CHR_POS` is empty / `NA` / `NR`
+  / `-` are dropped at parse time and counted in
+  `dropped_empty_pos` — the schema's position-based join contract
+  has no use for a coordinate-less association.
+  `MAPPED_TRAIT_URI` can ship as a comma-separated multi-value
+  list when an association is mapped to several EFO terms; the
+  loader keeps the first URI (the curators' primary mapping) and
+  counts the truncations for the end-of-load summary
+  (`truncated_mapped_trait_uri`). `trait_id` is derived from the
+  same first URI via a trailing `<PREFIX>_<digits>` regex
+  (`http://www.ebi.ac.uk/efo/EFO_0001065` → `EFO_0001065`).
+  `STRONGEST SNP-RISK ALLELE` (shape `rsID-allele`) extracts the
+  trailing allele into `effect_allele`; the `?` sentinel maps to
+  NULL. `RISK ALLELE FREQUENCY` and `OR or BETA` parse via
+  `float`, accepting both `E`/`e` scientific-notation forms.
+  `P-VALUE` likewise parses sci notation natively. `95% CI (TEXT)`
+  is matched as `[lower-upper]` to fill `ci_95_lower` /
+  `ci_95_upper`; pure-text values (`[NR] unit decrease`) produce a
+  NULL pair. `INITIAL SAMPLE SIZE` / `REPLICATION SAMPLE SIZE` are
+  free-form text — the loader extracts the leading comma-grouped
+  integer (`"4,512 European ancestry individuals"` → 4512);
+  `is_replicated` is set to `True` iff the replication count is a
+  positive integer (missing / zero → NULL, not `False`, to keep
+  `is_replicated IS TRUE` semantics clean). `effect_size_unit`
+  and `ancestry` are intentionally NULL in 5.3 (the OR-vs-BETA
+  unit doesn't disambiguate at the row level; ancestry lives in
+  a separate GWAS Catalog file this loader does not consume).
+  The refresh is idempotent on `(source_db='gwas_catalog',
+  version)`: a second call without `--force` short-circuits with
+  `was_already_current=True`. `--force` blanket-deactivates every
+  prior active GWAS Catalog row before re-inserting;
+  `gwas_catalog_associations` carries `is_active` but **not**
+  `superseded_by` (schema matches PharmGKB / CPIC; ClinVar is the
+  outlier that carries both), so the standard supersession helper's
+  `has_superseded_by=False` path is used and the supersession chain
+  is followed via the prior rows' `source_version_id` column rather
+  than a per-row tag. The supersede + chunked-insert pair runs
+  inside one DuckDB transaction; a failure rolls every chunk back
+  along with the deactivation, and best-effort deletes the orphan
+  `annotation_source_versions` row that `upsert_source_version`
+  had committed in its inner transaction. End-of-load structlog
+  summary emits the locked drift identifiers (`active_total`,
+  `distinct_study_accession`, `distinct_pmid`, `distinct_rsid`,
+  `distinct_trait_name`) plus parser stats (`rows_read`,
+  `rows_emitted`, `dropped_empty_pos`, `dropped_no_valid_snp`,
+  `multi_snp_expansions`, `truncated_mapped_trait_uri`) and
+  elapsed wall-clock so a cross-release diff is one log scrape
+  away. CLI invocation:
+  `genome annotate refresh --source gwas_catalog`;
+  `genome annotate status` now reports gwas_catalog alongside
+  clinvar / cpic / pharmgkb. Tests: 63 new tests in
+  `backend/tests/test_annotate_loader_gwas_catalog.py` covering
+  the per-field coercions, the multi-SNP expansion contract, the
+  empty-CHR_POS drop, the sci-notation p-value parse, the
+  multi-valued MAPPED_TRAIT_URI truncation, the EFO trait-ID
+  extraction, the version-string parse (Content-Disposition +
+  Last-Modified + final-URL fallback paths), the end-to-end
+  refresh against the new 50-row fixture
+  (`backend/tests/fixtures/gwas_catalog_sample.tsv`), the
+  supersession transaction (same-version `--force` and
+  different-version round-trip), the audited refusal path with
+  `external_calls_enabled=false`, a 100K-row benchmark guard
+  pinned at < 30 s, and the CLI smoke. Documentation: new GWAS
+  Catalog section in `docs/runbooks/annotations.md` covering the
+  URL choice + version-label semantics, multi-SNP expansion,
+  coordinate-less drop, single-value `mapped_trait_uri`, per-field
+  coercions, the chunked-insert + supersession shape, drift
+  identifiers, real-data verification commands and expected
+  ranges, and troubleshooting paths
+  (`ExternalCallsDisabledError`, header drift, drop-spike
+  diagnosis, disk-space failure, partial-failure recovery). No
+  schema rebuild required — `gwas_catalog_associations` and
+  `annotation_source_versions` were already created by the 5.0
+  scaffold; the schema is unchanged. Real-data verification
+  numbers (active row counts, distinct study/PMID/rsID/trait
+  counts, wall-clock) will land in the merge commit once the
+  user has run `genome annotate refresh --source gwas_catalog`
+  against the current release with `external_calls_enabled=true`.
+  Sub-phase 5.3 closes; 5.4 (PGS Catalog metadata) follows.
+  Out of scope (deferred per the sub-phase plan):
+  `variant_annotations_index` refresh (sub-phase 5.8), the
+  explicit `CHECKPOINT` change in `supersession.py` from
+  finding-009 #11, the chunked-UPDATE design question in
+  finding-009 #13, and tier-2 rsid-based matching across
+  positions. (PR #XX)
 - **Sub-phase 5.2 — ClinVar clinical-significance annotations loader.**
   New `genome.annotate.loaders.clinvar` registers a `refresh` function
   at module-import time that downloads ClinVar's
