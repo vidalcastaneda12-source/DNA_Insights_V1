@@ -147,5 +147,6 @@ pytest
 
 Phases 1–4 complete (foundation, ingestion, merge & discrepancy detection,
 local imputation via Beagle 5.5). Phase 5 (reference annotation loaders) is
-next. See `ROADMAP.md` for the phase plan and `CHANGELOG.md` for release-level
-detail.
+in progress: sub-phases 5.0 (scaffold), 5.1a (PharmGKB), 5.1b (CPIC), and
+5.2 (ClinVar) have shipped; 5.3 (GWAS Catalog) is next. See `ROADMAP.md`
+for the full sub-phase breakdown and `CHANGELOG.md` for release-level detail.
