@@ -454,9 +454,20 @@ class ExternalClient:
                     headers=dict(headers) if headers else None,
                 ) as response:
                     if response.status_code >= 400:  # noqa: PLR2004 — HTTP error band
+                        # The streaming context defers body consumption, so
+                        # ``response.text`` raises ``ResponseNotRead`` until
+                        # ``response.read()`` runs. Drain explicitly before
+                        # building the message so the error surfaces the
+                        # actual body snippet rather than masking it with
+                        # an unrelated exception.
+                        try:
+                            response.read()
+                            body_snippet = response.text[:200]
+                        except Exception:  # noqa: BLE001 — defensive: never let snippet capture mask the HTTP error
+                            body_snippet = "<unavailable>"
                         msg = (
                             f"HTTP {response.status_code} downloading from "
-                            f"{self._endpoint_label}: {response.text[:200]}"
+                            f"{self._endpoint_label}: {body_snippet}"
                         )
                         raise ExternalCallError(msg)
                     with open(dest, "wb") as out:  # noqa: PTH123
