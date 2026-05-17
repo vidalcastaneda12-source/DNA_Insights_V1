@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Sub-phase 5.3 follow-up — GWAS Catalog download flow and
+  `external_client.download` error-message bug.** Real-data
+  verification of the original 5.3 PR (#38) failed for two stacked
+  reasons:
+  1. The hardcoded `https://www.ebi.ac.uk/gwas/api/search/downloads/full`
+     download URL returns HTTP 404 — that endpoint has been retired.
+     The current pattern is a two-step: GET
+     `https://www.ebi.ac.uk/gwas/api/search/stats` to discover the
+     release `date`, then download the dated release ZIP
+     (`gwas-catalog-associations_ontology-annotated-full.zip`) from
+     the EBI FTP. The loader now uses the
+     `https://ftp.ebi.ac.uk/pub/databases/gwas/releases/latest/`
+     symlink directory for the download (the stats-endpoint freeze
+     date and the FTP publish date typically differ by 1-2 days, so a
+     strict `/releases/{YYYY}/{MM}/{DD}/...` template would 404). The
+     downloaded artifact is a ZIP carrying a single TSV
+     (`gwas-catalog-download-associations-alt-full.tsv`); a new
+     `_open_tsv_from_zip` context manager streams the entry through
+     `zipfile.ZipFile` without unpacking to disk. The version label is
+     now the stats date in `YYYY_MM_DD` form (matching the ClinVar
+     convention; the prior `e<NN>_r<YYYY-MM-DD>` filename pattern is
+     gone). A failed stats call (network / HTTP 4xx/5xx / malformed
+     JSON / missing `date` field) now propagates instead of silently
+     falling back to today's UTC date — silent fallback could either
+     paint a misleading version label or cause a duplicate load.
+  2. `ExternalClient.download` constructed its HTTP-error message by
+     reading `response.text[:200]` on a still-streaming response, which
+     raises `httpx.ResponseNotRead` and masked the actual HTTP error.
+     The bug affected every download path but never fired in the prior
+     three loaders because PharmGKB / CPIC / ClinVar all hit endpoints
+     that returned 200. Fix: call `response.read()` before `.text`
+     access, with a defensive fallback snippet of `<unavailable>` if
+     the read itself fails. New regression test in
+     `test_privacy_external_client.py` constructs an explicitly
+     deferred-read `httpx.SyncByteStream` 404 response and asserts the
+     emitted message includes the body snippet and does NOT mention
+     `ResponseNotRead`.
+  No schema changes. The new tests cover the stats-endpoint happy
+  path, the `releasedate` defensive alias, malformed-JSON loud-fail,
+  HTTP-5xx propagation, and the ZIP-archive shape checks
+  (non-ZIP / missing canonical entry). Real-data verification numbers
+  for `genome annotate refresh --source gwas_catalog` will land in the
+  merge commit once the user runs the refresh against the current
+  release with `external_calls_enabled=true`. (PR #38 follow-up)
+
 ### Added
 - **Sub-phase 5.3 — GWAS Catalog associations loader.** New
   `genome.annotate.loaders.gwas_catalog` registers a `refresh`

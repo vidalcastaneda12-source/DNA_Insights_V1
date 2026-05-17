@@ -25,6 +25,7 @@ from genome.privacy.external_client import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 
@@ -347,6 +348,73 @@ def test_download_http_error_raises_and_records(
     rows = _audit_rows()
     assert len(rows) == 2
     assert json.loads(str(rows[-1][3]))["status"] == "failure"
+
+
+class _UnReadStream(httpx.SyncByteStream):
+    """A streaming body that requires explicit ``response.read()``.
+
+    ``httpx.Response(..., text=...)`` and ``httpx.Response(..., content=...)``
+    both pre-buffer the body so ``.text`` works immediately. Real upstream
+    HTTP responses streamed via ``Client.stream(...)`` instead defer body
+    consumption -- ``.text`` raises ``ResponseNotRead`` until ``.read()``
+    runs. This stub reproduces the deferred-read shape so the test exercises
+    the same code path that fires against a live EBI / NCBI 404.
+    """
+
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    def __iter__(self) -> Iterator[bytes]:
+        yield self._body
+
+    def close(self) -> None:
+        return None
+
+
+def test_download_http_error_includes_streamed_body_snippet(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+    tmp_path: Path,
+) -> None:
+    """Regression: the error message must surface the response body snippet
+    even when the response is in deferred-read streaming mode.
+
+    Before the fix, ``response.text`` was accessed before ``response.read()``
+    ran, which raised ``httpx.ResponseNotRead`` and masked the actual HTTP
+    error. The bug fired against every real-world 4xx/5xx download (the
+    existing 503 ``text='busy'`` test passed only because MockTransport's
+    text= kwarg pre-buffered the body).
+    """
+    init_databases()
+    _enable_external_calls()
+
+    def handler(_r: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, stream=_UnReadStream(b"not found here"))
+
+    dest = tmp_path / "result.zip"
+    with _mock_client(handler) as t:
+        client = ExternalClient("ebi_gwas", client=t)
+        with pytest.raises(ExternalCallError) as exc_info:
+            client.download(
+                "https://example/zip",
+                str(dest),
+                resource_type="annotation_source",
+            )
+    # The message must carry the HTTP status, the endpoint label, AND the
+    # body snippet — and must NOT mention ResponseNotRead (the masking bug).
+    msg = str(exc_info.value)
+    assert "HTTP 404" in msg
+    assert "ebi_gwas" in msg
+    assert "not found here" in msg
+    assert "ResponseNotRead" not in msg
+
+    rows = _audit_rows()
+    assert len(rows) == 2
+    result_details = json.loads(str(rows[-1][3]))
+    assert result_details["status"] == "failure"
+    # The audited error_type must be ExternalCallError, not the masked
+    # ResponseNotRead — that's what proves the inner exception didn't
+    # escape the snippet capture.
+    assert result_details["error_type"] == "ExternalCallError"
 
 
 def test_is_external_enabled_reads_user_preferences(

@@ -1,22 +1,21 @@
 """GWAS Catalog associations loader.
 
-Downloads GWAS Catalog's "all associations" TSV (~600-700K active rows
-at the current EBI release), parses it line-by-line with a streaming
-reader, and chunk-loads into ``gwas_catalog_associations`` via PyArrow
-Table registration + ``INSERT ... SELECT`` (the project's locked
-bulk-load convention).
+Downloads GWAS Catalog's "all associations" ZIP archive (~600-700K
+active rows at the current EBI release, distributed as a zipped TSV),
+parses the contained TSV line-by-line with a streaming reader, and
+chunk-loads into ``gwas_catalog_associations`` via PyArrow Table
+registration + ``INSERT ... SELECT`` (the project's locked bulk-load
+convention).
 
 Sub-phase 5.3 — fourth loader after PharmGKB (5.1a), CPIC (5.1b), and
 ClinVar (5.2). Mirrors the locked 5.1/5.2 template in shape:
 
 * Module-level URL constants with a sibling ``URL_VERIFIED_DATE`` so a
   future reader can tell at a glance how stale the link is.
-* A ``_resolve_version_via_head`` step that reads the upstream's
-  ``Content-Disposition`` (canonical for GWAS Catalog: every release
-  embeds the Ensembl version and release date in the filename, e.g.
-  ``gwas_catalog_v1.0-associations_e0_r2026-05-12.tsv``) and falls
-  back to the HTTP ``Last-Modified`` header so the version label is
-  keyed to the upstream release.
+* A ``_resolve_version_via_stats`` step that calls the GWAS Catalog
+  REST stats endpoint (``/api/search/stats``), parses the JSON
+  ``"date"`` field, and renders it as ``YYYY_MM_DD`` -- matching the
+  ClinVar loader's version-string convention.
 * A ``refresh(force)`` function that resolves version, downloads
   (skip-if-exists), short-circuits when ``annotation_source_versions``
   already names the resolved version, and otherwise upserts +
@@ -70,11 +69,13 @@ refresh is a separate downstream concern in sub-phase 5.8.
 from __future__ import annotations
 
 import csv
-import email.utils
+import io
 import re
 import time
+import zipfile
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Final
 
 import httpx
@@ -92,13 +93,12 @@ from genome.db.duckdb_conn import duckdb_connection
 from genome.ingest.models import normalize_chrom
 from genome.privacy.external_client import (
     _DEFAULT_TIMEOUT_S,
-    ExternalCallError,
-    ExternalCallsDisabledError,
     ExternalClient,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
+    from pathlib import Path
     from typing import TextIO
 
     from duckdb import DuckDBPyConnection
@@ -106,27 +106,54 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
-# Upstream URL (verified 2026-05-17).
+# Upstream URLs (verified 2026-05-17).
 #
-# The EBI GWAS Catalog publishes a single "all associations" TSV on a
-# roughly weekly cadence. The canonical download endpoint redirects
-# (303) to a versioned filename of the form
-# ``gwas_catalog_v1.0-associations_e<NN>_r<YYYY-MM-DD>.tsv`` -- the
-# Ensembl release number (``e<NN>``) and the release date encoded
-# directly in the filename. ``download_to_cache`` injects an
-# ``httpx.Client(follow_redirects=True)`` so the redirect lands
-# transparently on disk.
+# The legacy ``api/search/downloads/full`` endpoint that returned the
+# canonical "all associations" TSV directly has been retired (404 since
+# at least 2026 Q2). The current pattern is a two-step:
+#
+# 1. GET ``/api/search/stats`` -- returns JSON of the form
+#    ``{"date": "YYYY-MM-DD", "ensemblbuild": "...", ...}``. The
+#    ``date`` field is the release-snapshot date and is what we use as
+#    the version label (``YYYY_MM_DD`` form, matching the ClinVar
+#    loader's convention).
+# 2. GET the dated release ZIP from the EBI FTP
+#    (``gwas-catalog-associations_ontology-annotated-full.zip``).
+#
+# The stats-endpoint ``date`` is the release freeze date; the matching
+# FTP directory is typically published 1-2 days later, so the two
+# dates do NOT line up day-for-day. To stay robust against that
+# offset (and against future shifts in the FTP layout), the download
+# always goes through the ``latest/`` symlink directory -- EBI keeps
+# it pointed at the current release. The version label remains the
+# stats date so the supersession short-circuit still keys to "what
+# release is loaded" rather than "what file did we cache". The race
+# window between the stats call and the download is bounded by the
+# weekly release cadence and is acceptable for personal-use refreshes.
+#
+# The downloaded ZIP contains a single TSV
+# (``gwas-catalog-download-associations-alt-full.tsv``) carrying the
+# same 38 columns the prior ``.tsv`` endpoint shipped.
+# ``download_to_cache`` injects an ``httpx.Client(follow_redirects=
+# True)`` so any FTP/CDN redirect lands transparently on disk.
 # ---------------------------------------------------------------------------
 
 URL_VERIFIED_DATE: Final[str] = "2026-05-17"
-GWAS_ALL_ASSOCIATIONS_URL: Final[str] = (
-    "https://www.ebi.ac.uk/gwas/api/search/downloads/full"
+GWAS_STATS_URL: Final[str] = "https://www.ebi.ac.uk/gwas/api/search/stats"
+GWAS_ASSOCIATIONS_ZIP_URL: Final[str] = (
+    "https://ftp.ebi.ac.uk/pub/databases/gwas/releases/latest/"
+    "gwas-catalog-associations_ontology-annotated-full.zip"
 )
+
+# Name of the TSV inside the downloaded ZIP. EBI ships exactly one
+# entry; if the archive layout changes the parser raises a clear
+# error rather than silently picking a different file.
+_ZIP_TSV_MEMBER: Final[str] = "gwas-catalog-download-associations-alt-full.tsv"
 
 SOURCE_DB: Final[str] = "gwas_catalog"
 _TARGET_TABLE: Final[str] = "gwas_catalog_associations"
-_CACHE_FILENAME: Final[str] = "gwas_catalog_associations.tsv"
-_HEAD_RESOURCE_ID: Final[str] = "gwas_catalog_release_metadata"
+_CACHE_FILENAME: Final[str] = "gwas-catalog-associations_ontology-annotated-full.zip"
+_STATS_RESOURCE_ID: Final[str] = "gwas_catalog_release_stats"
 _DOWNLOAD_RESOURCE_ID: Final[str] = "gwas_catalog_all_associations"
 
 # Chunk size for the streaming bulk insert. Matches the ClinVar loader
@@ -148,15 +175,6 @@ _MISSING_VALUE_TOKENS: Final[frozenset[str]] = frozenset(
 # Tokens that map to an unknown effect allele in the
 # ``STRONGEST SNP-RISK ALLELE`` column (typical: ``rs1234-?``).
 _UNKNOWN_ALLELE_TOKENS: Final[frozenset[str]] = frozenset({"?", "NR"})
-
-# Version label embedded in the released filename. Captures the
-# Ensembl release number (1+ digits) and the release date
-# (``YYYY-MM-DD``). Anchored as a substring match rather than full-
-# string because the filename also carries the ``gwas_catalog_v1.0-
-# associations_`` prefix and the ``.tsv`` extension.
-_VERSION_RE: Final[re.Pattern[str]] = re.compile(
-    r"e(?P<ensembl>\d+)_r(?P<date>\d{4}-\d{2}-\d{2})",
-)
 
 # Detection rule for individual SNPS column entries. GWAS Catalog
 # typically encodes one rsID per token; the loader accepts the bare
@@ -512,6 +530,44 @@ def _extract_trait_id(mapped_trait_uri: str | None) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# ZIP → TSV streaming.
+# ---------------------------------------------------------------------------
+
+
+@contextmanager
+def _open_tsv_from_zip(zip_path: Path) -> Iterator[TextIO]:
+    """Yield a UTF-8 text handle over the TSV inside a GWAS Catalog ZIP.
+
+    EBI distributes the associations release as a ZIP archive
+    carrying exactly one entry
+    (:data:`_ZIP_TSV_MEMBER`). The wrapping ZIP layer means the
+    downloaded artifact is ~60 MB on disk while the contained TSV
+    decompresses to ~300 MB; streaming the entry through
+    :mod:`zipfile` keeps the memory footprint bounded the same way
+    the prior ``.tsv.gz`` style would have. If the archive shape
+    drifts (the TSV is renamed, additional entries appear, or the
+    file isn't a ZIP at all) the function raises a clear error so
+    the upstream change surfaces fast.
+    """
+    if not zipfile.is_zipfile(zip_path):
+        msg = (
+            f"GWAS Catalog cached download {zip_path} is not a ZIP "
+            "archive; upstream layout may have changed"
+        )
+        raise ValueError(msg)
+    with zipfile.ZipFile(zip_path) as archive:
+        names = archive.namelist()
+        if _ZIP_TSV_MEMBER not in names:
+            msg = (
+                f"GWAS Catalog ZIP {zip_path.name} missing expected "
+                f"entry {_ZIP_TSV_MEMBER!r}; archive contains {names!r}"
+            )
+            raise ValueError(msg)
+        with archive.open(_ZIP_TSV_MEMBER) as raw:
+            yield io.TextIOWrapper(raw, encoding="utf-8", newline="")
+
+
+# ---------------------------------------------------------------------------
 # Streaming parser.
 # ---------------------------------------------------------------------------
 
@@ -654,120 +710,111 @@ def _parse_gwas_catalog(
 # ---------------------------------------------------------------------------
 
 
-def _parse_version_from_filename(filename: str) -> str | None:
-    """Extract the ``e<NN>_r<YYYY-MM-DD>`` substring from a filename.
+# Matches a calendar date in either ``YYYY-MM-DD`` (stats-endpoint
+# native form) or ``YYYY/MM/DD`` (defensive against a future shape
+# tweak). Captured groups expose year / month / day for the
+# ``YYYY_MM_DD`` render.
+_STATS_DATE_RE: Final[re.Pattern[str]] = re.compile(
+    r"^(?P<year>\d{4})[-/](?P<month>\d{2})[-/](?P<day>\d{2})$",
+)
 
-    GWAS Catalog ships every release filename with the Ensembl
-    release number and the release date embedded directly (e.g.
-    ``gwas_catalog_v1.0-associations_e0_r2026-05-12.tsv``). Returns
-    the substring on a match, ``None`` otherwise.
+
+def _parse_stats_release_date(payload: object) -> date:
+    """Pull the release date out of a parsed stats-endpoint payload.
+
+    Strict on shape: the payload must be a mapping that carries a
+    ``date`` key (the live shape the EBI stats endpoint returns) or
+    a ``releasedate`` key (defensive against a documented historical
+    form). The value must match :data:`_STATS_DATE_RE`. Any drift
+    raises a clear :class:`ValueError` so a future EBI schema change
+    surfaces as a loud refresh failure rather than a silent stale
+    version label.
     """
-    match = _VERSION_RE.search(filename)
+    if not isinstance(payload, dict):
+        msg = f"GWAS Catalog stats response was {type(payload).__name__}, expected a JSON object"
+        # ValueError (not TypeError) keeps the per-shape failures
+        # under one exception class so callers and tests don't have
+        # to discriminate "wrong key" from "wrong type". The runbook
+        # references ValueError in the troubleshooting section.
+        raise ValueError(msg)  # noqa: TRY004 — shape error, not type error
+    raw = payload.get("date") or payload.get("releasedate")
+    if not isinstance(raw, str) or not raw:
+        msg = (
+            "GWAS Catalog stats response is missing a 'date' / "
+            f"'releasedate' string field; got keys {sorted(payload)!r}"
+        )
+        raise ValueError(msg)
+    match = _STATS_DATE_RE.match(raw.strip())
     if match is None:
-        return None
-    return f"e{match.group('ensembl')}_r{match.group('date')}"
+        msg = (
+            f"GWAS Catalog stats date {raw!r} does not match YYYY-MM-DD; upstream shape has drifted"
+        )
+        raise ValueError(msg)
+    return date(
+        year=int(match.group("year")),
+        month=int(match.group("month")),
+        day=int(match.group("day")),
+    )
 
 
-def _today_label() -> str:
-    """Today's UTC date rendered as ``e0_r<YYYY-MM-DD>``.
-
-    Used as the last-resort version-resolution fallback when neither
-    the upstream filename nor the ``Last-Modified`` header is parsable.
-    ``e0`` is the project convention for "Ensembl release unknown"
-    (matches the user-prompt example in the runbook).
-    """
-    return datetime.now(UTC).strftime("e0_r%Y-%m-%d")
+def _format_version(release_date: date) -> str:
+    """Render a release date as the canonical ``YYYY_MM_DD`` version label."""
+    return release_date.strftime("%Y_%m_%d")
 
 
-def _resolve_version_via_head() -> str:
-    """Resolve the GWAS Catalog version label via HEAD.
+def _resolve_version_via_stats() -> str:
+    """Resolve the GWAS Catalog version label via the stats endpoint.
 
-    Strategy (in order):
-
-    1. HEAD request to :data:`GWAS_ALL_ASSOCIATIONS_URL` via the
-       audited :class:`ExternalClient` with redirect-following enabled.
-       Inspect the ``Content-Disposition`` header (when present) for
-       the filename and extract the ``e<NN>_r<YYYY-MM-DD>`` substring.
-    2. Fall back to inspecting the final response URL's path
-       segment for the same pattern (the redirect target's filename
-       carries the version even when Content-Disposition is absent).
-    3. Fall back to the HTTP ``Last-Modified`` header (RFC 822 form)
-       parsed via :func:`email.utils.parsedate_to_datetime` and
-       rendered as ``e0_r<YYYY-MM-DD>``.
-    4. Final fallback: today's UTC date as ``e0_r<YYYY-MM-DD>``,
-       logged loudly at INFO so the fallback is visible in the
-       structlog output.
+    Issues an audited GET to :data:`GWAS_STATS_URL`, parses the JSON
+    body, extracts the release date via
+    :func:`_parse_stats_release_date`, and renders it as
+    ``YYYY_MM_DD``.
 
     Failure modes:
 
     * :class:`ExternalCallsDisabledError` propagates -- callers see
       the audited refusal directly. The privacy gate is fail-closed;
       we do not paper over it with a fallback.
-    * Any other :class:`ExternalCallError` (network, HTTP 4xx/5xx,
-      malformed header) → fall back to today's UTC date.
+    * Any other :class:`ExternalCallError` (network, HTTP 4xx/5xx)
+      raises through. A failed version resolution must NOT silently
+      fall back to "today" -- that would either cause a duplicate
+      load against the previously-current release or paint a
+      misleading version label onto a release that's actually
+      identical. Better to fail loudly and let the operator retry.
+    * Malformed JSON or a missing ``date`` field raises
+      :class:`ValueError` with the live payload shape, so a future
+      upstream API change surfaces as a fast diagnostic rather than
+      a silent bad write.
 
-    The HEAD request is the loader's first audited call -- placing
-    it before the download means a fresh refresh against an
-    unchanged release short-circuits before re-fetching the TSV
-    body.
+    The stats GET is the loader's first audited call. Placing it
+    before the download means a fresh refresh against an unchanged
+    release short-circuits before re-fetching the ~60 MB ZIP body.
     """
+    with (
+        httpx.Client(
+            follow_redirects=True,
+            timeout=_DEFAULT_TIMEOUT_S,
+        ) as http_client,
+        ExternalClient(
+            f"annotations_{SOURCE_DB}",
+            client=http_client,
+        ) as client,
+    ):
+        response = client.request(
+            "GET",
+            GWAS_STATS_URL,
+            resource_type="annotation_source",
+            resource_id=_STATS_RESOURCE_ID,
+        )
+
     try:
-        with (
-            httpx.Client(
-                follow_redirects=True,
-                timeout=_DEFAULT_TIMEOUT_S,
-            ) as http_client,
-            ExternalClient(
-                f"annotations_{SOURCE_DB}",
-                client=http_client,
-            ) as client,
-        ):
-            response = client.request(
-                "HEAD",
-                GWAS_ALL_ASSOCIATIONS_URL,
-                resource_type="annotation_source",
-                resource_id=_HEAD_RESOURCE_ID,
-            )
-    except ExternalCallsDisabledError:
-        raise
-    except ExternalCallError as exc:
-        logger.warning("gwas_catalog.version.head_failed", error=str(exc))
-        return _today_label()
+        payload = response.json()
+    except ValueError as exc:
+        msg = f"GWAS Catalog stats response is not valid JSON: {response.text[:200]}"
+        raise ValueError(msg) from exc
 
-    # 1. Content-Disposition filename.
-    content_disposition = response.headers.get("Content-Disposition", "")
-    filename_match = re.search(
-        r'filename\*?=(?:[^\']*\'\')?\"?([^\";]+)\"?',
-        content_disposition,
-    )
-    if filename_match is not None:
-        parsed = _parse_version_from_filename(filename_match.group(1))
-        if parsed is not None:
-            return parsed
-
-    # 2. Final response URL path segment.
-    parsed_from_url = _parse_version_from_filename(str(response.url))
-    if parsed_from_url is not None:
-        return parsed_from_url
-
-    # 3. Last-Modified header fallback.
-    last_modified = response.headers.get("Last-Modified")
-    if last_modified:
-        try:
-            dt = email.utils.parsedate_to_datetime(last_modified)
-        except (TypeError, ValueError) as exc:
-            logger.info(
-                "gwas_catalog.version.last_modified_unparseable",
-                last_modified=last_modified,
-                error=str(exc),
-            )
-        else:
-            if dt is not None:
-                return dt.astimezone(UTC).strftime("e0_r%Y-%m-%d")
-
-    # 4. Final fallback.
-    logger.info("gwas_catalog.version.fallback_today")
-    return _today_label()
+    release_date = _parse_stats_release_date(payload)
+    return _format_version(release_date)
 
 
 # ---------------------------------------------------------------------------
@@ -1097,13 +1144,9 @@ def _summarize_active(conn: DuckDBPyConnection) -> dict[str, object]:
         "distinct_study_accession": int(distinct_study_row[0])
         if distinct_study_row is not None
         else 0,
-        "distinct_pmid": int(distinct_pmid_row[0])
-        if distinct_pmid_row is not None
-        else 0,
+        "distinct_pmid": int(distinct_pmid_row[0]) if distinct_pmid_row is not None else 0,
         "distinct_rsid": int(distinct_rsid_row[0]) if distinct_rsid_row is not None else 0,
-        "distinct_trait_name": int(distinct_trait_row[0])
-        if distinct_trait_row is not None
-        else 0,
+        "distinct_trait_name": int(distinct_trait_row[0]) if distinct_trait_row is not None else 0,
     }
 
 
@@ -1117,23 +1160,24 @@ def refresh(force: bool) -> RefreshResult:  # noqa: FBT001 — registry RefreshF
 
     Pipeline:
 
-    1. Resolve version via HEAD against
-       :data:`GWAS_ALL_ASSOCIATIONS_URL` (audited; falls back to
-       today's UTC date in ``e0_r<YYYY-MM-DD>`` form when neither the
-       Content-Disposition / final URL filename nor the
-       ``Last-Modified`` header is parsable).
+    1. Resolve version via the GWAS Catalog REST stats endpoint
+       (audited). The endpoint returns
+       ``{"date": "YYYY-MM-DD", ...}``; the date is rendered as
+       ``YYYY_MM_DD`` and is the version label.
     2. Short-circuit and return ``was_already_current=True`` if a row
        in ``annotation_source_versions`` already names the resolved
        ``(source_db='gwas_catalog', version)`` and ``force`` is
        ``False``. This is what makes a re-run against an unchanged
        GWAS Catalog release cheap: no download, no parse, no insert.
-    3. Download the "all associations" TSV via the audited
+    3. Download the dated "all associations" ZIP from the EBI FTP
+       ``latest/`` directory via the audited
        :func:`genome.annotate.downloads.download_to_cache`
        (skip-if-exists by default; ``force=True`` re-downloads).
     4. Inside one DuckDB transaction: upsert
        ``annotation_source_versions``, deactivate prior GWAS Catalog
-       rows via :func:`_deactivate_for_refresh`, stream-parse the
-       TSV, chunk-insert at :data:`_CHUNK_SIZE` rows per chunk via
+       rows via :func:`_deactivate_for_refresh`, open the ZIP and
+       stream-parse the contained TSV, chunk-insert at
+       :data:`_CHUNK_SIZE` rows per chunk via
        :func:`_stream_bulk_insert`, and update the version row's
        ``record_count`` once the streaming completes.
     5. Open a fresh read-only connection and emit a structlog summary
@@ -1146,8 +1190,9 @@ def refresh(force: bool) -> RefreshResult:  # noqa: FBT001 — registry RefreshF
     """
     log = logger.bind(source=SOURCE_DB)
 
-    # 1. Resolve version via HEAD. ExternalCallsDisabledError propagates.
-    version = _resolve_version_via_head()
+    # 1. Resolve version via the stats endpoint.
+    # ExternalCallsDisabledError propagates.
+    version = _resolve_version_via_stats()
     log.info("gwas_catalog.version.resolved", version=version)
 
     # 2. Idempotence check -- short-circuit before downloading the body.
@@ -1166,7 +1211,7 @@ def refresh(force: bool) -> RefreshResult:  # noqa: FBT001 — registry RefreshF
     # 3. Download (skip-if-exists; force re-downloads).
     download_result = download_to_cache(
         SOURCE_DB,
-        GWAS_ALL_ASSOCIATIONS_URL,
+        GWAS_ASSOCIATIONS_ZIP_URL,
         _CACHE_FILENAME,
         resource_id=_DOWNLOAD_RESOURCE_ID,
         force=force,
@@ -1189,7 +1234,7 @@ def refresh(force: bool) -> RefreshResult:  # noqa: FBT001 — registry RefreshF
             conn,
             source_db=SOURCE_DB,
             version=version,
-            source_url=GWAS_ALL_ASSOCIATIONS_URL,
+            source_url=GWAS_ASSOCIATIONS_ZIP_URL,
             source_file_hash=download_result.sha256,
             source_file_size=download_result.size_bytes,
             record_count=None,
@@ -1201,11 +1246,7 @@ def refresh(force: bool) -> RefreshResult:  # noqa: FBT001 — registry RefreshF
                 source_version_id=source_version_id,
                 force=force,
             )
-            with open(  # noqa: PTH123 — explicit open keeps the type narrow
-                download_result.path,
-                encoding="utf-8",
-                newline="",
-            ) as fh:
+            with _open_tsv_from_zip(download_result.path) as fh:
                 inserted = _stream_bulk_insert(
                     conn,
                     _parse_gwas_catalog(fh, stats),
@@ -1269,7 +1310,8 @@ register_loader(SOURCE_DB, refresh)
 
 
 __all__ = [
-    "GWAS_ALL_ASSOCIATIONS_URL",
+    "GWAS_ASSOCIATIONS_ZIP_URL",
+    "GWAS_STATS_URL",
     "SOURCE_DB",
     "URL_VERIFIED_DATE",
     "refresh",

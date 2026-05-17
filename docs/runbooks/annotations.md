@@ -524,63 +524,88 @@ CHANGELOG entry.
 
 ### GWAS Catalog (sub-phase 5.3)
 
-**What's loaded.** EBI's GWAS Catalog "all associations" TSV
-(~600-700K active associations at the current release), parsed and
-chunk-loaded into `gwas_catalog_associations`. GWAS Catalog ships
-one row per curated SNP-trait association; the loader splits any
-row whose `SNPS` cell carries multiple `;`-separated rsIDs into one
-DB row per rsID (all sharing the same study, PMID, trait, statistics,
-and sample-size context), and drops rows with empty / missing
-`CHR_ID` or `CHR_POS` (the schema's position-based join contract
-has no use for a coordinate-less association). The schema's
+**What's loaded.** EBI's GWAS Catalog "all associations" release —
+distributed as a ZIP archive (~60 MB) carrying one TSV
+(`gwas-catalog-download-associations-alt-full.tsv`, ~300 MB
+uncompressed, ~600-700K active associations at the current
+release). The loader streams the TSV out of the ZIP without
+unpacking to disk and chunk-loads into `gwas_catalog_associations`.
+GWAS Catalog ships one row per curated SNP-trait association; the
+loader splits any row whose `SNPS` cell carries multiple
+`;`-separated rsIDs into one DB row per rsID (all sharing the
+same study, PMID, trait, statistics, and sample-size context),
+and drops rows with empty / missing `CHR_ID` or `CHR_POS` (the
+schema's position-based join contract has no use for a
+coordinate-less association). The schema's
 `rsid VARCHAR NOT NULL` reflects that the loader's atomic unit is
 (study, SNP), not (study, association entry).
 
-**Upstream URL.**
-`https://www.ebi.ac.uk/gwas/api/search/downloads/full`. EBI serves
-this canonical endpoint with a 303 redirect to the versioned
-filename of the form
-`gwas_catalog_v1.0-associations_e<NN>_r<YYYY-MM-DD>.tsv` — the
-Ensembl release number (`e<NN>`) and the release date embedded
-directly. The scaffold's `download_to_cache` injects an
-`httpx.Client(follow_redirects=True)` so the redirect lands
-transparently. `URL_VERIFIED_DATE` in
+**Upstream URLs (two-step).** The legacy
+`api/search/downloads/full` endpoint that returned the canonical
+TSV directly has been retired (404 since 2026 Q2). The current
+pattern:
+
+1. `GWAS_STATS_URL` = `https://www.ebi.ac.uk/gwas/api/search/stats`
+   — returns JSON of the form
+   `{"date": "YYYY-MM-DD", "ensemblbuild": "...", ...}`. The
+   `date` field is the release-snapshot date and is the version
+   label (rendered as `YYYY_MM_DD`, matching the ClinVar
+   convention).
+2. `GWAS_ASSOCIATIONS_ZIP_URL` =
+   `https://ftp.ebi.ac.uk/pub/databases/gwas/releases/latest/
+   gwas-catalog-associations_ontology-annotated-full.zip` — the
+   "latest" symlink directory always points to the current
+   release.
+
+The download URL uses `/latest/` rather than the dated FTP path
+because the stats-endpoint `date` (the data freeze date) and the
+FTP directory day (the publication day) typically differ by 1-2
+days, so a strict
+`/releases/{YYYY}/{MM}/{DD}/...` template would 404. The
+race window between the stats call and the download is bounded by
+the weekly release cadence. `URL_VERIFIED_DATE` in
 `backend/src/genome/annotate/loaders/gwas_catalog.py` records when
-the URL was last confirmed to work; bump it on any URL change.
+both URLs were last confirmed to work; bump it on any URL change.
 
-**Version label.** Resolved via HEAD against the canonical URL.
-Strategy (in order):
+**Version label.** Resolved via an audited GET against
+`GWAS_STATS_URL`. The JSON `date` field (defensive: also accepts
+`releasedate`) is rendered as `YYYY_MM_DD` (e.g. `2026_04_27`).
+Failure modes:
 
-1. `Content-Disposition` header → extract the filename and parse
-   the `e<NN>_r<YYYY-MM-DD>` substring.
-2. Final response URL path segment → same regex match.
-3. `Last-Modified` header (RFC 822 form) → rendered as
-   `e0_r<YYYY-MM-DD>` (Ensembl release unknown so `e0`).
-4. Final fallback: today's UTC date as `e0_r<YYYY-MM-DD>`, logged
-   loudly at INFO (`gwas_catalog.version.fallback_today`).
+* `ExternalCallsDisabledError` propagates — privacy gate is
+  fail-closed.
+* Any other `ExternalCallError` (network, HTTP 4xx/5xx)
+  propagates. No silent fallback to "today" — that would either
+  paint a misleading version label or cause a duplicate load.
+  Operator retries instead.
+* Malformed JSON or a missing `date` field raises `ValueError`
+  with the live payload shape, so a future upstream API change
+  surfaces as a fast diagnostic rather than a silent bad write.
 
-The HEAD is the loader's first audited call — placed before the
-download so a fresh refresh against an unchanged release
-short-circuits before re-fetching the TSV body, and a disabled
-master switch surfaces `ExternalCallsDisabledError` after one
-intent + blocked audit pair (matching the 5.1a/b/5.2 audited
+The stats GET is the loader's first audited call — placed before
+the download so a fresh refresh against an unchanged release
+short-circuits before re-fetching the ~60 MB ZIP body, and a
+disabled master switch surfaces `ExternalCallsDisabledError` after
+one intent + blocked audit pair (matching the 5.1a/b/5.2 audited
 refusal pattern).
 
 **Provenance shape.** One file lands at
-`~/.cache/genome/annotations/gwas_catalog/gwas_catalog_associations.tsv`.
+`~/.cache/genome/annotations/gwas_catalog/gwas-catalog-associations_ontology-annotated-full.zip`.
 The `annotation_source_versions` row records `source_url =
-GWAS_ALL_ASSOCIATIONS_URL`, the SHA-256 over the downloaded bytes
-(computed during `download_to_cache`'s streaming write), and the
-byte size from `stat()`. `record_count` is backfilled at the end
-of streaming with the actual inserted row count (the count isn't
-known up front because the parser is a generator and multi-SNP
-fan-outs / coordinate-less drops shift it).
+GWAS_ASSOCIATIONS_ZIP_URL`, the SHA-256 over the downloaded ZIP
+bytes (computed during `download_to_cache`'s streaming write),
+and the byte size from `stat()`. `record_count` is backfilled at
+the end of streaming with the actual inserted row count (the
+count isn't known up front because the parser is a generator and
+multi-SNP fan-outs / coordinate-less drops shift it).
 
 **Runtime + disk.** ~1 GB free recommended under
-`~/.cache/genome/annotations/gwas_catalog/` — the uncompressed TSV
-is ~300 MB; the supersession transaction's MVCC working set on a
-re-run holds both the prior ~600-700K active rows (flipped to
-inactive) and the new ~600-700K active rows in the same WAL window.
+`~/.cache/genome/annotations/gwas_catalog/` — the downloaded ZIP
+is ~60 MB on disk (decompresses to a ~300 MB TSV the loader
+streams in memory); the supersession transaction's MVCC working
+set on a re-run holds both the prior ~600-700K active rows
+(flipped to inactive) and the new ~600-700K active rows in the
+same WAL window.
 End-to-end on a laptop is **under five minutes wall-clock** for a
 first-time load against the current release (the locked perf
 target). Same-version `--force` re-runs are slower because the
@@ -731,16 +756,27 @@ finding-009).
 * **`ExternalCallsDisabledError`** —
   `user_preferences.external_calls_enabled` is `false`. Run
   `genome config set external_calls_enabled true`. The blocked
-  attempt is still recorded in `audit_log` for review; the HEAD
-  request is the loader's first audited call, so a disabled
-  switch surfaces before any download bandwidth is spent.
+  attempt is still recorded in `audit_log` for review; the stats
+  GET is the loader's first audited call, so a disabled switch
+  surfaces before any download bandwidth is spent.
+* **`GWAS Catalog stats response is missing a 'date' / 'releasedate'
+  string field`** — the EBI REST API has shifted. Curl
+  `https://www.ebi.ac.uk/gwas/api/search/stats` directly to see
+  the live payload and update `_parse_stats_release_date` (and
+  the runbook) to match.
+* **`GWAS Catalog cached download ... is not a ZIP archive`** /
+  **`missing expected entry`** — the EBI distribution layout has
+  shifted (the file is no longer a ZIP, or the TSV inside has
+  been renamed). Inspect the cached file at
+  `~/.cache/genome/annotations/gwas_catalog/gwas-catalog-associations_ontology-annotated-full.zip`
+  with `python -c "import zipfile; print(zipfile.ZipFile('....zip').namelist())"`
+  and update `_ZIP_TSV_MEMBER` plus the loader's docstring.
 * **`GWAS Catalog associations TSV is missing expected columns`**
-  — the TSV header has shifted. Open the cached file at
-  `~/.cache/genome/annotations/gwas_catalog/gwas_catalog_associations.tsv`
-  and inspect with `head -1 .../gwas_catalog_associations.tsv |
-  tr '\\t' '\\n' | nl`. Update `_REQUIRED_HEADERS` /
-  `_row_to_parsed_rows` in `gwas_catalog.py` to match and add a
-  CHANGELOG entry.
+  — the TSV header has shifted. Extract the cached file with
+  `python -c "import zipfile; zipfile.ZipFile('....zip').extract('gwas-catalog-download-associations-alt-full.tsv', '/tmp')"`
+  and inspect with `head -1 /tmp/...tsv | tr '\\t' '\\n' | nl`.
+  Update `_REQUIRED_HEADERS` / `_row_to_parsed_rows` in
+  `gwas_catalog.py` to match and add a CHANGELOG entry.
 * **Unexpected drop spike (`dropped_empty_pos` jumps)** — the
   curation process at EBI sometimes ships a batch of
   positionally-unmapped associations during a release. Spot-check
