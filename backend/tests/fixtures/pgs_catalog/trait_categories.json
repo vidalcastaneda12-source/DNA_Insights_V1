@@ -1,0 +1,35 @@
+{
+  "size": 4,
+  "count": 4,
+  "next": null,
+  "previous": null,
+  "results": [
+    {
+      "label": "Body measurement",
+      "efotraits": [
+        {"id": "EFO_0001065", "label": "body mass index", "description": "BMI", "url": "http://www.ebi.ac.uk/efo/EFO_0001065"},
+        {"id": "EFO_0004340", "label": "obesity", "description": "Excessive body fat", "url": "http://www.ebi.ac.uk/efo/EFO_0004340"}
+      ]
+    },
+    {
+      "label": "Cardiovascular disease",
+      "efotraits": [
+        {"id": "EFO_0007777", "label": "coronary artery disease", "description": "CAD", "url": "http://www.ebi.ac.uk/efo/EFO_0007777"},
+        {"id": "EFO_0009999", "label": "hypertension", "description": "Elevated BP", "url": "http://www.ebi.ac.uk/efo/EFO_0009999"}
+      ]
+    },
+    {
+      "label": "Other measurement",
+      "efotraits": [
+        {"id": "EFO_0008888", "label": "type 2 diabetes", "description": "T2DM", "url": "http://www.ebi.ac.uk/efo/EFO_0008888"}
+      ]
+    },
+    {
+      "label": "Other trait",
+      "efotraits": [
+        {"id": "MONDO_0004989", "label": "breast carcinoma", "description": "Breast cancer", "url": "http://purl.obolibrary.org/obo/MONDO_0004989"},
+        {"id": "EFO_0099999", "label": "orphan unreferenced", "description": "category-only trait not referenced by any fixture score", "url": "http://www.ebi.ac.uk/efo/EFO_0099999"}
+      ]
+    }
+  ]
+}

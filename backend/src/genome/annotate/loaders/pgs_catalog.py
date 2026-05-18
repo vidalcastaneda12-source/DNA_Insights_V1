@@ -40,14 +40,23 @@ What sets PGS Catalog apart from the prior four loaders:
   requirement -- the link becomes application-validated, consistent
   with the cross-group references already documented in the schema
   doc).
-* **Four-CSV in-memory join.** The bundle ships four
-  metadata CSVs relevant to score-level state: scores (one row per
-  PGS), publications (one row per PGP ID), efo_traits (one row per
-  EFO term), and performance_metrics (multiple rows per PGS, one
-  per evaluation cohort). The loader parses all four into memory
-  (each is a few thousand rows; the bundle decompresses to ~10-15
-  MB), then joins on the natural keys to produce one
-  ``_ParsedRow`` per PGS.
+* **Four-CSV in-memory join + REST trait_category lookup.** The
+  bundle ships four metadata CSVs relevant to score-level state:
+  scores (one row per PGS), publications (one row per PGP ID),
+  efo_traits (one row per EFO term -- used for the
+  ``orphan_trait_refs`` counter only; the bundle does not carry
+  a category column), and performance_metrics (multiple rows per
+  PGS, one per evaluation cohort). The loader parses all four
+  into memory (each is a few thousand rows; the bundle
+  decompresses to ~10-15 MB), then joins on the natural keys to
+  produce one ``_ParsedRow`` per PGS. The schema's
+  ``trait_category`` column is populated from a fifth audited
+  download: the ``/rest/trait_category/all`` REST endpoint,
+  which returns ~11 categories keyed by EFO ID. The
+  trait_category lookup is independent of the bundle's EFO
+  traits CSV -- a score whose EFO is missing from the bundle
+  (counted as orphan) may still pick up a category from the
+  REST payload, and vice versa.
 * **Performance-metric max reduction.** A single PGS typically has
   multiple performance_metrics entries -- one per evaluation cohort
   / sample set. The schema's ``performance_auc`` and
@@ -59,9 +68,13 @@ What sets PGS Catalog apart from the prior four loaders:
   table, which is a future schema change, not 5.4 work. The runbook
   and docstring call out the auditability trade-off explicitly.
 * **Gzipped TAR bundle, not TAR-in-ZIP.** The upstream bundle is a
-  single-layer ``.tar.gz``; the loader streams CSV entries out of it
-  via :mod:`tarfile` with ``mode="r|gz"`` (the streaming variant).
-  One layer of streaming, not two, but the helper stays inside this
+  single-layer ``.tar.gz``; the loader opens it with
+  :func:`tarfile.open` ``mode="r:gz"`` (random-access read). The
+  streaming variant (``"r|gz"``) returns file objects backed by a
+  non-seekable inner stream, which breaks :class:`io.TextIOWrapper`
+  -- the bundle is small (~4 MB compressed) so non-streaming open
+  is acceptable. One layer of decompression rather than the two
+  layers a TAR-in-ZIP would require. The helper stays inside this
   module per the GWAS Catalog precedent of not promoting
   source-specific archive shapes to ``downloads.py``.
 
@@ -82,6 +95,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import re
 import tarfile
 import time
@@ -153,6 +167,17 @@ PGS_RELEASE_LATEST_URL: Final[str] = "https://www.pgscatalog.org/rest/release/cu
 PGS_METADATA_BUNDLE_URL: Final[str] = (
     "https://ftp.ebi.ac.uk/pub/databases/spot/pgs/metadata/pgs_all_metadata.tar.gz"
 )
+# Trait-category REST endpoint. The metadata bundle's
+# ``pgs_all_metadata_efo_traits.csv`` does not carry a category column,
+# so the loader downloads this REST payload as a sibling JSON file and
+# uses it to populate ``trait_category`` on the joined rows. Payload
+# shape: ``{"count": N, "results": [{"label": "Cancer", "efotraits":
+# [{"id": "EFO_xxx", ...}, ...]}, ...]}``. Pagination is bounded by
+# the ~tens of categories PGS Catalog publishes; the response fits
+# comfortably in one page today. If a future release grows past the
+# REST endpoint's default page size, ``_parse_trait_categories``
+# raises a clear error pointing at pagination as the cause.
+PGS_TRAIT_CATEGORY_URL: Final[str] = "https://www.pgscatalog.org/rest/trait_category/all"
 
 # Canonical filenames inside the bundle. The TAR member names include
 # a leading ``/`` (the upstream packaging used absolute paths), so the
@@ -165,8 +190,10 @@ _PERFORMANCE_MEMBER: Final[str] = "pgs_all_metadata_performance_metrics.csv"
 SOURCE_DB: Final[str] = "pgs_catalog"
 _TARGET_TABLE: Final[str] = "pgs_catalog_scores"
 _CACHE_FILENAME: Final[str] = "pgs_all_metadata.tar.gz"
+_TRAIT_CATEGORY_CACHE_FILENAME: Final[str] = "trait_categories.json"
 _RELEASE_RESOURCE_ID: Final[str] = "pgs_catalog_release_current"
 _DOWNLOAD_RESOURCE_ID: Final[str] = "pgs_catalog_all_metadata"
+_TRAIT_CATEGORY_RESOURCE_ID: Final[str] = "pgs_catalog_trait_categories"
 
 # Chunk size for the bulk insert. Matches the ClinVar / GWAS Catalog
 # loaders. PGS Catalog ships ~5-7K rows at the current release so a
@@ -285,6 +312,7 @@ class _ParseStats:
     rows_read_publications: int = 0
     rows_read_traits: int = 0
     rows_read_performance: int = 0
+    rows_read_trait_categories: int = 0
     orphan_publication_refs: int = 0
     orphan_trait_refs: int = 0
     scores_without_performance: int = 0
@@ -579,12 +607,17 @@ def _parse_traits(
     Increments :attr:`_ParseStats.rows_read_traits` per row.
 
     The upstream EFO traits CSV does not ship a ``Trait Category``
-    column at the verified date; the closest signal is the
+    column at the verified date -- the closest signal is the
     ``Ontology Trait Description``, which is a free-text definition
-    rather than a category label. The loader leaves ``trait_category
-    = None`` for every row at this sub-phase. A future schema or
-    loader change can backfill the column from an EFO hierarchy
-    walk; that's out of scope for 5.4.
+    rather than a category label. The category lookup for the
+    schema's ``trait_category`` column flows through the separate
+    ``/rest/trait_category/all`` REST endpoint instead (see
+    :func:`_parse_trait_categories`). The bundle's EFO traits CSV
+    is still parsed at this stage: the dict's keys drive the
+    ``orphan_trait_refs`` counter on the join (a score whose
+    ``trait_efo`` is missing from the EFO file is the "orphan"
+    signal), keeping the counter's semantics unchanged from the
+    original 5.4 contract.
     """
     reader = csv.DictReader(fh)
     _require_headers(reader, _EFO_TRAITS_REQUIRED_HEADERS, member_name=_EFO_TRAITS_MEMBER)
@@ -595,6 +628,118 @@ def _parse_traits(
         if efo_id is None:
             continue
         out[efo_id] = _RawTraitRow(trait_category=None)
+    return out
+
+
+def _validate_trait_category_payload(payload: object) -> list[object]:
+    """Validate the trait_category JSON envelope and return the ``results`` list.
+
+    Three loud-fail shape checks:
+
+    * Top level must be a JSON object (not a list, string, etc.).
+    * ``next`` must be ``None`` -- the loader assumes the response
+      fits in a single page, which is true at the verified date
+      (~11 categories vs the REST default page size). A non-null
+      ``next`` means the upstream has grown past that page size
+      and the parser needs updating to follow pagination.
+    * ``results`` must be a list.
+    """
+    if not isinstance(payload, dict):
+        msg = (
+            f"PGS Catalog trait_category payload was "
+            f"{type(payload).__name__}, expected a JSON object"
+        )
+        raise ValueError(msg)  # noqa: TRY004 — shape error, not type error
+    if payload.get("next") is not None:
+        msg = (
+            "PGS Catalog trait_category endpoint returned a paginated "
+            f"response (next={payload.get('next')!r}); the loader assumes "
+            "a single-page response and needs updating to follow pagination"
+        )
+        raise ValueError(msg)
+    results = payload.get("results")
+    if not isinstance(results, list):
+        msg = (
+            "PGS Catalog trait_category payload missing 'results' list; "
+            f"got keys {sorted(payload)!r}"
+        )
+        raise ValueError(msg)  # noqa: TRY004 — shape error, not type error
+    return results
+
+
+def _emit_trait_category_entries(
+    label: str,
+    efotraits: list[object],
+    out: dict[str, str],
+) -> int:
+    """Emit ``(efo_id, label)`` pairs into ``out``; return the duplicate count.
+
+    Last-write-wins on duplicate EFOs across categories; the
+    returned count is how many EFOs were already present under a
+    *different* label when this category's traits were emitted.
+    """
+    duplicates = 0
+    for trait in efotraits:
+        if not isinstance(trait, dict):
+            continue
+        efo_id = trait.get("id")
+        if not isinstance(efo_id, str) or not efo_id:
+            continue
+        if efo_id in out and out[efo_id] != label:
+            duplicates += 1
+        out[efo_id] = label
+    return duplicates
+
+
+def _parse_trait_categories(
+    path: Path,
+    stats: _ParseStats,
+) -> dict[str, str]:
+    """Load PGS Catalog's trait-category JSON into a ``efo_id`` → ``category`` dict.
+
+    The REST endpoint returns paginated JSON of the shape::
+
+        {
+          "count": 11,
+          "next": null,
+          "results": [
+            {"label": "Cardiovascular disease",
+             "efotraits": [
+                 {"id": "EFO_0001645", "label": "...", ...},
+                 ...
+             ]},
+            ...
+          ]
+        }
+
+    The function reads the cached JSON payload, walks every category,
+    and emits one ``(efo_id, category_label)`` pair per EFO trait in
+    the category. If the same EFO appears in multiple categories
+    (uncommon but possible), the last one wins; the counter
+    :attr:`_ParseStats.extra` tracks the duplicate count under the
+    key ``efo_in_multiple_categories``.
+
+    Bumps :attr:`_ParseStats.rows_read_trait_categories` per category
+    row. See :func:`_validate_trait_category_payload` for the
+    loud-fail shape checks.
+    """
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    results = _validate_trait_category_payload(payload)
+    out: dict[str, str] = {}
+    duplicate_efos = 0
+    for entry in results:
+        if not isinstance(entry, dict):
+            continue
+        label = entry.get("label")
+        efotraits = entry.get("efotraits")
+        if not isinstance(label, str) or not label:
+            continue
+        if not isinstance(efotraits, list):
+            continue
+        stats.rows_read_trait_categories += 1
+        duplicate_efos += _emit_trait_category_entries(label, efotraits, out)
+    if duplicate_efos:
+        stats.extra["efo_in_multiple_categories"] = duplicate_efos
     return out
 
 
@@ -663,14 +808,15 @@ def _reduce_performance(
     )
 
 
-def _join_metadata(
+def _join_metadata(  # noqa: PLR0913 — the five per-source dicts + stats are not collapsible
     scores: dict[str, _RawScoreRow],
     publications: dict[str, _RawPublicationRow],
     traits: dict[str, _RawTraitRow],
     performance: dict[str, list[_RawPerformanceRow]],
+    trait_categories: dict[str, str],
     stats: _ParseStats,
 ) -> list[_ParsedRow]:
-    """Join the four per-file dicts into one ``_ParsedRow`` per PGS.
+    """Join the per-file dicts into one ``_ParsedRow`` per PGS.
 
     Counters bumped on this path:
 
@@ -679,17 +825,26 @@ def _join_metadata(
       ``publication_pmid`` / ``publication_doi`` / ``publication_year``
       set to ``None``.
     * ``orphan_trait_refs`` -- a score references an EFO ID missing
-      from the traits dict. The row still emits with
-      ``trait_category=None`` (and remember
-      :func:`_parse_traits` leaves ``trait_category`` ``None`` for
-      every entry today; the counter is structural even though it
-      currently fires on every score with a present EFO too).
+      from the bundle's EFO traits dict. The row still emits with
+      ``trait_category=None`` (the orphan counter and the category
+      lookup are independent; an orphan score may still pick up a
+      category if its EFO ID is in the REST trait_category payload).
     * ``scores_without_performance`` -- a score has no entries in
       the performance dict. Both performance columns emit ``None``.
     * ``multi_cohort_performance`` -- a score had two or more
       performance entries; the max reduction collapsed them. The
       counter reads as "how many scores had multi-cohort
       performance data".
+
+    ``trait_categories`` is the ``efo_id`` → ``category_label`` dict
+    sourced from PGS Catalog's ``/rest/trait_category/all`` endpoint
+    (see :func:`_parse_trait_categories`). The bundle's
+    ``pgs_all_metadata_efo_traits.csv`` does not carry a category
+    column, so this is the only source for ``trait_category``. A
+    score whose ``trait_efo`` is not in ``trait_categories`` leaves
+    that column NULL but does not affect any of the counters --
+    the REST endpoint's coverage is independent of the orphan
+    bookkeeping driven by the bundle's EFO file.
 
     Output is sorted by ``pgs_id`` ascending so the
     ``score_record_id`` allocation order is deterministic across
@@ -704,14 +859,15 @@ def _join_metadata(
             publication = publications.get(score.publication_id)
             if publication is None:
                 stats.orphan_publication_refs += 1
-        # Trait join.
-        trait_category: str | None = None
-        if score.trait_efo is not None:
-            trait_row = traits.get(score.trait_efo)
-            if trait_row is None:
-                stats.orphan_trait_refs += 1
-            else:
-                trait_category = trait_row.trait_category
+        # Trait orphan signal (driven by the bundle's EFO file).
+        # The category lookup uses the REST trait_category dict
+        # independently; the two sources may have slightly different
+        # coverage and that is fine.
+        if score.trait_efo is not None and score.trait_efo not in traits:
+            stats.orphan_trait_refs += 1
+        trait_category: str | None = (
+            trait_categories.get(score.trait_efo) if score.trait_efo is not None else None
+        )
         # Performance reduction.
         entries = performance.get(pgs_id, [])
         if not entries:
@@ -1180,15 +1336,21 @@ def refresh(force: bool) -> RefreshResult:  # noqa: FBT001 — registry RefreshF
        row in ``annotation_source_versions`` already names the
        resolved ``(source_db='pgs_catalog', version)`` and ``force``
        is ``False``.
-    3. Download the ``pgs_all_metadata.tar.gz`` bundle from the EBI
-       FTP via the audited
+    3a. Download the ``pgs_all_metadata.tar.gz`` bundle from the
+       EBI FTP via the audited
        :func:`genome.annotate.downloads.download_to_cache`
        (skip-if-exists by default; ``force=True`` re-downloads).
+    3b. Download the ``/rest/trait_category/all`` REST payload as
+       a sibling JSON file. The bundle's EFO traits CSV does not
+       carry a category column, so this second audited download
+       supplies the ``efo_id`` → ``category`` dict that populates
+       the schema's ``trait_category`` field.
     4. Inside one DuckDB transaction: upsert
        ``annotation_source_versions``, deactivate prior PGS Catalog
        rows via :func:`_deactivate_for_refresh`, open the bundle
        four times (one per metadata file) and parse each into its
-       in-memory dict, run :func:`_join_metadata` to produce the
+       in-memory dict, parse the trait_category JSON into a
+       separate dict, run :func:`_join_metadata` to produce the
        joined ``list[_ParsedRow]``, chunk-insert via
        :func:`_stream_bulk_insert`, and update the version row's
        ``record_count`` once the streaming completes.
@@ -1219,7 +1381,8 @@ def refresh(force: bool) -> RefreshResult:  # noqa: FBT001 — registry RefreshF
                 was_already_current=True,
             )
 
-    # 3. Download (skip-if-exists; force re-downloads).
+    # 3. Download the metadata bundle (skip-if-exists; force
+    # re-downloads).
     download_result = download_to_cache(
         SOURCE_DB,
         PGS_METADATA_BUNDLE_URL,
@@ -1231,6 +1394,23 @@ def refresh(force: bool) -> RefreshResult:  # noqa: FBT001 — registry RefreshF
         "pgs_catalog.download.audited",
         sha256=download_result.sha256[:16],
         size_bytes=download_result.size_bytes,
+    )
+
+    # 3b. Download the trait_category REST payload. The bundle's
+    # EFO traits CSV does not carry a category column, so this
+    # second audited download supplies the dictionary that
+    # populates the schema's ``trait_category`` field.
+    trait_categories_download = download_to_cache(
+        SOURCE_DB,
+        PGS_TRAIT_CATEGORY_URL,
+        _TRAIT_CATEGORY_CACHE_FILENAME,
+        resource_id=_TRAIT_CATEGORY_RESOURCE_ID,
+        force=force,
+    )
+    log.info(
+        "pgs_catalog.trait_categories.audited",
+        sha256=trait_categories_download.sha256[:16],
+        size_bytes=trait_categories_download.size_bytes,
     )
 
     # 4. Single-transaction load. Mirrors the GWAS Catalog shape:
@@ -1260,9 +1440,8 @@ def refresh(force: bool) -> RefreshResult:  # noqa: FBT001 — registry RefreshF
                 source_version_id=source_version_id,
                 force=force,
             )
-            # Four bundle scans, one per metadata file. The
-            # streaming TAR helper is forward-only, so each file
-            # needs its own ``_open_csv_from_bundle`` context.
+            # Four bundle scans, one per metadata file, plus one
+            # JSON load for the trait_category payload.
             with _open_csv_from_bundle(
                 download_result.path,
                 _SCORES_MEMBER,
@@ -1283,7 +1462,18 @@ def refresh(force: bool) -> RefreshResult:  # noqa: FBT001 — registry RefreshF
                 _PERFORMANCE_MEMBER,
             ) as fh:
                 performance = _parse_performance(fh, stats)
-            joined = _join_metadata(scores, publications, traits, performance, stats)
+            trait_categories = _parse_trait_categories(
+                trait_categories_download.path,
+                stats,
+            )
+            joined = _join_metadata(
+                scores,
+                publications,
+                traits,
+                performance,
+                trait_categories,
+                stats,
+            )
             inserted = _stream_bulk_insert(
                 conn,
                 joined,
@@ -1322,6 +1512,7 @@ def refresh(force: bool) -> RefreshResult:  # noqa: FBT001 — registry RefreshF
         rows_read_publications=stats.rows_read_publications,
         rows_read_traits=stats.rows_read_traits,
         rows_read_performance=stats.rows_read_performance,
+        rows_read_trait_categories=stats.rows_read_trait_categories,
         orphan_publication_refs=stats.orphan_publication_refs,
         orphan_trait_refs=stats.orphan_trait_refs,
         scores_without_performance=stats.scores_without_performance,
@@ -1354,6 +1545,7 @@ register_loader(SOURCE_DB, refresh)
 __all__ = [
     "PGS_METADATA_BUNDLE_URL",
     "PGS_RELEASE_LATEST_URL",
+    "PGS_TRAIT_CATEGORY_URL",
     "SOURCE_DB",
     "URL_VERIFIED_DATE",
     "refresh",

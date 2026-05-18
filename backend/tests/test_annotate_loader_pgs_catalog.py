@@ -37,11 +37,13 @@ from typer.testing import CliRunner
 from genome.annotate import downloads as annotate_downloads
 from genome.annotate.loaders import pgs_catalog as pgs_loader
 from genome.annotate.loaders.pgs_catalog import (
+    _CACHE_FILENAME,
     _CHUNK_SIZE,
     _EFO_TRAITS_MEMBER,
     _PERFORMANCE_MEMBER,
     _PUBLICATIONS_MEMBER,
     _SCORES_MEMBER,
+    _TRAIT_CATEGORY_CACHE_FILENAME,
     _empty_to_none,
     _first_efo_id,
     _format_version,
@@ -55,6 +57,7 @@ from genome.annotate.loaders.pgs_catalog import (
     _parse_publications,
     _parse_release_payload,
     _parse_scores,
+    _parse_trait_categories,
     _parse_traits,
     _parse_year,
     _ParsedRow,
@@ -145,28 +148,53 @@ def _build_bundle(tmp_path: Path, fixture_dir: Path = _FIXTURE_DIR) -> Path:
 def _patch_download_to_cache(
     monkeypatch: pytest.MonkeyPatch,
     bundle_path: Path,
+    trait_categories_path: Path | None = None,
 ) -> dict[str, int]:
-    """Replace ``download_to_cache`` with a stub returning the prebuilt bundle."""
+    """Replace ``download_to_cache`` with a filename-aware stub.
+
+    The loader issues two audited downloads per refresh: the metadata
+    bundle (``pgs_all_metadata.tar.gz``) and the trait-category REST
+    payload (``trait_categories.json``). The stub dispatches on the
+    caller's ``filename`` argument and returns the appropriate path
+    + hash for each. ``trait_categories_path`` defaults to the
+    checked-in fixture file when omitted.
+    """
     import hashlib  # noqa: PLC0415
 
-    counter: dict[str, int] = {"calls": 0}
-    digest = hashlib.sha256(bundle_path.read_bytes()).hexdigest()
-    size = bundle_path.stat().st_size
+    if trait_categories_path is None:
+        trait_categories_path = _FIXTURE_DIR / "trait_categories.json"
+
+    counter: dict[str, int] = {"calls": 0, "bundle_calls": 0, "trait_cat_calls": 0}
+    bundle_digest = hashlib.sha256(bundle_path.read_bytes()).hexdigest()
+    bundle_size = bundle_path.stat().st_size
+    cat_digest = hashlib.sha256(trait_categories_path.read_bytes()).hexdigest()
+    cat_size = trait_categories_path.stat().st_size
 
     def _stub(
         source_db: str,  # noqa: ARG001
         url: str,  # noqa: ARG001
-        filename: str,  # noqa: ARG001
+        filename: str,
         *,
         resource_id: str,  # noqa: ARG001
         force: bool = False,  # noqa: ARG001
     ) -> annotate_downloads.DownloadResult:
         counter["calls"] += 1
-        return annotate_downloads.DownloadResult(
-            path=bundle_path,
-            sha256=digest,
-            size_bytes=size,
-        )
+        if filename == _TRAIT_CATEGORY_CACHE_FILENAME:
+            counter["trait_cat_calls"] += 1
+            return annotate_downloads.DownloadResult(
+                path=trait_categories_path,
+                sha256=cat_digest,
+                size_bytes=cat_size,
+            )
+        if filename == _CACHE_FILENAME:
+            counter["bundle_calls"] += 1
+            return annotate_downloads.DownloadResult(
+                path=bundle_path,
+                sha256=bundle_digest,
+                size_bytes=bundle_size,
+            )
+        msg = f"unexpected download filename in stub: {filename!r}"
+        raise AssertionError(msg)
 
     monkeypatch.setattr(pgs_loader, "download_to_cache", _stub)
     return counter
@@ -527,13 +555,128 @@ def test_parse_publications_extracts_year() -> None:
 
 
 def test_parse_traits_emits_none_category_per_design() -> None:
-    """The upstream EFO CSV has no Trait Category column; loader emits None."""
+    """The bundle's EFO CSV has no Trait Category column; loader emits None.
+
+    The category for the schema's ``trait_category`` field flows through
+    the separate ``_parse_trait_categories`` REST helper instead.
+    """
     stats = _ParseStats()
     with (_FIXTURE_DIR / _EFO_TRAITS_MEMBER).open(encoding="utf-8", newline="") as fh:
         traits = _parse_traits(fh, stats)
     expected_total = 8
     assert len(traits) == expected_total
     assert all(t.trait_category is None for t in traits.values())
+
+
+# ---------------------------------------------------------------------------
+# Trait-category REST payload parser.
+# ---------------------------------------------------------------------------
+
+
+def test_parse_trait_categories_happy_path() -> None:
+    """The fixture JSON resolves into the expected efo_id → category map."""
+    stats = _ParseStats()
+    cats = _parse_trait_categories(_FIXTURE_DIR / "trait_categories.json", stats)
+    assert cats["EFO_0001065"] == "Body measurement"
+    assert cats["EFO_0007777"] == "Cardiovascular disease"
+    assert cats["MONDO_0004989"] == "Other trait"
+    assert cats["EFO_0008888"] == "Other measurement"
+    expected_categories = 4
+    assert stats.rows_read_trait_categories == expected_categories
+
+
+def test_parse_trait_categories_raises_on_pagination(tmp_path: Path) -> None:
+    """A paginated response surfaces a clear loud-fail error."""
+    payload_path = tmp_path / "paginated.json"
+    payload_path.write_text(
+        json.dumps(
+            {
+                "count": 50,
+                "next": "https://www.pgscatalog.org/rest/trait_category/all?offset=50",
+                "previous": None,
+                "results": [],
+            },
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="paginated response"):
+        _parse_trait_categories(payload_path, _ParseStats())
+
+
+def test_parse_trait_categories_raises_on_missing_results(tmp_path: Path) -> None:
+    """A payload without a ``results`` list raises with the live keys."""
+    payload_path = tmp_path / "no_results.json"
+    payload_path.write_text(json.dumps({"count": 0, "next": None}), encoding="utf-8")
+    with pytest.raises(ValueError, match="missing 'results'"):
+        _parse_trait_categories(payload_path, _ParseStats())
+
+
+def test_parse_trait_categories_raises_on_non_object_payload(tmp_path: Path) -> None:
+    """A JSON array (not object) at the top level raises a clear error."""
+    payload_path = tmp_path / "array.json"
+    payload_path.write_text(json.dumps([]), encoding="utf-8")
+    with pytest.raises(ValueError, match="expected a JSON object"):
+        _parse_trait_categories(payload_path, _ParseStats())
+
+
+def test_parse_trait_categories_records_duplicate_efos(tmp_path: Path) -> None:
+    """An EFO listed in two categories is counted under ``extra``."""
+    payload_path = tmp_path / "dup.json"
+    payload_path.write_text(
+        json.dumps(
+            {
+                "count": 2,
+                "next": None,
+                "previous": None,
+                "results": [
+                    {
+                        "label": "Category A",
+                        "efotraits": [{"id": "EFO_0001", "label": "x"}],
+                    },
+                    {
+                        "label": "Category B",
+                        "efotraits": [{"id": "EFO_0001", "label": "x"}],
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+    stats = _ParseStats()
+    cats = _parse_trait_categories(payload_path, stats)
+    # Last write wins -- "Category B" overrides "Category A".
+    assert cats["EFO_0001"] == "Category B"
+    assert stats.extra.get("efo_in_multiple_categories") == 1
+
+
+def test_parse_trait_categories_skips_malformed_entries(tmp_path: Path) -> None:
+    """Non-dict results, missing labels, missing efotraits lists are skipped."""
+    payload_path = tmp_path / "messy.json"
+    payload_path.write_text(
+        json.dumps(
+            {
+                "count": 4,
+                "next": None,
+                "previous": None,
+                "results": [
+                    "not-a-dict",
+                    {"label": "", "efotraits": [{"id": "EFO_X", "label": "x"}]},
+                    {"label": "Cat", "efotraits": "not-a-list"},
+                    {
+                        "label": "Cat",
+                        "efotraits": [
+                            "not-a-dict",
+                            {"id": "", "label": "empty"},
+                            {"id": "EFO_OK", "label": "good"},
+                        ],
+                    },
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+    cats = _parse_trait_categories(payload_path, _ParseStats())
+    assert cats == {"EFO_OK": "Cat"}
 
 
 def test_parse_performance_groups_by_pgs_id() -> None:
@@ -656,9 +799,10 @@ def _load_fixture_into_dicts() -> tuple[
     dict[str, object],
     dict[str, object],
     dict[str, list[_RawPerformanceRow]],
+    dict[str, str],
     _ParseStats,
 ]:
-    """Run the four per-file parsers against the on-disk fixture."""
+    """Run the four per-file parsers + the trait_category JSON loader against the fixture."""
     stats = _ParseStats()
     with (_FIXTURE_DIR / _SCORES_MEMBER).open(encoding="utf-8", newline="") as fh:
         scores = _parse_scores(fh, stats)
@@ -668,13 +812,24 @@ def _load_fixture_into_dicts() -> tuple[
         traits = _parse_traits(fh, stats)
     with (_FIXTURE_DIR / _PERFORMANCE_MEMBER).open(encoding="utf-8", newline="") as fh:
         performance = _parse_performance(fh, stats)
-    return scores, publications, traits, performance, stats  # type: ignore[return-value]
+    trait_categories = _parse_trait_categories(
+        _FIXTURE_DIR / "trait_categories.json",
+        stats,
+    )
+    return scores, publications, traits, performance, trait_categories, stats  # type: ignore[return-value]
 
 
 def test_join_metadata_emits_one_row_per_pgs() -> None:
     """10 scores → 10 ``_ParsedRow`` instances, sorted by pgs_id."""
-    scores, publications, traits, performance, stats = _load_fixture_into_dicts()
-    rows = _join_metadata(scores, publications, traits, performance, stats)  # type: ignore[arg-type]
+    scores, publications, traits, performance, trait_categories, stats = _load_fixture_into_dicts()
+    rows = _join_metadata(
+        scores,
+        publications,
+        traits,
+        performance,
+        trait_categories,
+        stats,  # type: ignore[arg-type]
+    )
     expected_total = 10
     assert len(rows) == expected_total
     assert [r.pgs_id for r in rows] == [f"PGS{i:06d}" for i in range(1, 11)]
@@ -682,8 +837,15 @@ def test_join_metadata_emits_one_row_per_pgs() -> None:
 
 def test_join_metadata_orphan_publication_counter() -> None:
     """PGS000004 references PGP999999 → orphan_publication_refs=1; row still emits."""
-    scores, publications, traits, performance, stats = _load_fixture_into_dicts()
-    rows = _join_metadata(scores, publications, traits, performance, stats)  # type: ignore[arg-type]
+    scores, publications, traits, performance, trait_categories, stats = _load_fixture_into_dicts()
+    rows = _join_metadata(
+        scores,
+        publications,
+        traits,
+        performance,
+        trait_categories,
+        stats,  # type: ignore[arg-type]
+    )
     assert stats.orphan_publication_refs == 1
     pgs4 = next(r for r in rows if r.pgs_id == "PGS000004")
     assert pgs4.publication_pmid is None
@@ -693,15 +855,29 @@ def test_join_metadata_orphan_publication_counter() -> None:
 
 def test_join_metadata_orphan_trait_counter() -> None:
     """PGS000005 references EFO_9999999 → orphan_trait_refs=1."""
-    scores, publications, traits, performance, stats = _load_fixture_into_dicts()
-    _join_metadata(scores, publications, traits, performance, stats)  # type: ignore[arg-type]
+    scores, publications, traits, performance, trait_categories, stats = _load_fixture_into_dicts()
+    _join_metadata(
+        scores,
+        publications,
+        traits,
+        performance,
+        trait_categories,
+        stats,  # type: ignore[arg-type]
+    )
     assert stats.orphan_trait_refs == 1
 
 
 def test_join_metadata_scores_without_performance_counter() -> None:
     """PGS000006 has no performance entries → scores_without_performance=1."""
-    scores, publications, traits, performance, stats = _load_fixture_into_dicts()
-    rows = _join_metadata(scores, publications, traits, performance, stats)  # type: ignore[arg-type]
+    scores, publications, traits, performance, trait_categories, stats = _load_fixture_into_dicts()
+    rows = _join_metadata(
+        scores,
+        publications,
+        traits,
+        performance,
+        trait_categories,
+        stats,  # type: ignore[arg-type]
+    )
     assert stats.scores_without_performance == 1
     pgs6 = next(r for r in rows if r.pgs_id == "PGS000006")
     assert pgs6.performance_auc is None
@@ -710,8 +886,15 @@ def test_join_metadata_scores_without_performance_counter() -> None:
 
 def test_join_metadata_multi_cohort_counter_and_max_reduction() -> None:
     """PGS000007 has 3 cohorts → counter incremented, max applied per column."""
-    scores, publications, traits, performance, stats = _load_fixture_into_dicts()
-    rows = _join_metadata(scores, publications, traits, performance, stats)  # type: ignore[arg-type]
+    scores, publications, traits, performance, trait_categories, stats = _load_fixture_into_dicts()
+    rows = _join_metadata(
+        scores,
+        publications,
+        traits,
+        performance,
+        trait_categories,
+        stats,  # type: ignore[arg-type]
+    )
     expected_multi = 2
     assert stats.multi_cohort_performance == expected_multi  # PGS000007 + PGS000009
     pgs7 = next(r for r in rows if r.pgs_id == "PGS000007")
@@ -721,8 +904,15 @@ def test_join_metadata_multi_cohort_counter_and_max_reduction() -> None:
 
 def test_join_metadata_max_of_non_null_when_split() -> None:
     """PGS000009 has one cohort with only AUC and one with only OR → max picks each."""
-    scores, publications, traits, performance, stats = _load_fixture_into_dicts()
-    rows = _join_metadata(scores, publications, traits, performance, stats)  # type: ignore[arg-type]
+    scores, publications, traits, performance, trait_categories, stats = _load_fixture_into_dicts()
+    rows = _join_metadata(
+        scores,
+        publications,
+        traits,
+        performance,
+        trait_categories,
+        stats,  # type: ignore[arg-type]
+    )
     pgs9 = next(r for r in rows if r.pgs_id == "PGS000009")
     assert pgs9.performance_auc == pytest.approx(0.78)
     assert pgs9.performance_or_per_sd == pytest.approx(2.20)
@@ -730,8 +920,15 @@ def test_join_metadata_max_of_non_null_when_split() -> None:
 
 def test_join_metadata_publication_year_propagates_to_row() -> None:
     """The publications join contributes ``publication_year`` to each row."""
-    scores, publications, traits, performance, stats = _load_fixture_into_dicts()
-    rows = _join_metadata(scores, publications, traits, performance, stats)  # type: ignore[arg-type]
+    scores, publications, traits, performance, trait_categories, stats = _load_fixture_into_dicts()
+    rows = _join_metadata(
+        scores,
+        publications,
+        traits,
+        performance,
+        trait_categories,
+        stats,  # type: ignore[arg-type]
+    )
     pgs1 = next(r for r in rows if r.pgs_id == "PGS000001")
     expected_year_1 = 2015
     assert pgs1.publication_year == expected_year_1
@@ -739,6 +936,67 @@ def test_join_metadata_publication_year_propagates_to_row() -> None:
     # PGS000010 shares PGP000001 with PGS000001 -- same publication metadata.
     assert pgs10.publication_year == expected_year_1
     assert pgs10.publication_pmid == "10000001"
+
+
+def test_join_metadata_populates_trait_category_from_rest_dict() -> None:
+    """Every score whose EFO is in the trait_category JSON gets a category."""
+    scores, publications, traits, performance, trait_categories, stats = _load_fixture_into_dicts()
+    rows = _join_metadata(
+        scores,
+        publications,
+        traits,
+        performance,
+        trait_categories,
+        stats,  # type: ignore[arg-type]
+    )
+    by_id = {r.pgs_id: r for r in rows}
+    assert by_id["PGS000001"].trait_category == "Body measurement"  # EFO_0001065
+    assert by_id["PGS000003"].trait_category == "Body measurement"  # first EFO of multi
+    assert by_id["PGS000007"].trait_category == "Cardiovascular disease"
+    assert by_id["PGS000010"].trait_category == "Other trait"  # MONDO_0004989
+    # EFO_9999999 isn't in the trait_category dict → category stays NULL.
+    assert by_id["PGS000005"].trait_category is None
+
+
+def test_join_metadata_trait_category_independent_of_orphan_trait_counter() -> None:
+    """Orphan trait refs and trait_category coverage are independent signals."""
+    scores, publications, traits, performance, trait_categories, stats = _load_fixture_into_dicts()
+    rows = _join_metadata(
+        scores,
+        publications,
+        traits,
+        performance,
+        trait_categories,
+        stats,  # type: ignore[arg-type]
+    )
+    # PGS000005 has EFO_9999999: missing from both the bundle's EFO traits
+    # (orphan_trait_refs += 1) AND from the REST trait_category dict
+    # (trait_category = None). The fact that both happen for the same row
+    # is coincidence -- they are tracked independently and the loader
+    # does NOT short-circuit one based on the other.
+    pgs5 = next(r for r in rows if r.pgs_id == "PGS000005")
+    assert pgs5.trait_category is None
+    assert stats.orphan_trait_refs == 1
+
+
+def test_join_metadata_rest_dict_orphans_dont_increment_orphan_trait_counter() -> None:
+    """A trait_category entry whose EFO isn't in any score is a quiet no-op."""
+    scores, publications, traits, performance, trait_categories, stats = _load_fixture_into_dicts()
+    # EFO_0099999 is in the trait_categories fixture but no fixture score
+    # references it. It must not affect any counter and must not produce
+    # a row.
+    assert "EFO_0099999" in trait_categories
+    rows = _join_metadata(
+        scores,
+        publications,
+        traits,
+        performance,
+        trait_categories,
+        stats,  # type: ignore[arg-type]
+    )
+    assert all(r.pgs_id != "EFO_0099999" for r in rows)
+    expected_orphans = 1
+    assert stats.orphan_trait_refs == expected_orphans  # unchanged from PGS000005
 
 
 # ---------------------------------------------------------------------------
@@ -859,7 +1117,7 @@ def test_refresh_full_transaction_inserts_expected_rows(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Fixture → 1 source_version row, 10 active rows."""
+    """Fixture → 1 source_version row, 10 active rows, trait_category populated."""
     init_databases()
     bundle = _build_bundle(tmp_path)
     _patch_download_to_cache(monkeypatch, bundle)
@@ -883,11 +1141,28 @@ def test_refresh_full_transaction_inserts_expected_rows(
             "SELECT version, record_count, is_current FROM annotation_source_versions"
             " WHERE source_db = 'pgs_catalog'",
         ).fetchall()
+        # End-to-end regression for the trait_category=0 finding: the
+        # category dict from the REST endpoint must populate the schema
+        # column on at least some rows post-load.
+        distinct_category = conn.execute(
+            "SELECT COUNT(DISTINCT trait_category) FROM pgs_catalog_scores"
+            " WHERE is_active = TRUE AND trait_category IS NOT NULL",
+        ).fetchone()
+        with_category = conn.execute(
+            "SELECT COUNT(*) FROM pgs_catalog_scores"
+            " WHERE is_active = TRUE AND trait_category IS NOT NULL",
+        ).fetchone()
     assert active is not None
     assert active[0] == _EXPECTED_INSERTED
     assert inactive is not None
     assert inactive[0] == 0
     assert version_rows == [("2026_05_07", _EXPECTED_INSERTED, True)]
+    expected_distinct_categories = 4  # Body measurement, CVD, Other measurement, Other trait
+    expected_rows_with_category = 9  # all 10 except PGS000005 (EFO_9999999)
+    assert distinct_category is not None
+    assert distinct_category[0] == expected_distinct_categories
+    assert with_category is not None
+    assert with_category[0] == expected_rows_with_category
 
 
 def test_refresh_writes_expected_column_values(
@@ -1157,6 +1432,12 @@ def test_pgs_release_latest_url_matches_canonical() -> None:
 def test_pgs_metadata_bundle_url_matches_canonical_ftp() -> None:
     assert pgs_loader.PGS_METADATA_BUNDLE_URL == (
         "https://ftp.ebi.ac.uk/pub/databases/spot/pgs/metadata/pgs_all_metadata.tar.gz"
+    )
+
+
+def test_pgs_trait_category_url_matches_canonical_rest() -> None:
+    assert pgs_loader.PGS_TRAIT_CATEGORY_URL == (
+        "https://www.pgscatalog.org/rest/trait_category/all"
     )
 
 

@@ -818,7 +818,7 @@ identically to the larger loaders. This sub-phase loads the
 score-level metadata only; the per-score variant weights table
 (`pgs_score_weights`) is Phase 6 work.
 
-**Upstream URLs (two-step).**
+**Upstream URLs (three-step).**
 
 1. `PGS_RELEASE_LATEST_URL` =
    `https://www.pgscatalog.org/rest/release/current/` -- REST
@@ -836,10 +836,24 @@ score-level metadata only; the per-score variant weights table
    `download_to_cache` injects an
    `httpx.Client(follow_redirects=True)` so any FTP/CDN redirect
    lands transparently on disk.
+3. `PGS_TRAIT_CATEGORY_URL` =
+   `https://www.pgscatalog.org/rest/trait_category/all` -- REST
+   endpoint returning JSON of the form
+   `{"count": N, "results": [{"label": "Cardiovascular disease",
+   "efotraits": [{"id": "EFO_xxx", ...}, ...]}, ...]}`. The bundle's
+   EFO traits CSV does not carry a category column, so this third
+   audited download supplies the dictionary that populates
+   `pgs_catalog_scores.trait_category`. The endpoint returns ~11
+   categories totaling ~700 EFO traits at the verification date,
+   well inside the REST default page size; the loader raises a
+   loud-fail error if the response carries a `next` URL so a
+   future growth past one page surfaces as a regression rather
+   than silently truncated data.
 
 `URL_VERIFIED_DATE` in
 `backend/src/genome/annotate/loaders/pgs_catalog.py` records when
-both URLs were last confirmed to work; bump it on any URL change.
+all three URLs were last confirmed to work; bump it on any URL
+change.
 
 **Version label.** Resolved via an audited GET against
 `PGS_RELEASE_LATEST_URL`. The JSON `date` field (defensive: also
@@ -887,7 +901,8 @@ here -- a same-version `--force` re-run completes well inside
 the same target.
 
 **Multi-file join contract.** The bundle contains four CSVs we
-join on natural keys:
+join on natural keys, plus a fifth REST payload that supplies
+the trait_category column:
 
 1. `pgs_all_metadata_scores.csv` -- one row per PGS, keyed by
    `Polygenic Score (PGS) ID`. The loader's atomic unit. The
@@ -904,17 +919,29 @@ join on natural keys:
    the four-digit year out of the publication's
    `Publication Date` ISO string).
 3. `pgs_all_metadata_efo_traits.csv` -- one row per EFO/MONDO/HP
-   term. Joins to the scores via the (possibly-truncated)
-   trait EFO ID. The upstream EFO traits CSV does **not** ship
-   a `Trait Category` column at the verified date; the loader
-   leaves `trait_category = NULL` for every row. A future
-   schema or loader change can backfill the column from an EFO
-   hierarchy walk; that's out of scope for 5.4.
+   term (~670 rows). Joins to the scores via the (possibly-
+   truncated) trait EFO ID. The upstream EFO traits CSV does
+   **not** ship a category column; this file is parsed only to
+   drive the `orphan_trait_refs` counter (a score whose EFO ID
+   is missing from the bundle's EFO list is the "orphan"
+   signal). The schema's `trait_category` column flows through
+   the trait_category REST endpoint instead (see #5 below).
 4. `pgs_all_metadata_performance_metrics.csv` -- multiple rows
    per PGS, one per evaluation cohort / sample set. Joins to
    the scores via `Evaluated Score`. The per-cohort entries
    are collapsed into the schema's two scalar columns via the
    max reduction documented below.
+5. `/rest/trait_category/all` (cached at `trait_categories.json`)
+   -- the REST payload providing the `efo_id` → `category_label`
+   dict. The bundle's EFO traits CSV does not carry a category
+   column at the verified date, so this REST endpoint is the
+   sole source of `trait_category`. ~11 categories totaling
+   ~700 EFO traits at the verified date. A score whose
+   `trait_efo` is in this dict gets the category; otherwise
+   `trait_category = NULL`. The lookup is independent of the
+   bundle's EFO traits CSV -- a score whose EFO ID is missing
+   from the bundle (counted as `orphan_trait_refs`) may still
+   pick up a category from the REST payload, and vice versa.
 
 Counters surfaced on the end-of-load summary:
 
@@ -923,9 +950,10 @@ Counters surfaced on the end-of-load summary:
   `publication_pmid` / `publication_doi` / `publication_year`
   set to NULL.
 * `orphan_trait_refs` -- a score's trait EFO ID is missing from
-  the EFO traits dict. The row still emits with
-  `trait_category = NULL` (which, given the prior point, would
-  be NULL anyway today).
+  the bundle's EFO traits CSV. The row still emits. The category
+  lookup is independent of this counter -- a score whose EFO ID
+  isn't in the bundle's EFO list may still receive a category if
+  it's in the REST trait_category dict.
 * `scores_without_performance` -- a score has no entries in the
   performance dict. Both performance columns emit NULL.
 
@@ -1006,20 +1034,24 @@ compare across releases:
   duplicates)
 * `distinct_trait_efo`
 * `distinct_publication_pmid`
-* `distinct_trait_category` (zero today; the EFO traits CSV
-  doesn't ship a category column)
+* `distinct_trait_category` -- populated from the
+  `/rest/trait_category/all` REST payload (~11 categories at
+  the verified date). A value of 0 means the trait_category
+  download or parse failed (or returned an empty results list)
+  -- treat as a regression signal.
 * `with_performance_auc` -- count where
   `performance_auc IS NOT NULL`
 * `with_performance_or_per_sd`
 
 Plus parser stats: `rows_read_scores`, `rows_read_publications`,
 `rows_read_traits`, `rows_read_performance`,
-`orphan_publication_refs`, `orphan_trait_refs`,
-`scores_without_performance`, `multi_cohort_performance`,
-`truncated_trait_efo`. A drift in any of the active / distinct
-counts on a re-run against the same release is a regression
-signal; verify against the captured numbers in the 5.4
-CHANGELOG entry once real-data verification lands.
+`rows_read_trait_categories`, `orphan_publication_refs`,
+`orphan_trait_refs`, `scores_without_performance`,
+`multi_cohort_performance`, `truncated_trait_efo`. A drift in
+any of the active / distinct counts on a re-run against the
+same release is a regression signal; verify against the
+captured numbers in the 5.4 CHANGELOG entry once real-data
+verification lands.
 
 **Real-data verification commands.**
 
@@ -1030,9 +1062,10 @@ genome annotate refresh --source pgs_catalog
 
 Capture from the `pgs_catalog.refresh.complete` structlog line:
 `active_total`, `distinct_pgs_id`, `distinct_trait_efo`,
-`distinct_publication_pmid`, `with_performance_auc`,
-`with_performance_or_per_sd`, plus parser stats and wall-clock.
-Expected ranges (refine after the first real-data load):
+`distinct_publication_pmid`, `distinct_trait_category`,
+`with_performance_auc`, `with_performance_or_per_sd`, plus
+parser stats and wall-clock. Expected ranges (refine after the
+first real-data load):
 
 | Metric | Expected range |
 |---|---|
@@ -1040,6 +1073,7 @@ Expected ranges (refine after the first real-data load):
 | `distinct_pgs_id` | 5,000 – 8,000 |
 | `distinct_trait_efo` | 600 – 1,200 |
 | `distinct_publication_pmid` | 500 – 1,200 |
+| `distinct_trait_category` | 8 – 15 (~11 at verified date) |
 | `with_performance_auc` | 3,000 – 6,000 |
 | `with_performance_or_per_sd` | 2,500 – 5,000 |
 | `multi_cohort_performance` | 1,500 – 4,000 |
@@ -1077,6 +1111,23 @@ checkpoint penalty does not materialize).
   `head -1` the relevant CSV; update the
   `_*_REQUIRED_HEADERS` tuple and any column-name references
   in `pgs_catalog.py` to match, then add a CHANGELOG entry.
+* **`PGS Catalog trait_category payload missing 'results'
+  list`** / **`PGS Catalog trait_category endpoint returned a
+  paginated response`** -- the `/rest/trait_category/all` API
+  has shifted shape or grown past one page. Inspect the cached
+  payload at
+  `~/.cache/genome/annotations/pgs_catalog/trait_categories.json`
+  and update `_validate_trait_category_payload` to match; if
+  the issue is pagination, update `_parse_trait_categories` to
+  follow the `next` URL.
+* **`distinct_trait_category=0` in the structlog summary** --
+  the trait_category dict came back empty. Either the REST
+  endpoint returned an empty `results` list (verify with
+  `curl https://www.pgscatalog.org/rest/trait_category/all`)
+  or every score's `trait_efo` is missing from the dict (verify
+  that the dict's EFO IDs overlap with the scores' EFO IDs). A
+  drift away from the locked ~11-category range deserves a
+  manual look at the upstream release notes.
 * **Unexpected `orphan_publication_refs` spike** -- the
   publications CSV has dropped entries that the scores CSV
   still references. The drift is upstream; if the spike

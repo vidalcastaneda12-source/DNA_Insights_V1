@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Sub-phase 5.4 follow-up — `distinct_trait_category=0` bug.**
+  Real-data verification of the original 5.4 loader (PR #39)
+  passed every locked drift identifier except
+  `distinct_trait_category`, which came back at 0 despite the
+  loader reading 670 EFO trait rows. Diagnosis: the bundle's
+  `pgs_all_metadata_efo_traits.csv` does not ship a category
+  column (live header confirmed:
+  `Ontology Trait ID,Ontology Trait Label,Ontology Trait
+  Description,Ontology URL`). The category is published via a
+  separate REST endpoint, `/rest/trait_category/all`, which
+  returns ~11 categories totaling ~700 EFO traits. Fix: add a
+  third audited download (`PGS_TRAIT_CATEGORY_URL`,
+  `_TRAIT_CATEGORY_RESOURCE_ID`,
+  `_TRAIT_CATEGORY_CACHE_FILENAME`) that fetches the REST
+  payload into `~/.cache/genome/annotations/pgs_catalog/
+  trait_categories.json`, plus a `_parse_trait_categories`
+  helper that walks the paginated envelope and emits a
+  `efo_id` → `category_label` dict. The new dict threads into
+  `_join_metadata` as a fifth argument; the existing
+  `orphan_trait_refs` counter still keys off the bundle's EFO
+  traits file (semantics unchanged), and the category lookup
+  is independent -- a score whose EFO ID is missing from the
+  bundle (counted as orphan) may still pick up a category from
+  the REST payload, and vice versa. The parser raises a clear
+  `ValueError` on pagination (the response would silently
+  truncate otherwise) and on missing-results-list / non-object
+  shapes. New `rows_read_trait_categories` parser stat surfaces
+  on the end-of-load summary. Tests: 10 new tests in
+  `backend/tests/test_annotate_loader_pgs_catalog.py` covering
+  the trait_category JSON parser (happy path, pagination
+  guard, missing results, non-object payload, duplicate EFOs
+  across categories, malformed entries), the join's
+  trait_category population (categories sourced from REST
+  dict, orphan-trait counter independence, REST-only EFOs
+  don't pollute scores), the URL constant, and an end-to-end
+  refresh assertion that `distinct_trait_category > 0` after
+  a fixture load. New fixture
+  `backend/tests/fixtures/pgs_catalog/trait_categories.json`
+  carries 4 categories covering the 10-score fixture's EFO IDs
+  (Body measurement, Cardiovascular disease, Other measurement,
+  Other trait) plus one orphan EFO not referenced by any
+  fixture score. Runbook updated: the URL section now lists
+  three audited URLs (release-current + bundle + trait_category),
+  the multi-file join contract calls out the REST endpoint as
+  the sole `trait_category` source, the drift-identifier note
+  expects ~11 categories at the verified date (with `=0`
+  treated as a regression signal), and new troubleshooting
+  paths cover the pagination / shape-drift / empty-results
+  failure modes. The bug was a column-not-present case (option
+  3 from the diagnosis tree's "scan other CSVs / endpoints"
+  branch); the fix preserves the original loader's atomicity
+  and audit-log shape and adds one round-trip per refresh.
+  No schema rebuild required. (PR #39 follow-up)
+
 ### Added
 - **Sub-phase 5.4 — PGS Catalog metadata loader.** New
   `genome.annotate.loaders.pgs_catalog` registers a `refresh`
