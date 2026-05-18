@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Pre-5.5 — unified supersession deactivate path + finding-009
+  cost-model correction.** Real-data verification of PR #41 against
+  the existing ClinVar `2026_05_10` release showed the
+  `supersession_update_start` / `_complete` events never fired on
+  `--force` re-runs. Root cause: every Phase-5 loader's
+  `_deactivate_for_refresh` branched on `force` and ran an inline
+  `UPDATE ... WHERE is_active = TRUE` on the force path, bypassing
+  the shared helper that emits the events. This PR unifies the path
+  in all five loaders (ClinVar, PharmGKB, CPIC, GWAS Catalog, PGS
+  Catalog):
+  - `genome.annotate.supersession.deactivate_prior_versions` gained
+    a keyword-only `force_all_active: bool = False` parameter.
+    Default mode (existing behavior) deactivates rows with
+    `source_version_id < new_source_version_id AND is_active =
+    TRUE`. Force mode deactivates rows with `is_active = TRUE` (no
+    version filter), preserving the same-version `--force`
+    semantics. Both modes emit `supersession_update_start` /
+    `_complete` with `force_all_active` in the payload.
+  - Each loader's `_deactivate_for_refresh` is now a one-line
+    pass-through that calls
+    `deactivate_prior_versions(..., force_all_active=force)`. The
+    wrapper stays so each loader has a clean per-source seam.
+  - `docs/findings/finding-009` items #4, #5, #13, #14 amended in
+    place with correction notes; new items #15 / #16 carry the
+    corrected per-phase decomposition (UPDATE ~17-19 min, COMMIT
+    ~270s, explicit CHECKPOINT ~1-6 ms — the explicit CHECKPOINT
+    measures a no-op because COMMIT already flushed synchronously)
+    and the coverage-gap discovery. The supersession atomicity
+    contract (CLAUDE.md #7) is unchanged: the UPDATE remains one
+    statement in one transaction with the chunked INSERT. No schema
+    changes; no `rm -rf data/` rebuild required.
+
 ### Added
 - **Pre-5.5 — supersession observability + `--skip-if-same-version`.**
   Addresses finding-009 #9, #11, and #14 ahead of sub-phase 5.5

@@ -67,19 +67,45 @@ interpolation safe.
 """
 
 
-def deactivate_prior_versions(
+def deactivate_prior_versions(  # noqa: PLR0913 — all knobs keyword-only and named at every call site
     conn: DuckDBPyConnection,
     *,
     table: str,
     new_source_version_id: int,
     has_superseded_by: bool,
     source_name: str | None = None,
+    force_all_active: bool = False,
 ) -> int:
-    """Flip ``is_active = FALSE`` on every row older than ``new_source_version_id``.
+    """Flip ``is_active = FALSE`` on rows ahead of a new active set.
+
+    Two modes, gated by ``force_all_active``:
+
+    * ``force_all_active=False`` (default, the normal new-version
+      path). Deactivates only rows whose ``source_version_id`` is
+      strictly less than ``new_source_version_id`` and ``is_active``
+      is ``TRUE``. This is what every routine refresh against a fresh
+      upstream release runs.
+    * ``force_all_active=True`` (the ``--force`` re-run path).
+      Deactivates every row whose ``is_active`` is ``TRUE``, with no
+      ``source_version_id`` filter. ``upsert_source_version`` is
+      idempotent on ``(source_db, version)`` and returns the existing
+      id when the version label matches, so on a same-version
+      ``--force`` re-run the prior active rows share the new
+      ``source_version_id`` and the default predicate would skip them,
+      leaving duplicate active rows after the bulk insert. The force
+      mode sweeps them instead. Callers pass
+      ``force_all_active=force`` so the supersession path is unified
+      across normal and force refreshes — both go through this helper,
+      both emit the same per-phase events, both honor
+      ``has_superseded_by``.
 
     When ``has_superseded_by`` is ``True``, the deactivated rows are
     additionally tagged with ``superseded_by = new_source_version_id``
-    so the supersession chain is followable.
+    so the supersession chain is followable. On a same-version
+    ``--force`` re-run that means the prior rows point at the same
+    ``source_version_id`` they were inserted under — the "self
+    supersession" shape ClinVar's same-version refresh produces today
+    (finding-009 #15 / #16).
 
     Returns the number of rows touched. Runs in one statement; the
     caller decides transaction boundaries (typically pairing this with
@@ -90,11 +116,15 @@ def deactivate_prior_versions(
     ``prior_active_rows`` count) and ``supersession_update_complete``
     (with ``rows_deactivated`` and ``duration_ms``) so the UPDATE
     phase's wall-clock is measurable from the log stream alone. Per
-    finding-009, the UPDATE on a 9M-row ClinVar refresh can take
-    several minutes; emitting these events makes that window legible
-    rather than silent. ``source_name`` is included in the event
-    payload when provided so a multi-source refresh can be drilled
-    into by source.
+    finding-009, the UPDATE on a 9M-row ClinVar refresh can take many
+    minutes (~17-19 min on the real-data verification machine);
+    emitting these events makes that window legible rather than
+    silent. ``source_name`` is included in the event payload when
+    provided so a multi-source refresh can be drilled into by source.
+    Both events carry ``force_all_active`` so the log stream
+    distinguishes the two modes — on a same-version ``--force`` re-run
+    the prior count and deactivated count match the full active set,
+    not just the strictly-older subset.
 
     Raises :class:`ValueError` when ``table`` is not in
     :data:`_SUPERSESSION_TABLES`.
@@ -105,10 +135,19 @@ def deactivate_prior_versions(
         )
         raise ValueError(msg)
 
+    # The WHERE clause and matching params differ between modes; the
+    # pre-UPDATE COUNT(*) uses the same predicate so ``prior_active_rows``
+    # reflects what's actually about to be deactivated.
+    if force_all_active:
+        where_clause = "is_active = TRUE"
+        count_params: list[object] = []
+    else:
+        where_clause = "source_version_id < ? AND is_active = TRUE"
+        count_params = [new_source_version_id]
+
     prior_row = conn.execute(
-        f"SELECT COUNT(*) FROM {table} "  # noqa: S608 — table is whitelisted above
-        "WHERE source_version_id < ? AND is_active = TRUE",
-        [new_source_version_id],
+        f"SELECT COUNT(*) FROM {table} WHERE {where_clause}",  # noqa: S608 — table is whitelisted above
+        count_params,
     ).fetchone()
     prior_active_rows = int(prior_row[0]) if prior_row is not None else 0
 
@@ -118,21 +157,19 @@ def deactivate_prior_versions(
         table=table,
         new_source_version_id=new_source_version_id,
         prior_active_rows=prior_active_rows,
+        force_all_active=force_all_active,
     )
 
     set_clause = "is_active = FALSE"
+    update_params: list[object] = []
     if has_superseded_by:
         set_clause += ", superseded_by = ?"
-        params: list[object] = [new_source_version_id, new_source_version_id]
-    else:
-        params = [new_source_version_id]
+        update_params.append(new_source_version_id)
+    update_params.extend(count_params)
 
-    sql = (
-        f"UPDATE {table} SET {set_clause} "  # noqa: S608 — table is whitelisted above
-        "WHERE source_version_id < ? AND is_active = TRUE"
-    )
+    sql = f"UPDATE {table} SET {set_clause} WHERE {where_clause}"  # noqa: S608 — table is whitelisted above
     started = time.monotonic()
-    row = conn.execute(sql, params).fetchone()
+    row = conn.execute(sql, update_params).fetchone()
     duration_ms = int((time.monotonic() - started) * 1000)
     # DuckDB returns the number of changed rows as a one-tuple on the
     # UPDATE result. Treat a missing/empty row defensively as zero so a
@@ -146,6 +183,7 @@ def deactivate_prior_versions(
         new_source_version_id=new_source_version_id,
         rows_deactivated=touched,
         duration_ms=duration_ms,
+        force_all_active=force_all_active,
     )
     return touched
 
