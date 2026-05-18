@@ -44,3 +44,6 @@ out/
 *.swp
 *.swo
 Thumbs.db
+
+# Claude Code (per-user local config and runtime state)
+.claude/
