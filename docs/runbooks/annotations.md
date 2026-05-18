@@ -801,6 +801,309 @@ finding-009).
   source_db = 'gwas_catalog' AND version = <the affected
   version>` before retrying.
 
+### PGS Catalog (sub-phase 5.4)
+
+**What's loaded.** PGS Catalog's score-level metadata bundle
+(`pgs_all_metadata.tar.gz`, ~4 MB gzipped TAR carrying eight per-
+resource CSVs plus a sibling Excel workbook the loader ignores).
+The loader parses the four CSVs relevant to score-level state --
+scores (one row per PGS), publications (one row per PGP ID),
+EFO traits (one row per ontology term), and performance metrics
+(multiple rows per PGS, one per evaluation cohort / sample set) --
+joins them client-side on the natural keys, and chunk-loads one
+joined row per PGS into `pgs_catalog_scores`. PGS Catalog ships
+~5-7K scores at the current release, so a full refresh fits in a
+single chunk; the chunked-insert code path is exercised
+identically to the larger loaders. This sub-phase loads the
+score-level metadata only; the per-score variant weights table
+(`pgs_score_weights`) is Phase 6 work.
+
+**Upstream URLs (two-step).**
+
+1. `PGS_RELEASE_LATEST_URL` =
+   `https://www.pgscatalog.org/rest/release/current/` -- REST
+   endpoint returning JSON of the form
+   `{"date": "YYYY-MM-DD", "score_count": N, "performance_count":
+   N, "publication_count": N, ...}`. The `date` field is the
+   release-snapshot date and is the version label (rendered as
+   `YYYY_MM_DD`, matching the ClinVar / GWAS Catalog convention).
+   Note the endpoint is `/release/current/`, not
+   `/release/latest/` -- the latter returned HTTP 500 at the
+   verification date.
+2. `PGS_METADATA_BUNDLE_URL` =
+   `https://ftp.ebi.ac.uk/pub/databases/spot/pgs/metadata/
+   pgs_all_metadata.tar.gz` -- the canonical "latest" bundle.
+   `download_to_cache` injects an
+   `httpx.Client(follow_redirects=True)` so any FTP/CDN redirect
+   lands transparently on disk.
+
+`URL_VERIFIED_DATE` in
+`backend/src/genome/annotate/loaders/pgs_catalog.py` records when
+both URLs were last confirmed to work; bump it on any URL change.
+
+**Version label.** Resolved via an audited GET against
+`PGS_RELEASE_LATEST_URL`. The JSON `date` field (defensive: also
+accepts `release_date` and `releasedate`) is rendered as
+`YYYY_MM_DD` (e.g. `2026_05_07`). Failure modes mirror GWAS
+Catalog's stats resolver:
+
+* `ExternalCallsDisabledError` propagates -- privacy gate is
+  fail-closed.
+* Any other `ExternalCallError` (network, HTTP 4xx/5xx)
+  propagates. No silent fallback to "today" -- that would either
+  paint a misleading version label or cause a duplicate load.
+  Operator retries instead.
+* Malformed JSON or a missing `date` field raises `ValueError`
+  with the live payload shape, so a future upstream API change
+  surfaces as a fast diagnostic rather than a silent bad write.
+
+The release-current GET is the loader's first audited call --
+placed before the download so a fresh refresh against an
+unchanged release short-circuits before re-fetching the ~4 MB
+bundle, and a disabled master switch surfaces
+`ExternalCallsDisabledError` after one intent + blocked audit
+pair (matching the 5.1a/b/5.2/5.3 audited refusal pattern).
+
+**Provenance shape.** One file lands at
+`~/.cache/genome/annotations/pgs_catalog/pgs_all_metadata.tar.gz`.
+The `annotation_source_versions` row records `source_url =
+PGS_METADATA_BUNDLE_URL`, the SHA-256 over the downloaded TAR
+bytes (computed during `download_to_cache`'s streaming write),
+and the byte size from `stat()`. `record_count` is backfilled at
+the end of streaming with the actual inserted row count (one row
+per PGS in the bundle).
+
+**Runtime + disk.** ~1 GB free recommended under
+`~/.cache/genome/annotations/pgs_catalog/` -- the bundle is ~4 MB
+compressed (decompresses to ~15 MB; the loader holds it in
+memory rather than unpacking to disk); the supersession
+transaction's MVCC working set on a re-run holds both the prior
+~5-7K active rows (flipped to inactive) and the new ~5-7K active
+rows in the same WAL window. End-to-end on a laptop is **under
+30 seconds wall-clock** (the project-wide routine-refresh target
+documented in CLAUDE.md). The bundle is small enough that the
+finding-009 ClinVar-scale UPDATE+checkpoint cost is not a factor
+here -- a same-version `--force` re-run completes well inside
+the same target.
+
+**Multi-file join contract.** The bundle contains four CSVs we
+join on natural keys:
+
+1. `pgs_all_metadata_scores.csv` -- one row per PGS, keyed by
+   `Polygenic Score (PGS) ID`. The loader's atomic unit. The
+   `Mapped Trait(s) (EFO ID)` column can carry multiple comma-
+   separated IDs when a score is mapped to several ontology
+   terms; the schema's `trait_efo VARCHAR` is single-valued so
+   the loader keeps the first ID (the curators' primary
+   mapping) and counts the truncations
+   (`truncated_trait_efo`).
+2. `pgs_all_metadata_publications.csv` -- one row per
+   PGS Publication ID (PGP). Joins to the scores via
+   `PGS Publication (PGP) ID`. Contributes `publication_pmid`,
+   `publication_doi`, and `publication_year` (the loader pulls
+   the four-digit year out of the publication's
+   `Publication Date` ISO string).
+3. `pgs_all_metadata_efo_traits.csv` -- one row per EFO/MONDO/HP
+   term. Joins to the scores via the (possibly-truncated)
+   trait EFO ID. The upstream EFO traits CSV does **not** ship
+   a `Trait Category` column at the verified date; the loader
+   leaves `trait_category = NULL` for every row. A future
+   schema or loader change can backfill the column from an EFO
+   hierarchy walk; that's out of scope for 5.4.
+4. `pgs_all_metadata_performance_metrics.csv` -- multiple rows
+   per PGS, one per evaluation cohort / sample set. Joins to
+   the scores via `Evaluated Score`. The per-cohort entries
+   are collapsed into the schema's two scalar columns via the
+   max reduction documented below.
+
+Counters surfaced on the end-of-load summary:
+
+* `orphan_publication_refs` -- a score's PGP ID is missing from
+  the publications dict. The row still emits with
+  `publication_pmid` / `publication_doi` / `publication_year`
+  set to NULL.
+* `orphan_trait_refs` -- a score's trait EFO ID is missing from
+  the EFO traits dict. The row still emits with
+  `trait_category = NULL` (which, given the prior point, would
+  be NULL anyway today).
+* `scores_without_performance` -- a score has no entries in the
+  performance dict. Both performance columns emit NULL.
+
+**Performance-metric max reduction (auditability trade-off).**
+A single PGS typically has multiple `performance_metrics` rows
+(one per evaluation cohort). The schema's `performance_auc` and
+`performance_or_per_sd` columns are scalars, so the loader
+collapses the per-cohort entries via `max(non-NULL values)` per
+column independently:
+
+* `performance_auc = max(e.auc for e in entries if e.auc is not
+  None)`, or NULL if all entries lack AUC.
+* `performance_or_per_sd = max(e.or_per_sd for e in entries if
+  e.or_per_sd is not None)`, or NULL if all entries lack OR.
+
+The max reduction is the simplest auditable rule at this scale,
+not the most statistically honest one. Picking the
+best-performing cohort always over-states what the typical user
+will see, and the cohort selection (European vs East Asian vs
+multi-ancestry) is often the bigger contributor to that number
+than any modelling choice. Honest per-cohort reporting would
+require a separate `pgs_catalog_performance` table -- a future
+schema change, not 5.4 work. The end-of-load summary surfaces
+`multi_cohort_performance` (count of scores with > 1 cohort
+entry) so downstream consumers can see when the scalar is the
+output of a reduction vs a single-entry source.
+
+The PGS Catalog OR column ships as `Odds Ratio (OR)` without
+the "per SD" qualifier; the schema's column name
+`performance_or_per_sd` reflects the typical PRS convention
+(report OR per 1-SD increase in score) but the loader does not
+enforce that semantics. Consumers querying
+`performance_or_per_sd` should expect generic OR for PGS where
+the source paper reported a different scaling; the OR column
+is a coarse signal, not a calibration target.
+
+**Field-level coercions.**
+
+* `Polygenic Score (PGS) ID` → `pgs_id`; missing → row dropped
+  silently (schema's `pgs_id NOT NULL` would reject it anyway).
+* `PGS Name` → `pgs_name`; missing → NULL.
+* `Reported Trait` → `trait_reported`; missing → NULL.
+* `Mapped Trait(s) (EFO ID)` → split on `,`, keep first; count
+  the truncation. Empty / `NR` / `-` / `NA` → NULL.
+* `Number of Variants` → `variants_total INTEGER`; non-numeric
+  / `NR` → NULL.
+* `PGS Publication (PGP) ID` → publication join key.
+* `Ancestry Distribution (%) - Source of Variant Associations
+  (GWAS)` → `ancestry_distribution` (verbatim free-text).
+* `Ancestry Distribution (%) - Score Development/Training` →
+  `reference_population` (verbatim free-text).
+* `Publication Date` → `publication_year INTEGER` (regex match
+  against `YYYY-MM-DD` or `YYYY/MM/DD`; non-matching → NULL).
+* `Publication (PMID)` and `PubMed ID (PMID)` → string preserved
+  (the schema uses VARCHAR even though the source value is an
+  integer).
+* `digital object identifier (doi)` → `publication_doi`;
+  missing → NULL.
+* `Odds Ratio (OR)` → leading-number extractor pulls the point
+  estimate out of `"<estimate> [<lower>,<upper>]"`. Pure-text
+  cells (`NR`, `[NR]`, "Hazard ratio not reported", etc.) →
+  NULL.
+* `Area Under the Receiver-Operating Characteristic Curve
+  (AUROC)` → same extractor.
+* `Ontology Trait ID` → EFO/MONDO/HP key; used to look up the
+  trait row (the loader does not derive `trait_id` separately
+  -- the EFO ID stored on the score IS the trait identifier).
+* `weights_storage` → not assigned by the loader; the schema
+  default `'overlapping_only'` applies to every inserted row.
+
+**Drift identifiers (locked).** The end-of-load structlog
+summary emits the durable signals real-data verification will
+compare across releases:
+
+* `active_total` -- `COUNT(*) WHERE is_active`
+* `distinct_pgs_id` -- `COUNT(DISTINCT pgs_id) WHERE is_active`
+  (should equal `active_total` post-load if no upstream PGS
+  duplicates)
+* `distinct_trait_efo`
+* `distinct_publication_pmid`
+* `distinct_trait_category` (zero today; the EFO traits CSV
+  doesn't ship a category column)
+* `with_performance_auc` -- count where
+  `performance_auc IS NOT NULL`
+* `with_performance_or_per_sd`
+
+Plus parser stats: `rows_read_scores`, `rows_read_publications`,
+`rows_read_traits`, `rows_read_performance`,
+`orphan_publication_refs`, `orphan_trait_refs`,
+`scores_without_performance`, `multi_cohort_performance`,
+`truncated_trait_efo`. A drift in any of the active / distinct
+counts on a re-run against the same release is a regression
+signal; verify against the captured numbers in the 5.4
+CHANGELOG entry once real-data verification lands.
+
+**Real-data verification commands.**
+
+```
+genome config set external_calls_enabled true
+genome annotate refresh --source pgs_catalog
+```
+
+Capture from the `pgs_catalog.refresh.complete` structlog line:
+`active_total`, `distinct_pgs_id`, `distinct_trait_efo`,
+`distinct_publication_pmid`, `with_performance_auc`,
+`with_performance_or_per_sd`, plus parser stats and wall-clock.
+Expected ranges (refine after the first real-data load):
+
+| Metric | Expected range |
+|---|---|
+| `active_total` | 5,000 – 8,000 |
+| `distinct_pgs_id` | 5,000 – 8,000 |
+| `distinct_trait_efo` | 600 – 1,200 |
+| `distinct_publication_pmid` | 500 – 1,200 |
+| `with_performance_auc` | 3,000 – 6,000 |
+| `with_performance_or_per_sd` | 2,500 – 5,000 |
+| `multi_cohort_performance` | 1,500 – 4,000 |
+| First-load wall-clock | < 30 seconds |
+
+Re-run with `--force` to exercise the same-version supersession
+path. Expected deltas: the same `active_total` lands under the
+same `source_version_id`; an equal count of prior rows flips to
+`is_active = FALSE`. Wall-clock stays inside the 30 s target
+(PGS Catalog is small enough that the finding-009 UPDATE+
+checkpoint penalty does not materialize).
+
+**Troubleshooting.**
+
+* **`ExternalCallsDisabledError`** --
+  `user_preferences.external_calls_enabled` is `false`. Run
+  `genome config set external_calls_enabled true`. The blocked
+  attempt is still recorded in `audit_log` for review; the
+  release-current GET is the loader's first audited call, so a
+  disabled switch surfaces before any download bandwidth is
+  spent.
+* **`PGS Catalog release response is missing a 'date' /
+  'release_date' / 'releasedate' string field`** -- the
+  `/rest/release/current/` API has shifted. Curl
+  `https://www.pgscatalog.org/rest/release/current/` directly
+  to see the live payload and update `_parse_release_payload`
+  (and this runbook) to match.
+* **`PGS Catalog bundle ... missing expected entry`** -- the
+  bundle layout has shifted (a CSV has been renamed or the
+  packaging changed). Inspect the cached bundle with
+  `tar -tzf ~/.cache/genome/annotations/pgs_catalog/pgs_all_metadata.tar.gz`
+  and update the per-file `_*_MEMBER` constants to match.
+* **`PGS Catalog CSV ... is missing expected columns`** -- a
+  per-file header has shifted. Extract the cached bundle and
+  `head -1` the relevant CSV; update the
+  `_*_REQUIRED_HEADERS` tuple and any column-name references
+  in `pgs_catalog.py` to match, then add a CHANGELOG entry.
+* **Unexpected `orphan_publication_refs` spike** -- the
+  publications CSV has dropped entries that the scores CSV
+  still references. The drift is upstream; if the spike
+  persists across releases, contact PGS Catalog support.
+* **Unexpected `scores_without_performance` spike** -- a
+  release shipped scores without paired performance rows.
+  Probably benign; verify against the upstream release notes.
+* **Disk space failure mid-supersession** -- the supersession
+  transaction holds both the prior active rowset (now flipped
+  to inactive) and the new active rowset in the same WAL
+  window, so the on-disk DuckDB file grows during a re-run.
+  PGS Catalog at ~5-7K rows is much smaller than the ClinVar
+  case but free ~100 MB before running a refresh against the
+  prior corpus.
+* **Recovery after a partial-failure refresh.** Same shape as
+  PharmGKB / CPIC / ClinVar / GWAS Catalog: if the bulk insert
+  raises, the loader rolls the per-source insert (every chunk
+  + the prior-version deactivation) back atomically and
+  best-effort deletes the orphan `annotation_source_versions`
+  row that `upsert_source_version` had already committed. A
+  subsequent `refresh` starts clean. If the cleanup itself
+  fails (the loader logs
+  `pgs_catalog.cleanup.orphan_version_row_delete_failed`),
+  manually `DELETE FROM annotation_source_versions WHERE
+  source_db = 'pgs_catalog' AND version = <the affected
+  version>` before retrying.
+
 ## Audit log review
 
 The full audit trail for a refresh is in `app.db.audit_log`. Group by

@@ -1,0 +1,9 @@
+Ontology Trait ID,Ontology Trait Label,Ontology Trait Description,Ontology URL
+EFO_0001065,body mass index,A measure of body fat based on weight relative to height.,http://www.ebi.ac.uk/efo/EFO_0001065
+EFO_0004340,obesity,A clinical condition with excessive body fat accumulation.,http://www.ebi.ac.uk/efo/EFO_0004340
+EFO_0000384,glycemic trait,Trait related to blood glucose homeostasis.,http://www.ebi.ac.uk/efo/EFO_0000384
+EFO_0007777,coronary artery disease,Disease of the coronary arteries.,http://www.ebi.ac.uk/efo/EFO_0007777
+EFO_0008888,type II diabetes mellitus,A metabolic disorder characterized by insulin resistance.,http://www.ebi.ac.uk/efo/EFO_0008888
+EFO_0009999,hypertension,Persistently elevated arterial blood pressure.,http://www.ebi.ac.uk/efo/EFO_0009999
+MONDO_0004989,breast carcinoma,A malignant neoplasm of the breast.,http://purl.obolibrary.org/obo/MONDO_0004989
+EFO_0000123,unreferenced orphan trait,Orphan trait used to ensure unreferenced rows are tolerated.,http://www.ebi.ac.uk/efo/EFO_0000123

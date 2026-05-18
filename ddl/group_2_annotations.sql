@@ -300,7 +300,8 @@ CREATE INDEX idx_cpic_drug      ON cpic_guidelines(drug_name);
 -- pgs_catalog_scores — score definitions
 
 CREATE TABLE pgs_catalog_scores (
-  pgs_id                VARCHAR PRIMARY KEY,     -- 'PGS000001' etc.
+  score_record_id       BIGINT PRIMARY KEY,      -- surrogate PK, app-allocated
+  pgs_id                VARCHAR NOT NULL,        -- 'PGS000001' etc.
   pgs_name              VARCHAR,
 
   -- Trait
@@ -331,13 +332,15 @@ CREATE TABLE pgs_catalog_scores (
   is_active             BOOLEAN DEFAULT TRUE
 );
 
+CREATE INDEX idx_pgs_id    ON pgs_catalog_scores(pgs_id, is_active);
 CREATE INDEX idx_pgs_trait ON pgs_catalog_scores(trait_efo);
 
 -- pgs_score_weights — overlapping-only weights
 
 CREATE TABLE pgs_score_weights (
   weight_id             BIGINT PRIMARY KEY,
-  pgs_id                VARCHAR NOT NULL REFERENCES pgs_catalog_scores(pgs_id),
+  pgs_id                VARCHAR NOT NULL,        -- application-validated
+                                                 -- against pgs_catalog_scores(pgs_id)
 
   rsid                  VARCHAR,
   chrom                 chromosome_enum,
