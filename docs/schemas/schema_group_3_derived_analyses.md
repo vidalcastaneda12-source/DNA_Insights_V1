@@ -99,7 +99,8 @@ CREATE TYPE archaic_source_enum AS ENUM ('neanderthal', 'denisovan');
 CREATE TABLE derived_pgs (
   derived_pgs_id        BIGINT PRIMARY KEY,
   analysis_run_id       BIGINT NOT NULL REFERENCES analysis_runs(analysis_run_id),
-  pgs_id                VARCHAR NOT NULL REFERENCES pgs_catalog_scores(pgs_id),
+  pgs_id                VARCHAR NOT NULL,          -- application-validated
+                                                   -- against pgs_catalog_scores(pgs_id)
 
   -- Score
   raw_score             DOUBLE NOT NULL,

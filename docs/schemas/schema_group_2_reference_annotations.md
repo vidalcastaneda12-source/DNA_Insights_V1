@@ -362,7 +362,8 @@ CREATE INDEX idx_cpic_drug      ON cpic_guidelines(drug_name);
 
 ```sql
 CREATE TABLE pgs_catalog_scores (
-  pgs_id                VARCHAR PRIMARY KEY,     -- 'PGS000001' etc.
+  score_record_id       BIGINT PRIMARY KEY,      -- surrogate PK, app-allocated
+  pgs_id                VARCHAR NOT NULL,        -- 'PGS000001' etc.
   pgs_name              VARCHAR,
 
   -- Trait
@@ -393,6 +394,7 @@ CREATE TABLE pgs_catalog_scores (
   is_active             BOOLEAN DEFAULT TRUE
 );
 
+CREATE INDEX idx_pgs_id    ON pgs_catalog_scores(pgs_id, is_active);
 CREATE INDEX idx_pgs_trait ON pgs_catalog_scores(trait_efo);
 ```
 
@@ -401,7 +403,8 @@ CREATE INDEX idx_pgs_trait ON pgs_catalog_scores(trait_efo);
 ```sql
 CREATE TABLE pgs_score_weights (
   weight_id             BIGINT PRIMARY KEY,
-  pgs_id                VARCHAR NOT NULL REFERENCES pgs_catalog_scores(pgs_id),
+  pgs_id                VARCHAR NOT NULL,        -- application-validated
+                                                 -- against pgs_catalog_scores(pgs_id)
 
   rsid                  VARCHAR,
   chrom                 chromosome_enum,
@@ -657,16 +660,30 @@ GROUP BY vm.variant_id, vm.rsid, vm.chrom, vm.pos_grch38,
 
 ---
 
-## Cross-group references — application-validated
+## Application-validated references
 
-DuckDB does not support `ALTER TABLE ... ADD CONSTRAINT`, so the following links across
-groups are validated in application code rather than enforced by the database — consistent
-with the SQLite (group 5) pattern where cross-DB references are also application-validated:
+DuckDB does not support `ALTER TABLE ... ADD CONSTRAINT`, and its FK constraint additionally
+requires that the target column carry a `PRIMARY KEY` or `UNIQUE` constraint. The following
+links are therefore validated in application code rather than enforced by the database —
+consistent with the SQLite (group 5) pattern where cross-DB references are also
+application-validated:
 
 - `insight_variants.variant_id` → `variants_master.variant_id` (group 4 → group 1)
 - `insight_genes.gene_symbol` → `genes.gene_symbol` (group 4 → group 2)
 - `insight_traits.trait_id` → `traits.trait_id` (group 4 → group 2)
 - `vep_consequences.variant_id` → `variants_master.variant_id` (group 2 → group 1)
+- `pgs_score_weights.pgs_id` → `pgs_catalog_scores.pgs_id` (same-group; the
+  supersession pattern allows multiple rows per `pgs_id` so the natural key is no
+  longer unique and DB-level FK is no longer expressible). This relationship was
+  originally DB-enforced in sub-phase 5.0 but the 5.4 schema correction (surrogate
+  PK on `pgs_catalog_scores`) demoted it to application-validated.
+- `derived_pgs.pgs_id` → `pgs_catalog_scores.pgs_id` (group 3 → group 2; same
+  reason as above: the 5.4 schema correction made `pgs_id` non-unique on
+  `pgs_catalog_scores`, and DuckDB can no longer enforce a cross-group FK against
+  it). The corresponding `derived_pgs.pgs_id` is now declared `VARCHAR NOT NULL`
+  without a DB-level FK; application code in the PGS analysis pipeline is
+  responsible for validating that the value exists in
+  `pgs_catalog_scores(pgs_id)` (typically the active row).
 
 The polymorphic `insights.subject_id` remains application-validated; no DB-level FK.
 

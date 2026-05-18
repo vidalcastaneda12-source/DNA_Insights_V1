@@ -8,6 +8,234 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Sub-phase 5.4 follow-up — `distinct_trait_category=0` bug.**
+  Real-data verification of the original 5.4 loader (PR #39)
+  passed every locked drift identifier except
+  `distinct_trait_category`, which came back at 0 despite the
+  loader reading 670 EFO trait rows. Diagnosis: the bundle's
+  `pgs_all_metadata_efo_traits.csv` does not ship a category
+  column (live header confirmed:
+  `Ontology Trait ID,Ontology Trait Label,Ontology Trait
+  Description,Ontology URL`). The category is published via a
+  separate REST endpoint, `/rest/trait_category/all`, which
+  returns ~11 categories totaling ~700 EFO traits. Fix: add a
+  third audited download (`PGS_TRAIT_CATEGORY_URL`,
+  `_TRAIT_CATEGORY_RESOURCE_ID`,
+  `_TRAIT_CATEGORY_CACHE_FILENAME`) that fetches the REST
+  payload into `~/.cache/genome/annotations/pgs_catalog/
+  trait_categories.json`, plus a `_parse_trait_categories`
+  helper that walks the paginated envelope and emits a
+  `efo_id` → `category_label` dict. The new dict threads into
+  `_join_metadata` as a fifth argument; the existing
+  `orphan_trait_refs` counter still keys off the bundle's EFO
+  traits file (semantics unchanged), and the category lookup
+  is independent -- a score whose EFO ID is missing from the
+  bundle (counted as orphan) may still pick up a category from
+  the REST payload, and vice versa. The parser raises a clear
+  `ValueError` on pagination (the response would silently
+  truncate otherwise) and on missing-results-list / non-object
+  shapes. New `rows_read_trait_categories` parser stat surfaces
+  on the end-of-load summary. Tests: 10 new tests in
+  `backend/tests/test_annotate_loader_pgs_catalog.py` covering
+  the trait_category JSON parser (happy path, pagination
+  guard, missing results, non-object payload, duplicate EFOs
+  across categories, malformed entries), the join's
+  trait_category population (categories sourced from REST
+  dict, orphan-trait counter independence, REST-only EFOs
+  don't pollute scores), the URL constant, and an end-to-end
+  refresh assertion that `distinct_trait_category > 0` after
+  a fixture load. New fixture
+  `backend/tests/fixtures/pgs_catalog/trait_categories.json`
+  carries 4 categories covering the 10-score fixture's EFO IDs
+  (Body measurement, Cardiovascular disease, Other measurement,
+  Other trait) plus one orphan EFO not referenced by any
+  fixture score. Runbook updated: the URL section now lists
+  three audited URLs (release-current + bundle + trait_category),
+  the multi-file join contract calls out the REST endpoint as
+  the sole `trait_category` source, the drift-identifier note
+  expects ~11 categories at the verified date (with `=0`
+  treated as a regression signal), and new troubleshooting
+  paths cover the pagination / shape-drift / empty-results
+  failure modes. The bug was a column-not-present case (option
+  3 from the diagnosis tree's "scan other CSVs / endpoints"
+  branch); the fix preserves the original loader's atomicity
+  and audit-log shape and adds one round-trip per refresh.
+  No schema rebuild required. (PR #39 follow-up)
+
+### Added
+- **Sub-phase 5.4 — PGS Catalog metadata loader.** New
+  `genome.annotate.loaders.pgs_catalog` registers a `refresh`
+  function at module-import time that downloads PGS Catalog's
+  metadata bundle (`pgs_all_metadata.tar.gz`, ~4 MB gzipped TAR
+  carrying eight per-resource CSVs) via the audited scaffold,
+  parses the four CSVs relevant to score-level state in memory,
+  joins them client-side on the natural keys, and chunk-loads
+  one row per PGS into `pgs_catalog_scores` via PyArrow Table
+  registration + `INSERT ... SELECT` (the project's locked
+  bulk-load convention) at the locked 250K-rows-per-chunk
+  setting (PGS Catalog ships ~5-7K rows so the corpus fits in
+  one chunk, but the chunked-insert code path stays exercised
+  identically across loaders). All chunks land inside one
+  DuckDB transaction so a mid-stream failure rolls back the
+  deactivation of prior active rows along with every partial
+  chunk insert. Version label is resolved via an audited GET
+  against the PGS Catalog REST release-current endpoint
+  (`https://www.pgscatalog.org/rest/release/current/`); the
+  JSON `date` field (defensive: also accepts `release_date` /
+  `releasedate`) is rendered as `YYYY_MM_DD` (matching the
+  ClinVar / GWAS Catalog convention). Failed version resolution
+  propagates instead of silently falling back to today's UTC
+  date -- silent fallback would either cause a duplicate load
+  or paint a misleading version label onto a release that's
+  actually identical. The release GET is the loader's first
+  audited call -- placed before the bundle download so a fresh
+  refresh against an unchanged release short-circuits without
+  re-fetching the bundle body, and a disabled master switch
+  surfaces `ExternalCallsDisabledError` after one intent +
+  blocked audit pair (matching the 5.1a/b/5.2/5.3 pattern).
+  Four-CSV join contract: `pgs_all_metadata_scores.csv` (one
+  row per PGS, keyed by `Polygenic Score (PGS) ID`),
+  `pgs_all_metadata_publications.csv` (keyed by
+  `PGS Publication/Study (PGP) ID`, contributes
+  `publication_pmid` / `publication_doi` /
+  `publication_year` -- the loader extracts the four-digit year
+  out of the publication's `Publication Date` ISO string),
+  `pgs_all_metadata_efo_traits.csv` (keyed by
+  `Ontology Trait ID`; the upstream CSV does not ship a
+  `Trait Category` column at the verified date so the loader
+  leaves `trait_category = NULL` for every row -- a future
+  schema or loader change can backfill it from an EFO hierarchy
+  walk), and `pgs_all_metadata_performance_metrics.csv`
+  (multiple rows per PGS, one per evaluation cohort, collapsed
+  into the schema's two scalar columns via the max reduction
+  documented below). The bundle is opened with
+  `tarfile.open(..., mode="r:gz")` (single-layer gzipped TAR --
+  the deviation from the GWAS Catalog ZIP-wrapping shape that
+  the upstream archive actually uses). TAR member names include
+  a leading `/` (absolute paths in the upstream packaging) so
+  the helper matches via `endswith` rather than exact equality.
+  Performance-metric max reduction: a PGS's per-cohort entries
+  in `performance_metrics` collapse via
+  `max(non-NULL values)` per column independently --
+  `performance_auc = max(e.auc for e in entries if e.auc is not
+  None)` and similarly for `performance_or_per_sd`. The "max"
+  rule is the simplest auditable reduction at this scale, not
+  the most statistically honest one; honest per-cohort
+  reporting would require a separate `pgs_catalog_performance`
+  table (future schema change, not 5.4 work). The end-of-load
+  summary surfaces `multi_cohort_performance` (count of scores
+  with > 1 cohort entry) so downstream consumers can see when
+  the scalar is the output of a reduction vs a single-entry
+  source. Field-level coercions: `Mapped Trait(s) (EFO ID)`
+  splits on `,` and the loader keeps the first ID (the
+  curators' primary mapping) with `truncated_trait_efo`
+  counting the rows where this happened; `Number of Variants`
+  parses as INTEGER (`NR` → NULL); the OR / AUROC cells ship
+  as `"<estimate> [<lower>,<upper>]"` and the loader extracts
+  only the leading point estimate (CI is dropped at this
+  layer); empty / `NA` / `NR` / `-` / whitespace-only values
+  coerce to NULL. The refresh is idempotent on
+  `(source_db='pgs_catalog', version)`: a second call without
+  `--force` short-circuits with `was_already_current=True`.
+  `--force` blanket-deactivates every prior active PGS Catalog
+  row before re-inserting; `pgs_catalog_scores` carries
+  `is_active` but **not** `superseded_by` (matches PharmGKB /
+  CPIC / GWAS Catalog), so the standard supersession helper's
+  `has_superseded_by=False` path is used and the supersession
+  chain is followed via the prior rows' `source_version_id`
+  column. The supersede + chunked-insert pair runs inside one
+  DuckDB transaction; a failure rolls every chunk back along
+  with the deactivation, and best-effort deletes the orphan
+  `annotation_source_versions` row that `upsert_source_version`
+  had committed in its inner transaction. End-of-load
+  structlog summary emits the locked drift identifiers
+  (`active_total`, `distinct_pgs_id`, `distinct_trait_efo`,
+  `distinct_publication_pmid`, `distinct_trait_category`,
+  `with_performance_auc`, `with_performance_or_per_sd`) plus
+  parser stats (`rows_read_scores`, `rows_read_publications`,
+  `rows_read_traits`, `rows_read_performance`,
+  `orphan_publication_refs`, `orphan_trait_refs`,
+  `scores_without_performance`, `multi_cohort_performance`,
+  `truncated_trait_efo`) and elapsed wall-clock so a
+  cross-release diff is one log scrape away. CLI invocation:
+  `genome annotate refresh --source pgs_catalog`;
+  `genome annotate status` now reports pgs_catalog alongside
+  clinvar / cpic / gwas_catalog / pharmgkb. Tests: 73 new
+  tests in `backend/tests/test_annotate_loader_pgs_catalog.py`
+  covering the per-field coercions, the four per-file parsers,
+  the in-memory join + max-reduction, the gzipped-TAR bundle
+  helper (happy path, missing entry, directory entry skipped,
+  leading-slash member-name match), the version-resolution
+  path (release-current happy path, `release_date` /
+  `releasedate` defensive aliases, malformed-JSON loud-fail,
+  HTTP-5xx propagation), the end-to-end refresh against four
+  new fixture CSVs in
+  `backend/tests/fixtures/pgs_catalog/`, the supersession
+  transaction (same-version `--force` and different-version
+  round-trip), the audited refusal path with
+  `external_calls_enabled=false`, a 5K-row synthetic benchmark
+  guard pinned at < 30 s (the project-wide routine-refresh
+  ceiling documented in CLAUDE.md), and the CLI smoke.
+  Documentation: new PGS Catalog section in
+  `docs/runbooks/annotations.md` covering the URL choice
+  (two-step release-current + FTP bundle), version-label
+  semantics, multi-file join contract, performance-metric max
+  reduction with the auditability trade-off called out
+  explicitly, per-field coercions, drift identifiers,
+  real-data verification commands and expected ranges, and
+  troubleshooting paths (`ExternalCallsDisabledError`,
+  release-current shape drift, bundle layout drift, header
+  drift, orphan-publication / orphan-trait spikes,
+  disk-space failure, partial-failure recovery). Real-data
+  verification numbers will land in the merge commit once the
+  user has run `genome annotate refresh --source pgs_catalog`
+  against the current release with
+  `external_calls_enabled=true`. Sub-phase 5.4 closes; 5.5
+  (gnomAD filtered) follows. Out of scope (deferred per the
+  sub-phase plan): `variant_annotations_index` refresh
+  (sub-phase 5.8), per-PGS variant weights (`pgs_score_weights`
+  is Phase 6 work), finding-009 #11 (explicit `CHECKPOINT`),
+  finding-009 #13 (chunked UPDATE), the `MAPPED_TRAIT_URI`
+  truncation note in `finding-005-deferred-improvements.md`
+  (separate one-line doc edit on a future PR that touches
+  `gwas_catalog.py`). (PR #XX)
+
+### Changed
+- **Schema correction — `pgs_catalog_scores` surrogate PK.**
+  Sub-phase 5.0 created `pgs_catalog_scores` with `pgs_id
+  VARCHAR PRIMARY KEY`, which conflicts with the locked
+  supersession-over-update pattern (CLAUDE.md decision #7) --
+  a refresh that inserts new rows with the same `pgs_id`
+  while flipping the prior rows to `is_active=FALSE` would
+  violate the PK constraint. The 5.4 schema correction
+  introduces a surrogate `score_record_id BIGINT PRIMARY KEY`
+  (mirroring the surrogate keys on the other four annotation
+  tables: `pharmgkb_id`, `guideline_id`, `clinvar_id`,
+  `association_id`) and demotes `pgs_id` to `VARCHAR NOT
+  NULL` with `idx_pgs_id ON (pgs_id, is_active)` covering the
+  most common lookup. DuckDB's FK requirement that the
+  target column carry a `PRIMARY KEY` or `UNIQUE` constraint
+  then knocks two prior DB-level FKs out of the schema --
+  `pgs_score_weights.pgs_id REFERENCES pgs_catalog_scores
+  (pgs_id)` (same-group, group 2) and `derived_pgs.pgs_id
+  REFERENCES pgs_catalog_scores(pgs_id)` (cross-group, group
+  3 → group 2). Both become application-validated references
+  in the "Application-validated references" section of the
+  group 2 schema doc, consistent with the existing
+  cross-group precedent. The section title is generalized
+  from "Cross-group references" since the new same-group
+  `pgs_score_weights` → `pgs_catalog_scores` link is the
+  first non-cross-group entry. This PR modifies
+  `docs/schemas/schema_group_2_reference_annotations.md`,
+  `docs/schemas/schema_group_3_derived_analyses.md`,
+  `ddl/group_2_annotations.sql`, and `ddl/group_3_derived.sql`.
+  Per CLAUDE.md's locked convention, the merge requires
+  `rm -rf data/ && uv run genome init` and a re-ingest of any
+  data the user had loaded (23andMe + Ancestry exports,
+  PharmGKB, CPIC, ClinVar, GWAS Catalog) before running the
+  new PGS Catalog loader. (PR #XX)
+
+### Fixed
 - **Sub-phase 5.3 follow-up — GWAS Catalog download flow and
   `external_client.download` error-message bug.** Real-data
   verification of the original 5.3 PR (#38) failed for two stacked

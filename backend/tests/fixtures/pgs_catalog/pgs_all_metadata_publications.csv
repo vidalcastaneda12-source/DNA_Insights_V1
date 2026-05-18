@@ -1,0 +1,10 @@
+PGS Publication/Study (PGP) ID,First Author,Title,Journal Name,Publication Date,Release Date,Authors,digital object identifier (doi),PubMed ID (PMID)
+PGP000001,Mavaddat N,Prediction of breast cancer risk,J Natl Cancer Inst,2015-04-08,2019-10-14,Mavaddat N et al,10.1/example,10000001
+PGP000002,Khera AV,Genome-wide polygenic scores for obesity,Cell,2018-12-13,2019-12-01,Khera AV et al,10.2/example,10000002
+PGP000003,Inouye M,Genomic risk prediction for body mass index,Nat Genet,2020-01-15,2020-01-15,Inouye M et al,10.3/example,10000003
+PGP000005,Smith J,Multi-trait polygenic models,Nat Commun,2021-11-01,2021-11-01,Smith J et al,10.5/example,10000005
+PGP000006,Lee Y,Type 2 diabetes PRS,Diabetes Care,2022-03-10,2022-03-10,Lee Y et al,10.6/example,10000006
+PGP000007,Tanaka K,Multi-ancestry coronary disease score,Circulation,2023-02-14,2023-02-14,Tanaka K et al,10.7/example,10000007
+PGP000008,Chen R,Diabetes GWAS-significant variants,Diabetologia,2024-05-22,2024-05-22,Chen R et al,10.8/example,10000008
+PGP000009,Garcia M,Hypertension polygenic score,Hypertension,2024-09-30,2024-09-30,Garcia M et al,10.9/example,10000009
+PGP999998,Doe J,Unreferenced publication for orphan-test sanity,Test Journal,2020-06-01,2020-06-01,Doe J,10.X/example,90000001

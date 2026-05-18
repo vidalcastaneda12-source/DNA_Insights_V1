@@ -1,0 +1,13 @@
+PGS Performance Metric (PPM) ID,Evaluated Score,PGS Sample Set (PSS),PGS Publication (PGP) ID,Reported Trait,Covariates Included in the Model,PGS Performance: Other Relevant Information,Publication (PMID),Publication (doi),Hazard Ratio (HR),Odds Ratio (OR),Beta,Area Under the Receiver-Operating Characteristic Curve (AUROC),Concordance Statistic (C-index),Other Metric(s)
+PPM000001,PGS000001,PSS000001,PGP000001,Body mass index,,,10000001,10.1/example,,"1.55 [1.52,1.58]",,"0.622 [0.619,0.627]",,
+PPM000002,PGS000002,PSS000010,PGP000002,Obesity,,,10000002,10.2/example,,"1.80 [1.70,1.92]",,"0.700 [0.690,0.710]",,
+PPM000003,PGS000003,PSS000020,PGP000003,Body mass index,,,10000003,10.3/example,,"1.40 [1.35,1.45]",,"0.650 [0.640,0.660]",,
+PPM000004,PGS000004,PSS000030,PGP999999,Coronary artery disease,,,10000004,10.4/example,,"1.25 [1.20,1.30]",,"0.600 [0.590,0.610]",,
+PPM000005,PGS000005,PSS000040,PGP000005,Unknown trait,,,10000005,10.5/example,,"1.30 [1.25,1.35]",,"0.620 [0.610,0.630]",,
+PPM000007,PGS000007,PSS000060,PGP000007,Coronary artery disease,European cohort,,10000007,10.7/example,,"1.90 [1.80,2.01]",,"0.710 [0.700,0.720]",,
+PPM000008,PGS000007,PSS000061,PGP000007,Coronary artery disease,East Asian cohort,,10000007,10.7/example,,"2.10 [1.98,2.23]",,"0.750 [0.740,0.760]",,
+PPM000009,PGS000007,PSS000062,PGP000007,Coronary artery disease,South Asian cohort,,10000007,10.7/example,,"1.65 [1.55,1.76]",,"0.680 [0.670,0.690]",,
+PPM000010,PGS000008,PSS000070,PGP000008,Type 2 diabetes,,,10000008,10.8/example,,"1.15 [1.10,1.20]",,"0.550 [0.540,0.560]",,
+PPM000011,PGS000009,PSS000080,PGP000009,Hypertension,Only AUC reported here,,10000009,10.9/example,,NR,,"0.780 [0.770,0.790]",,
+PPM000012,PGS000009,PSS000081,PGP000009,Hypertension,Only OR reported here,,10000009,10.9/example,,"2.20 [2.10,2.31]",,NR,,
+PPM000013,PGS000010,PSS000090,PGP000001,Breast cancer,,,10000001,10.1/example,,"1.50 [1.45,1.56]",,"0.660 [0.655,0.665]",,
