@@ -103,6 +103,21 @@ def annotate_refresh(
             ),
         ),
     ] = False,
+    skip_if_same_version: Annotated[  # noqa: FBT002 — typer boolean flag, opt-in
+        bool,
+        typer.Option(
+            "--skip-if-same-version",
+            help=(
+                "Safety net for --force re-runs: skip the supersession path "
+                "when the resolved upstream version + file hash already match "
+                "the currently-active row in annotation_source_versions. The "
+                "loader emits 'supersession_skipped_same_version' and exits "
+                "cleanly (treated as success). Off by default; existing "
+                "--force invocations behave identically when this flag is "
+                "not set. See finding-009 #14."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Refresh one annotation source.
 
@@ -114,7 +129,7 @@ def annotate_refresh(
     if loader is None:
         typer.echo(_stub_message(source), err=True)
         raise typer.Exit(code=2)
-    result: RefreshResult = loader(force)
+    result: RefreshResult = loader(force, skip_if_same_version)
     typer.echo(
         f"source_db={result.source_db} "
         f"source_version_id={result.source_version_id} "

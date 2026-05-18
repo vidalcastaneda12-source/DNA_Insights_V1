@@ -35,13 +35,21 @@ class RefreshResult:
     was_already_current: bool
 
 
-RefreshFn = Callable[[bool], RefreshResult]
+RefreshFn = Callable[[bool, bool], RefreshResult]
 """Per-source refresh callable.
 
-The single ``bool`` argument is ``force``. Loaders are free to honour
-or ignore it depending on their semantics; ``force=True`` typically
-means "re-download the upstream artifact and reload regardless of the
-cached state".
+Positional arguments are ``(force, skip_if_same_version)``:
+
+* ``force=True`` typically means "re-download the upstream artifact
+  and reload regardless of the cached state". Loaders are free to
+  honour or ignore it depending on their semantics.
+* ``skip_if_same_version=True`` enables the finding-009 #14 short-
+  circuit: when the resolved upstream version + file hash match the
+  currently-active row in ``annotation_source_versions``, the loader
+  emits ``supersession_skipped_same_version`` and returns a
+  :class:`RefreshResult` with ``was_already_current=True`` instead of
+  re-running the supersession workflow. Off by default; opt-in safety
+  net for ``--force`` re-runs against unchanged releases.
 """
 
 _LOADERS: dict[str, RefreshFn] = {}

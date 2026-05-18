@@ -21,7 +21,10 @@ from genome.annotate.registry import (
 
 
 def _make_fake_loader(label: str) -> RefreshFn:
-    def _refresh(force: bool) -> RefreshResult:  # noqa: ARG001, FBT001 — protocol signature
+    def _refresh(
+        force: bool,  # noqa: ARG001, FBT001 — protocol signature
+        skip_if_same_version: bool,  # noqa: ARG001, FBT001 — protocol signature
+    ) -> RefreshResult:
         return RefreshResult(
             source_db=label,
             source_version_id=1,

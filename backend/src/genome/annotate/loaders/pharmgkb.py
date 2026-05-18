@@ -44,7 +44,11 @@ from genome.annotate.source_versions import (
     get_current_version,
     upsert_source_version,
 )
-from genome.annotate.supersession import deactivate_prior_versions
+from genome.annotate.supersession import (
+    commit_and_checkpoint,
+    deactivate_prior_versions,
+    maybe_skip_same_version,
+)
 from genome.db.duckdb_conn import duckdb_connection
 
 if TYPE_CHECKING:
@@ -448,6 +452,7 @@ def _deactivate_for_refresh(
             table=_TARGET_TABLE,
             new_source_version_id=source_version_id,
             has_superseded_by=False,
+            source_name=SOURCE_DB,
         )
     # _TARGET_TABLE is a module constant, not user input — S608 is a
     # false positive here.
@@ -487,7 +492,10 @@ def _cleanup_orphan_version_row(
         )
 
 
-def refresh(force: bool) -> RefreshResult:  # noqa: FBT001 — registry RefreshFn signature
+def refresh(
+    force: bool,  # noqa: FBT001 — positional matches registry's RefreshFn signature
+    skip_if_same_version: bool = False,  # noqa: FBT001, FBT002 — opt-in default for the new flag
+) -> RefreshResult:
     """Refresh PharmGKB clinical annotations.
 
     Pipeline:
@@ -501,12 +509,19 @@ def refresh(force: bool) -> RefreshResult:  # noqa: FBT001 — registry RefreshF
     3. Short-circuit and return ``was_already_current=True`` if a row
        in ``annotation_source_versions`` already names the resolved
        ``(source_db='pharmgkb', version)`` and ``force`` is ``False``.
+    3a. If ``skip_if_same_version`` is ``True`` and the downloaded
+        archive's (version, sha256) match the currently-active row,
+        short-circuit via :func:`maybe_skip_same_version` (finding-009
+        #14). Off by default.
     4. Extract ``clinical_annotations.tsv`` and parse it. Multi-drug
        rows expand into one ``_ParsedRow`` per drug.
     5. Inside one DuckDB transaction: upsert
        ``annotation_source_versions``, deactivate prior PharmGKB rows
        via :func:`deactivate_prior_versions`, and bulk-insert the
-       freshly parsed rows.
+       freshly parsed rows. The supersession transaction is closed via
+       :func:`commit_and_checkpoint` so the COMMIT + explicit
+       CHECKPOINT phases are observable in the structlog stream
+       (finding-009 #9 and #11).
     6. Return a :class:`RefreshResult` describing what landed.
     """
     log = logger.bind(source=SOURCE_DB)
@@ -541,6 +556,18 @@ def refresh(force: bool) -> RefreshResult:  # noqa: FBT001 — registry RefreshF
                 record_count=current.record_count or 0,
                 was_already_current=True,
             )
+
+    # 3a. --skip-if-same-version short-circuit (finding-009 #14). Off by
+    # default; when on, an active matching (version, hash) row makes the
+    # refresh a no-op even under --force.
+    skip = maybe_skip_same_version(
+        source_db=SOURCE_DB,
+        version=version,
+        source_file_hash=download_result.sha256,
+        skip_if_same_version=skip_if_same_version,
+    )
+    if skip is not None:
+        return skip
 
     # 4. Extract and parse.
     with zipfile.ZipFile(download_result.path) as zf, zf.open(_CLINICAL_ANN_TSV_NAME) as fh:
@@ -612,7 +639,7 @@ def refresh(force: bool) -> RefreshResult:  # noqa: FBT001 — registry RefreshF
                 source_version_id=source_version_id,
                 retrieval_date=retrieval_date,
             )
-            conn.commit()
+            commit_and_checkpoint(conn, source_name=SOURCE_DB)
         except Exception:
             conn.rollback()
             _cleanup_orphan_version_row(conn, source_version_id)
