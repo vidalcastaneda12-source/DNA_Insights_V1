@@ -944,24 +944,29 @@ def test_refresh_full_transaction_inserts_1000_rows(
 
     with duckdb_connection() as conn:
         active = conn.execute(
-            "SELECT COUNT(*) FROM clinvar_annotations WHERE is_active = TRUE",
+            "SELECT COUNT(*) FROM clinvar_annotations c "
+            "JOIN annotation_sources s "
+            "ON s.source = 'clinvar' AND s.current_source_version_id = c.source_version_id",
         ).fetchone()
-        inactive = conn.execute(
-            "SELECT COUNT(*) FROM clinvar_annotations WHERE is_active = FALSE",
+        # No prior versions exist on a first load → no rows under non-current ids.
+        non_current = conn.execute(
+            "SELECT COUNT(*) FROM clinvar_annotations c "
+            "WHERE NOT EXISTS ("
+            "  SELECT 1 FROM annotation_sources s "
+            "  WHERE s.source = 'clinvar' AND s.current_source_version_id = c.source_version_id"
+            ")",
         ).fetchone()
         version_rows = conn.execute(
             "SELECT version, record_count, is_current FROM annotation_source_versions"
             " WHERE source_db = 'clinvar'",
         ).fetchall()
-        # Every row is tagged with the new source_version_id.
         sv_count = conn.execute(
-            "SELECT COUNT(DISTINCT source_version_id) FROM clinvar_annotations"
-            " WHERE is_active = TRUE",
+            "SELECT COUNT(DISTINCT source_version_id) FROM clinvar_annotations",
         ).fetchone()
     assert active is not None
     assert active[0] == expected_n
-    assert inactive is not None
-    assert inactive[0] == 0
+    assert non_current is not None
+    assert non_current[0] == 0
     assert version_rows == [("2026_05_10", expected_n, True)]
     assert sv_count is not None
     assert sv_count[0] == 1
@@ -988,7 +993,7 @@ def test_refresh_writes_expected_column_values(
                    alt_allele, clinical_significance, review_status,
                    star_rating, last_evaluated, conditions, condition_ids,
                    submission_count, submitter_categories, hgvs_c, hgvs_p,
-                   inheritance, is_active, superseded_by
+                   inheritance
               FROM clinvar_annotations
             """,
         ).fetchone()
@@ -1011,8 +1016,6 @@ def test_refresh_writes_expected_column_values(
         hgvs_c,
         hgvs_p,
         inheritance,
-        active,
-        superseded,
     ) = row
     assert variation_id == "14"
     assert rsid == "rs397704705"
@@ -1041,8 +1044,6 @@ def test_refresh_writes_expected_column_values(
     assert hgvs_c == "NM_014855.3(AP5Z1):c.80A>T"
     assert hgvs_p == "p.Lys27Ter"
     assert inheritance is None
-    assert active is True
-    assert superseded is None
 
 
 # ---------------------------------------------------------------------------
@@ -1056,9 +1057,10 @@ def test_refresh_supersedes_prior_rows_on_new_version(
 ) -> None:
     """Two refreshes of the same 1,000 rows under different versions.
 
-    Asserts: 2 source_version rows, 2,000 total rows (1K active under
-    new version, 1K inactive under old), all inactive rows
-    superseded_by the new version.
+    Asserts: 2 source_version rows, 2,000 total rows (1K under new
+    version, 1K under old). The ``annotation_sources`` pointer flips
+    from v1 to v2 -- the supersession event -- without touching any
+    per-row state on ``clinvar_annotations``.
     """
     init_databases()
     gz_path = tmp_path / "variant_summary.txt.gz"
@@ -1078,33 +1080,28 @@ def test_refresh_supersedes_prior_rows_on_new_version(
     assert second.source_version_id > first.source_version_id
 
     with duckdb_connection() as conn:
+        current_pointer = conn.execute(
+            "SELECT current_source_version_id FROM annotation_sources WHERE source = 'clinvar'",
+        ).fetchone()
         active = conn.execute(
-            "SELECT COUNT(*) FROM clinvar_annotations"
-            " WHERE is_active = TRUE AND source_version_id = ?",
+            "SELECT COUNT(*) FROM clinvar_annotations WHERE source_version_id = ?",
             [second.source_version_id],
         ).fetchone()
-        inactive = conn.execute(
-            "SELECT COUNT(*) FROM clinvar_annotations"
-            " WHERE is_active = FALSE AND source_version_id = ?",
+        prior = conn.execute(
+            "SELECT COUNT(*) FROM clinvar_annotations WHERE source_version_id = ?",
             [first.source_version_id],
-        ).fetchone()
-        # Every inactive row points at the new version.
-        superseded = conn.execute(
-            "SELECT COUNT(*) FROM clinvar_annotations"
-            " WHERE is_active = FALSE AND superseded_by = ?",
-            [second.source_version_id],
         ).fetchone()
         version_rows = conn.execute(
             "SELECT version, is_current FROM annotation_source_versions"
             " WHERE source_db = 'clinvar' ORDER BY source_version_id",
         ).fetchall()
         total = conn.execute("SELECT COUNT(*) FROM clinvar_annotations").fetchone()
+    assert current_pointer is not None
+    assert int(current_pointer[0]) == second.source_version_id
     assert active is not None
     assert active[0] == expected_n
-    assert inactive is not None
-    assert inactive[0] == expected_n
-    assert superseded is not None
-    assert superseded[0] == expected_n
+    assert prior is not None
+    assert prior[0] == expected_n
     assert total is not None
     assert total[0] == 2 * expected_n
     assert version_rows == [("2026_05_10", False), ("2026_05_17", True)]
@@ -1118,8 +1115,10 @@ def test_refresh_modified_row_supersession(
 
     Run on a 100-row fixture, then re-run on the same fixture with one
     row's ClinicalSignificance changed from "Benign" to "Likely benign".
-    Assert the changed variant has both an inactive Benign row and an
-    active Likely benign row, both linked to the right source_version_ids.
+    Assert the changed variant has one row per release, each linked to
+    its respective ``source_version_id``. "Active" / "superseded" is
+    derived by joining the row's ``source_version_id`` against the
+    ``annotation_sources`` pointer rather than reading a per-row flag.
     """
     init_databases()
 
@@ -1152,22 +1151,24 @@ def test_refresh_modified_row_supersession(
     second = clinvar_loader.refresh(force=False)
 
     with duckdb_connection() as conn:
-        # Variant 42's history: one inactive "Benign" + one active "Likely benign".
+        # Variant 42's history: one row under v1 (Benign, superseded),
+        # one under v2 (Likely benign, current).
         history = conn.execute(
-            "SELECT clinical_significance, is_active, source_version_id, superseded_by"
+            "SELECT clinical_significance, source_version_id"
             " FROM clinvar_annotations WHERE variation_id = '42'"
             " ORDER BY clinvar_id",
         ).fetchall()
+        current_pointer = conn.execute(
+            "SELECT current_source_version_id FROM annotation_sources WHERE source = 'clinvar'",
+        ).fetchone()
     assert len(history) == 2
-    inactive, active = history[0], history[1]
-    assert inactive[0] == "Benign"
-    assert inactive[1] is False
-    assert inactive[2] == first.source_version_id
-    assert inactive[3] == second.source_version_id
-    assert active[0] == "Likely benign"
-    assert active[1] is True
-    assert active[2] == second.source_version_id
-    assert active[3] is None
+    prior, current = history[0], history[1]
+    assert prior[0] == "Benign"
+    assert prior[1] == first.source_version_id
+    assert current[0] == "Likely benign"
+    assert current[1] == second.source_version_id
+    assert current_pointer is not None
+    assert int(current_pointer[0]) == second.source_version_id
 
 
 def test_refresh_idempotent_short_circuit(
@@ -1192,7 +1193,9 @@ def test_refresh_idempotent_short_circuit(
 
     with duckdb_connection() as conn:
         active = conn.execute(
-            "SELECT COUNT(*) FROM clinvar_annotations WHERE is_active = TRUE",
+            "SELECT COUNT(*) FROM clinvar_annotations c "
+            "JOIN annotation_sources s "
+            "ON s.source = 'clinvar' AND s.current_source_version_id = c.source_version_id",
         ).fetchone()
         n_versions = conn.execute(
             "SELECT COUNT(*) FROM annotation_source_versions WHERE source_db = 'clinvar'",
@@ -1210,9 +1213,14 @@ def test_refresh_force_reloads_same_version(
     """``force=True`` re-runs even when version is unchanged.
 
     Same-version --force: ``upsert_source_version`` is idempotent on
-    (source_db, version), so source_version_id is unchanged. The
-    force path blanket-deactivates every prior active row (tagging
-    them with superseded_by = same version_id) and re-inserts.
+    (source_db, version), so source_version_id is unchanged. Under
+    the version-pointer pattern both refreshes' rows share the same
+    ``source_version_id`` and both are "active" (the pointer still
+    points at that id). The result is 2N total rows all tagged with
+    the same id -- the duplicate-active shape the original loader
+    couldn't avoid, but now it's an explicit downstream concern
+    (e.g. dedup at read time) rather than a supersession-correctness
+    issue.
     """
     init_databases()
     gz_path = tmp_path / "variant_summary.txt.gz"
@@ -1229,19 +1237,21 @@ def test_refresh_force_reloads_same_version(
     assert second.source_version_id == first.source_version_id
 
     with duckdb_connection() as conn:
-        active = conn.execute(
-            "SELECT COUNT(*) FROM clinvar_annotations WHERE is_active = TRUE",
+        current_pointer = conn.execute(
+            "SELECT current_source_version_id FROM annotation_sources WHERE source = 'clinvar'",
         ).fetchone()
-        deactivated = conn.execute(
-            "SELECT COUNT(*) FROM clinvar_annotations"
-            " WHERE is_active = FALSE AND superseded_by = ?",
-            [first.source_version_id],
+        # Both inserts under the same source_version_id; both are
+        # "current" because the pointer matches.
+        active = conn.execute(
+            "SELECT COUNT(*) FROM clinvar_annotations c "
+            "JOIN annotation_sources s "
+            "ON s.source = 'clinvar' AND s.current_source_version_id = c.source_version_id",
         ).fetchone()
         total = conn.execute("SELECT COUNT(*) FROM clinvar_annotations").fetchone()
+    assert current_pointer is not None
+    assert int(current_pointer[0]) == first.source_version_id
     assert active is not None
-    assert active[0] == expected_n
-    assert deactivated is not None
-    assert deactivated[0] == expected_n
+    assert active[0] == 2 * expected_n
     assert total is not None
     assert total[0] == 2 * expected_n
 

@@ -21,6 +21,7 @@ _EXPECTED_DUCKDB_TABLES = {
     "sample_qc",
     # group 2
     "annotation_source_versions",
+    "annotation_sources",
     "dbsnp_annotations",
     "variant_aliases",
     "clinvar_annotations",

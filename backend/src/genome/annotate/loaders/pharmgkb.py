@@ -45,8 +45,9 @@ from genome.annotate.source_versions import (
     upsert_source_version,
 )
 from genome.annotate.supersession import (
+    VersionFlipResult,
     commit_and_checkpoint,
-    deactivate_prior_versions,
+    flip_to_new_version,
     maybe_skip_same_version,
 )
 from genome.db.duckdb_conn import duckdb_connection
@@ -136,7 +137,6 @@ _ARROW_SCHEMA: Final[pa.Schema] = pa.schema(
         pa.field("guideline_url", pa.string()),
         pa.field("source_version_id", pa.int64(), nullable=False),
         pa.field("retrieval_date", pa.timestamp("us"), nullable=False),
-        pa.field("is_active", pa.bool_(), nullable=False),
     ],
 )
 
@@ -146,8 +146,8 @@ class _ParsedRow:
     """One row destined for ``pharmgkb_annotations``.
 
     Mirrors the destination schema's variable columns. ``pharmgkb_id``,
-    ``source_version_id``, ``retrieval_date``, and ``is_active`` are
-    assigned at bulk-insert time after parsing completes.
+    ``source_version_id``, and ``retrieval_date`` are assigned at
+    bulk-insert time after parsing completes.
     """
 
     pgkb_accession: str | None
@@ -340,13 +340,13 @@ def _bulk_insert(
     """Bulk-load ``rows`` into ``pharmgkb_annotations``.
 
     Builds a PyArrow Table with one column per destination column
-    (including ``pharmgkb_id``, ``source_version_id``,
-    ``retrieval_date``, and ``is_active=True``), registers it under a
-    temp name, then issues ``INSERT INTO pharmgkb_annotations (...)
-    SELECT ... FROM <temp>`` and unregisters. ``chrom`` is cast through
-    ``chromosome_enum`` in the SELECT so the NULLs that are correct for
-    PharmGKB (no per-variant positions in the source file) reach the
-    enum-typed column cleanly.
+    (including ``pharmgkb_id``, ``source_version_id``, and
+    ``retrieval_date``), registers it under a temp name, then issues
+    ``INSERT INTO pharmgkb_annotations (...) SELECT ... FROM <temp>``
+    and unregisters. ``chrom`` is cast through ``chromosome_enum`` in
+    the SELECT so the NULLs that are correct for PharmGKB (no
+    per-variant positions in the source file) reach the enum-typed
+    column cleanly.
 
     Returns the number of rows inserted. A zero-row call inserts
     nothing and returns 0.
@@ -389,7 +389,6 @@ def _bulk_insert(
             "guideline_url": pa.array([r.guideline_url for r in rows], type=pa.string()),
             "source_version_id": pa.array([source_version_id] * n, type=pa.int64()),
             "retrieval_date": pa.array([naive_retrieval] * n, type=pa.timestamp("us")),
-            "is_active": pa.array([True] * n, type=pa.bool_()),
         },
         schema=_ARROW_SCHEMA,
     )
@@ -403,7 +402,7 @@ def _bulk_insert(
                 drug_name, drug_rxnorm_id, drug_atc_code,
                 phenotype_category, functional_status, evidence_level,
                 guideline_summary, guideline_url,
-                source_version_id, retrieval_date, is_active
+                source_version_id, retrieval_date
             )
             SELECT
                 pharmgkb_id, pgkb_accession, rsid,
@@ -412,53 +411,13 @@ def _bulk_insert(
                 drug_name, drug_rxnorm_id, drug_atc_code,
                 phenotype_category, functional_status, evidence_level,
                 guideline_summary, guideline_url,
-                source_version_id, retrieval_date, is_active
+                source_version_id, retrieval_date
               FROM _pharmgkb_stage_arrow
             """,  # noqa: S608 — table name is a module constant, not user input
         )
     finally:
         conn.unregister("_pharmgkb_stage_arrow")
     return n
-
-
-def _deactivate_for_refresh(
-    conn: DuckDBPyConnection,
-    *,
-    source_version_id: int,
-    force: bool,
-) -> int:
-    """Deactivate prior PharmGKB rows ahead of a refresh insert.
-
-    Thin per-source seam over the shared
-    :func:`genome.annotate.supersession.deactivate_prior_versions`
-    helper. Both the normal and ``--force`` paths route through the
-    same helper (finding-009 #16): ``force_all_active=force`` flips
-    the WHERE clause between "rows older than the new version" (the
-    default) and "every active row" (force mode).
-
-    The force-mode sweep is what handles same-version ``--force``
-    re-runs: ``upsert_source_version`` is idempotent on
-    ``(source_db, version)`` and returns the existing id when the
-    version label matches, so the default ``source_version_id <
-    new_source_version_id`` predicate would skip the prior rows and
-    the bulk insert would produce duplicate active rows for one
-    (variant, drug) tuple.
-
-    ``pharmgkb_annotations`` carries ``is_active`` but not
-    ``superseded_by`` (see
-    ``docs/schemas/schema_group_2_reference_annotations.md``), so we
-    pass ``has_superseded_by=False``.
-
-    Returns the number of rows flipped to ``is_active=FALSE``.
-    """
-    return deactivate_prior_versions(
-        conn,
-        table=_TARGET_TABLE,
-        new_source_version_id=source_version_id,
-        has_superseded_by=False,
-        source_name=SOURCE_DB,
-        force_all_active=force,
-    )
 
 
 def _cleanup_orphan_version_row(
@@ -514,10 +473,14 @@ def refresh(
     4. Extract ``clinical_annotations.tsv`` and parse it. Multi-drug
        rows expand into one ``_ParsedRow`` per drug.
     5. Inside one DuckDB transaction: upsert
-       ``annotation_source_versions``, deactivate prior PharmGKB rows
-       via :func:`deactivate_prior_versions`, and bulk-insert the
-       freshly parsed rows. The supersession transaction is closed via
-       :func:`commit_and_checkpoint` so the COMMIT + explicit
+       ``annotation_source_versions``, bulk-insert the freshly parsed
+       rows under the new ``source_version_id``, and flip the
+       ``annotation_sources`` pointer for ``pharmgkb`` to that id via
+       :func:`flip_to_new_version`. The pointer flip is the
+       supersession event; the prior set stays in
+       ``pharmgkb_annotations`` indefinitely under its older
+       ``source_version_id``. The supersession transaction is closed
+       via :func:`commit_and_checkpoint` so the COMMIT + explicit
        CHECKPOINT phases are observable in the structlog stream
        (finding-009 #9 and #11).
     6. Return a :class:`RefreshResult` describing what landed.
@@ -585,10 +548,13 @@ def refresh(
     # helper, so the workable shape is:
     #
     #  5a. ``upsert_source_version`` runs (its own transaction).
-    #  5b. A separate transaction wraps ``deactivate_prior_versions`` +
-    #      ``_bulk_insert`` — the two writes that the supersession
-    #      invariant requires to land atomically (the deactivation of
-    #      prior active rows and the insertion of the new ones).
+    #  5b. A separate transaction wraps ``_bulk_insert`` +
+    #      ``flip_to_new_version`` — the two writes that the
+    #      supersession invariant requires to land atomically (the
+    #      insertion of the new active set and the pointer flip that
+    #      makes it "current"). The flip runs *after* the insert so
+    #      ``flip_to_new_version`` can count the just-inserted rows for
+    #      the event payload.
     #
     # If 5b fails, the version row from 5a is orphaned: it claims
     # ``record_count > 0`` but no annotation rows exist for it. The
@@ -598,6 +564,7 @@ def refresh(
     # for manual cleanup. There are no child rows referencing the
     # orphan source_version_id at this point, so the DELETE is FK-safe.
     retrieval_date = datetime.now(UTC)
+    flip: VersionFlipResult | None = None
     with duckdb_connection() as conn:
         source_version_id = upsert_source_version(
             conn,
@@ -610,32 +577,17 @@ def refresh(
         )
         conn.begin()
         try:
-            # ``pharmgkb_annotations`` carries ``is_active`` but not
-            # ``superseded_by`` (see
-            # ``docs/schemas/schema_group_2_reference_annotations.md``).
-            #
-            # The standard supersession helper deactivates rows whose
-            # ``source_version_id`` is strictly less than the new id. That
-            # predicate misses ``force=True`` re-runs against the *same*
-            # version label, because ``upsert_source_version`` is
-            # idempotent on ``(source_db, version)`` and returns the
-            # existing id. For the force path we blanket-deactivate every
-            # active PharmGKB row instead, so the new bulk insert lands
-            # cleanly and the table never carries duplicate active rows
-            # for one (variant, drug) tuple. The new rows go in with
-            # ``is_active=TRUE`` and reuse the existing source_version_id;
-            # the swept rows preserve their original source_version_id so
-            # supersession history stays followable.
-            deactivated = _deactivate_for_refresh(
-                conn,
-                source_version_id=source_version_id,
-                force=force,
-            )
             inserted = _bulk_insert(
                 conn,
                 rows,
                 source_version_id=source_version_id,
                 retrieval_date=retrieval_date,
+            )
+            flip = flip_to_new_version(
+                conn,
+                source=SOURCE_DB,
+                table=_TARGET_TABLE,
+                new_source_version_id=source_version_id,
             )
             commit_and_checkpoint(conn, source_name=SOURCE_DB)
         except Exception:
@@ -643,11 +595,13 @@ def refresh(
             _cleanup_orphan_version_row(conn, source_version_id)
             raise
 
+    assert flip is not None  # noqa: S101 — guaranteed by the try block returning normally
     log.info(
         "pharmgkb.refresh.complete",
         version=version,
         inserted=inserted,
-        deactivated=deactivated,
+        prior_version_id=flip.prior_version_id,
+        prior_row_count=flip.prior_row_count,
         source_version_id=source_version_id,
     )
 

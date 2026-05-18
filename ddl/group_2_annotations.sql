@@ -22,6 +22,16 @@ CREATE TABLE annotation_source_versions (
 
 CREATE INDEX idx_asv_current ON annotation_source_versions(source_db, is_current);
 
+-- Per-source "currently active version" pointer. One row per source_db.
+-- Updated atomically by the supersession workflow: the pointer flip IS the
+-- supersession event, replacing per-row is_active flips on the evolving
+-- annotation tables. See backend/src/genome/annotate/supersession.py.
+
+CREATE TABLE annotation_sources (
+  source                       VARCHAR PRIMARY KEY,
+  current_source_version_id    BIGINT NOT NULL REFERENCES annotation_source_versions(source_version_id)
+);
+
 -- Variant-level annotations
 
 -- dbsnp_annotations
@@ -91,15 +101,12 @@ CREATE TABLE clinvar_annotations (
 
   -- Lifecycle
   source_version_id     BIGINT NOT NULL REFERENCES annotation_source_versions(source_version_id),
-  retrieval_date        TIMESTAMP NOT NULL,
-  is_active             BOOLEAN DEFAULT TRUE,
-  superseded_by         BIGINT
+  retrieval_date        TIMESTAMP NOT NULL
 );
 
 CREATE INDEX idx_cv_rsid          ON clinvar_annotations(rsid);
 CREATE INDEX idx_cv_pos           ON clinvar_annotations(chrom, pos_grch38);
-CREATE INDEX idx_cv_significance  ON clinvar_annotations(clinical_significance, is_active);
-CREATE INDEX idx_cv_active        ON clinvar_annotations(is_active);
+CREATE INDEX idx_cv_significance  ON clinvar_annotations(clinical_significance);
 
 -- gwas_catalog_associations
 
@@ -136,8 +143,7 @@ CREATE TABLE gwas_catalog_associations (
 
   -- Lifecycle
   source_version_id     BIGINT NOT NULL REFERENCES annotation_source_versions(source_version_id),
-  retrieval_date        TIMESTAMP NOT NULL,
-  is_active             BOOLEAN DEFAULT TRUE
+  retrieval_date        TIMESTAMP NOT NULL
 );
 
 CREATE INDEX idx_gwas_rsid    ON gwas_catalog_associations(rsid);
@@ -256,8 +262,7 @@ CREATE TABLE pharmgkb_annotations (
   guideline_url         VARCHAR,
 
   source_version_id     BIGINT NOT NULL REFERENCES annotation_source_versions(source_version_id),
-  retrieval_date        TIMESTAMP NOT NULL,
-  is_active             BOOLEAN DEFAULT TRUE
+  retrieval_date        TIMESTAMP NOT NULL
 );
 
 CREATE INDEX idx_pgkb_rsid  ON pharmgkb_annotations(rsid);
@@ -288,8 +293,7 @@ CREATE TABLE cpic_guidelines (
   last_updated            DATE,
 
   source_version_id       BIGINT NOT NULL REFERENCES annotation_source_versions(source_version_id),
-  retrieval_date          TIMESTAMP NOT NULL,
-  is_active               BOOLEAN DEFAULT TRUE
+  retrieval_date          TIMESTAMP NOT NULL
 );
 
 CREATE INDEX idx_cpic_gene_drug ON cpic_guidelines(gene_symbol, drug_name);
@@ -328,11 +332,10 @@ CREATE TABLE pgs_catalog_scores (
 
   -- Lifecycle
   source_version_id     BIGINT NOT NULL REFERENCES annotation_source_versions(source_version_id),
-  retrieval_date        TIMESTAMP NOT NULL,
-  is_active             BOOLEAN DEFAULT TRUE
+  retrieval_date        TIMESTAMP NOT NULL
 );
 
-CREATE INDEX idx_pgs_id    ON pgs_catalog_scores(pgs_id, is_active);
+CREATE INDEX idx_pgs_id    ON pgs_catalog_scores(pgs_id);
 CREATE INDEX idx_pgs_trait ON pgs_catalog_scores(trait_efo);
 
 -- pgs_score_weights — overlapping-only weights
@@ -544,7 +547,9 @@ FROM variants_master vm
 JOIN consensus_genotypes cg ON cg.variant_id = vm.variant_id
 JOIN pharmgkb_annotations pa
   ON pa.rsid = vm.rsid
- AND pa.is_active
+JOIN annotation_sources pa_src
+  ON pa_src.source = 'pharmgkb'
+ AND pa_src.current_source_version_id = pa.source_version_id
 WHERE cg.dosage > 0
 GROUP BY vm.variant_id, vm.rsid, vm.chrom, vm.pos_grch38,
          cg.dosage, cg.consensus_method, pa.gene_symbol, pa.star_allele;

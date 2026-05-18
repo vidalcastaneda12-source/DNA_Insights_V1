@@ -548,10 +548,16 @@ def test_refresh_inserts_rows_and_records_source_version(
 
     with duckdb_connection() as conn:
         active_count = conn.execute(
-            "SELECT COUNT(*) FROM pharmgkb_annotations WHERE is_active = TRUE",
+            "SELECT COUNT(*) FROM pharmgkb_annotations p "
+            "JOIN annotation_sources s "
+            "ON s.source = 'pharmgkb' AND s.current_source_version_id = p.source_version_id",
         ).fetchone()
-        all_active = conn.execute(
-            "SELECT COUNT(*) FROM pharmgkb_annotations WHERE is_active = FALSE",
+        non_current = conn.execute(
+            "SELECT COUNT(*) FROM pharmgkb_annotations p "
+            "WHERE NOT EXISTS ("
+            "  SELECT 1 FROM annotation_sources s "
+            "  WHERE s.source = 'pharmgkb' AND s.current_source_version_id = p.source_version_id"
+            ")",
         ).fetchone()
         version_rows = conn.execute(
             "SELECT version, record_count, is_current FROM annotation_source_versions"
@@ -560,8 +566,8 @@ def test_refresh_inserts_rows_and_records_source_version(
 
     assert active_count is not None
     assert active_count[0] == _EXPECTED_DB_ROW_COUNT
-    assert all_active is not None
-    assert all_active[0] == 0
+    assert non_current is not None
+    assert non_current[0] == 0
     assert len(version_rows) == 1
     assert version_rows[0] == ("2026_04_15", _EXPECTED_DB_ROW_COUNT, True)
 
@@ -586,7 +592,9 @@ def test_refresh_second_call_is_short_circuit(
 
     with duckdb_connection() as conn:
         n_active = conn.execute(
-            "SELECT COUNT(*) FROM pharmgkb_annotations WHERE is_active = TRUE",
+            "SELECT COUNT(*) FROM pharmgkb_annotations p "
+            "JOIN annotation_sources s "
+            "ON s.source = 'pharmgkb' AND s.current_source_version_id = p.source_version_id",
         ).fetchone()
         n_versions = conn.execute(
             "SELECT COUNT(*) FROM annotation_source_versions WHERE source_db = 'pharmgkb'",
@@ -620,14 +628,15 @@ def test_refresh_new_version_supersedes_prior_rows(
     assert second.source_version_id > first.source_version_id
 
     with duckdb_connection() as conn:
-        inactive = conn.execute(
-            "SELECT COUNT(*) FROM pharmgkb_annotations"
-            " WHERE is_active = FALSE AND source_version_id = ?",
+        current_pointer = conn.execute(
+            "SELECT current_source_version_id FROM annotation_sources WHERE source = 'pharmgkb'",
+        ).fetchone()
+        prior_rows = conn.execute(
+            "SELECT COUNT(*) FROM pharmgkb_annotations WHERE source_version_id = ?",
             [first.source_version_id],
         ).fetchone()
         active = conn.execute(
-            "SELECT COUNT(*) FROM pharmgkb_annotations"
-            " WHERE is_active = TRUE AND source_version_id = ?",
+            "SELECT COUNT(*) FROM pharmgkb_annotations WHERE source_version_id = ?",
             [second.source_version_id],
         ).fetchone()
         version_rows = conn.execute(
@@ -635,8 +644,10 @@ def test_refresh_new_version_supersedes_prior_rows(
             " WHERE source_db = 'pharmgkb' ORDER BY source_version_id",
         ).fetchall()
 
-    assert inactive is not None
-    assert inactive[0] == _EXPECTED_DB_ROW_COUNT
+    assert current_pointer is not None
+    assert int(current_pointer[0]) == second.source_version_id
+    assert prior_rows is not None
+    assert prior_rows[0] == _EXPECTED_DB_ROW_COUNT
     # Trimmed v2 expansion: 1+5+1 = 7 rows.
     assert active is not None
     assert active[0] == 7
@@ -656,26 +667,26 @@ def test_refresh_force_reloads_even_when_version_matches(
     assert second.was_already_current is False
     # ``force=True`` with the same version label reuses the existing
     # source_version_id (``upsert_source_version`` is idempotent on
-    # ``(source_db, version)``). The force path blanket-deactivates
-    # every prior active PharmGKB row before re-inserting, so:
-    #   * the first refresh's rows flip to is_active=FALSE,
-    #   * the second refresh's rows land as is_active=TRUE,
-    #   * every row carries the same source_version_id,
-    #   * total active row count matches the fixture's expected count.
+    # ``(source_db, version)``). Under the version-pointer pattern both
+    # inserts land under the same id and both are "current" because the
+    # ``annotation_sources`` pointer matches that id. Dedup at read time
+    # is a downstream concern, not a supersession correctness issue.
     assert second.source_version_id == first.source_version_id
 
     with duckdb_connection() as conn:
-        active = conn.execute(
-            "SELECT COUNT(*) FROM pharmgkb_annotations WHERE is_active = TRUE",
+        current_pointer = conn.execute(
+            "SELECT current_source_version_id FROM annotation_sources WHERE source = 'pharmgkb'",
         ).fetchone()
-        deactivated = conn.execute(
-            "SELECT COUNT(*) FROM pharmgkb_annotations WHERE is_active = FALSE",
+        active = conn.execute(
+            "SELECT COUNT(*) FROM pharmgkb_annotations p "
+            "JOIN annotation_sources s "
+            "ON s.source = 'pharmgkb' AND s.current_source_version_id = p.source_version_id",
         ).fetchone()
         total = conn.execute("SELECT COUNT(*) FROM pharmgkb_annotations").fetchone()
+    assert current_pointer is not None
+    assert int(current_pointer[0]) == first.source_version_id
     assert active is not None
-    assert active[0] == _EXPECTED_DB_ROW_COUNT
-    assert deactivated is not None
-    assert deactivated[0] == _EXPECTED_DB_ROW_COUNT
+    assert active[0] == 2 * _EXPECTED_DB_ROW_COUNT
     assert total is not None
     assert total[0] == 2 * _EXPECTED_DB_ROW_COUNT
 
@@ -693,8 +704,7 @@ def test_refresh_writes_expected_column_values(
             """
             SELECT pgkb_accession, rsid, star_allele, gene_symbol,
                    drug_name, phenotype_category, evidence_level,
-                   guideline_summary, guideline_url, chrom, pos_grch38,
-                   is_active
+                   guideline_summary, guideline_url, chrom, pos_grch38
               FROM pharmgkb_annotations
              WHERE pgkb_accession = '1001'
             """,
@@ -712,7 +722,6 @@ def test_refresh_writes_expected_column_values(
         url,
         chrom,
         pos,
-        active,
     ) = row
     assert pgkb == "1001"
     assert rsid == "rs951439"
@@ -725,7 +734,6 @@ def test_refresh_writes_expected_column_values(
     assert url == "https://www.pharmgkb.org/clinicalAnnotation/1001"
     assert chrom is None
     assert pos is None
-    assert active is True
 
 
 # ---------------------------------------------------------------------------
