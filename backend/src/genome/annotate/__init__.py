@@ -46,7 +46,11 @@ from genome.annotate.source_versions import (
     get_current_version,
     upsert_source_version,
 )
-from genome.annotate.supersession import deactivate_prior_versions
+from genome.annotate.supersession import (
+    commit_and_checkpoint,
+    deactivate_prior_versions,
+    maybe_skip_same_version,
+)
 
 __all__ = [
     "KNOWN_SOURCE_DBS",
@@ -55,12 +59,14 @@ __all__ = [
     "RefreshResult",
     "SourceVersion",
     "annotate_app",
+    "commit_and_checkpoint",
     "deactivate_prior_versions",
     "default_annotations_root",
     "download_to_cache",
     "get_current_version",
     "get_loader",
     "known_loaders",
+    "maybe_skip_same_version",
     "register_loader",
     "source_download_dir",
     "upsert_source_version",

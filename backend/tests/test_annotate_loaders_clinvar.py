@@ -1390,8 +1390,12 @@ def test_cli_refresh_force_flag_passes_through_to_loader(
 
     received: dict[str, bool] = {}
 
-    def _recording_refresh(force: bool) -> object:  # noqa: FBT001
+    def _recording_refresh(
+        force: bool,  # noqa: FBT001
+        skip_if_same_version: bool,  # noqa: FBT001
+    ) -> object:
         received["force"] = force
+        received["skip_if_same_version"] = skip_if_same_version
         from genome.annotate.registry import RefreshResult  # noqa: PLC0415
 
         return RefreshResult(
@@ -1412,7 +1416,7 @@ def test_cli_refresh_force_flag_passes_through_to_loader(
         ["annotate", "refresh", "--source", "clinvar", "--force"],
     )
     assert result.exit_code == 0, result.output
-    assert received == {"force": True}
+    assert received == {"force": True, "skip_if_same_version": False}
 
 
 # ---------------------------------------------------------------------------

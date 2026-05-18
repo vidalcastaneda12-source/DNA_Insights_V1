@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Pre-5.5 — supersession observability + `--skip-if-same-version`.**
+  Addresses finding-009 #9, #11, and #14 ahead of sub-phase 5.5
+  (gnomAD filtered), which will exercise the supersession path
+  against a row count larger than ClinVar's 9M. The supersession
+  atomicity contract (CLAUDE.md decision #7) is unchanged: the
+  UPDATE remains one statement in one transaction. The change is
+  observability-only plus an opt-in CLI short-circuit:
+  - `genome.annotate.supersession.deactivate_prior_versions` now
+    emits `supersession_update_start` (with `prior_active_rows`)
+    and `supersession_update_complete` (with `rows_deactivated`
+    and `duration_ms`) around the UPDATE statement.
+  - New helper `commit_and_checkpoint(conn, source_name=...)`
+    issues `conn.commit()` followed by an explicit `CHECKPOINT`,
+    bracketing each phase with start/complete structlog events
+    that report `duration_ms`. Per finding-009, the post-COMMIT
+    flush dominated the 1,699s same-version ClinVar refresh and
+    was previously opaque; the explicit CHECKPOINT moves the
+    flush inside the measured wall-clock window without changing
+    total cost.
+  - All five Phase-5 loaders (ClinVar, GWAS Catalog, PharmGKB,
+    CPIC, PGS Catalog) thread `source_name=SOURCE_DB` through
+    their `_deactivate_for_refresh` helpers and call
+    `commit_and_checkpoint(conn, source_name=SOURCE_DB)` in place
+    of the bare `conn.commit()` that previously closed each
+    supersession transaction.
+  - New `--skip-if-same-version` flag on `genome annotate refresh`.
+    Off by default. When set, each loader (via the new shared
+    `maybe_skip_same_version` helper) queries
+    `annotation_source_versions` after download, and if the
+    currently-active row matches `(source_db, version,
+    source_file_hash)` emits `supersession_skipped_same_version`
+    and returns a `RefreshResult` with `was_already_current=True`
+    instead of running the supersession path. The match key
+    includes the file hash so a same-label upstream regeneration
+    still triggers a re-load. Existing `--force` invocations
+    behave identically when the flag is not passed.
+  - Registry's `RefreshFn` type and every loader's `refresh`
+    signature gain a `skip_if_same_version: bool = False` second
+    parameter; the CLI passes the flag through positionally.
+  - 9 new tests in `backend/tests/test_annotate_supersession.py`
+    cover the per-phase events (update start/complete, commit
+    start/complete, checkpoint start/complete), the explicit
+    CHECKPOINT (asserted via `MagicMock`), and every branch of
+    `maybe_skip_same_version` (flag off, matching active row,
+    no active row, version mismatch, hash mismatch, superseded
+    row ignored). 3 new tests in
+    `backend/tests/test_annotate_cli.py` verify the CLI surface:
+    `--skip-if-same-version` appears in `--help`, the flag value
+    reaches the loader, and omitting the flag passes `False`.
+  - No schema changes; no `rm -rf data/` rebuild required. (PR #41)
+
 ### Fixed
 - **Sub-phase 5.4 follow-up — `distinct_trait_category=0` bug.**
   Real-data verification of the original 5.4 loader (PR #39)

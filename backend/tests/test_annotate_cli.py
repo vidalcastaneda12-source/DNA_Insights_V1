@@ -149,3 +149,97 @@ def test_annotate_status_does_not_create_cache_directory(
     runner.invoke(app, ["annotate", "status"])
     runner.invoke(app, ["annotate", "refresh", "--source", "clinvar"])
     assert not annotations_root.exists()
+
+
+def test_annotate_refresh_help_documents_skip_if_same_version_flag(
+    annotations_root: Path,  # noqa: ARG001
+) -> None:
+    """The new --skip-if-same-version flag must appear in --help output.
+
+    Regression guard for the finding-009 #14 CLI surface: future readers
+    can discover the flag without diffing the source.
+    """
+    runner = CliRunner()
+    result = runner.invoke(app, ["annotate", "refresh", "--help"])
+    assert result.exit_code == 0
+    assert "--skip-if-same-version" in result.output
+
+
+def test_annotate_refresh_skip_if_same_version_flag_reaches_loader(
+    annotations_root: Path,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--skip-if-same-version`` on the CLI must reach the loader call."""
+    init_databases()
+    received: dict[str, bool] = {}
+
+    def _recording_refresh(
+        force: bool,  # noqa: FBT001
+        skip_if_same_version: bool,  # noqa: FBT001
+    ) -> object:
+        received["force"] = force
+        received["skip_if_same_version"] = skip_if_same_version
+        from genome.annotate.registry import RefreshResult  # noqa: PLC0415
+
+        return RefreshResult(
+            source_db="clinvar",
+            source_version_id=1,
+            version="2026_05_10",
+            record_count=0,
+            was_already_current=True,
+        )
+
+    monkeypatch.setattr(
+        "genome.annotate.registry._LOADERS",
+        {"clinvar": _recording_refresh},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "annotate",
+            "refresh",
+            "--source",
+            "clinvar",
+            "--force",
+            "--skip-if-same-version",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert received == {"force": True, "skip_if_same_version": True}
+
+
+def test_annotate_refresh_without_skip_flag_passes_false_to_loader(
+    annotations_root: Path,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default behaviour: omitting --skip-if-same-version passes False through."""
+    init_databases()
+    received: dict[str, bool] = {}
+
+    def _recording_refresh(
+        force: bool,  # noqa: FBT001
+        skip_if_same_version: bool,  # noqa: FBT001
+    ) -> object:
+        received["force"] = force
+        received["skip_if_same_version"] = skip_if_same_version
+        from genome.annotate.registry import RefreshResult  # noqa: PLC0415
+
+        return RefreshResult(
+            source_db="clinvar",
+            source_version_id=1,
+            version="2026_05_10",
+            record_count=0,
+            was_already_current=False,
+        )
+
+    monkeypatch.setattr(
+        "genome.annotate.registry._LOADERS",
+        {"clinvar": _recording_refresh},
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["annotate", "refresh", "--source", "clinvar"])
+    assert result.exit_code == 0, result.output
+    assert received == {"force": False, "skip_if_same_version": False}

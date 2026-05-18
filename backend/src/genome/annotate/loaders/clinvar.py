@@ -74,7 +74,11 @@ from genome.annotate.source_versions import (
     get_current_version,
     upsert_source_version,
 )
-from genome.annotate.supersession import deactivate_prior_versions
+from genome.annotate.supersession import (
+    commit_and_checkpoint,
+    deactivate_prior_versions,
+    maybe_skip_same_version,
+)
 from genome.db.duckdb_conn import duckdb_connection
 from genome.ingest.models import normalize_chrom
 from genome.privacy.external_client import (
@@ -766,6 +770,7 @@ def _deactivate_for_refresh(
             table=_TARGET_TABLE,
             new_source_version_id=source_version_id,
             has_superseded_by=True,
+            source_name=SOURCE_DB,
         )
     # _TARGET_TABLE is a module constant, not user input — S608 is a
     # false positive here.
@@ -860,7 +865,10 @@ def _summarize_active(conn: DuckDBPyConnection) -> dict[str, object]:
 # ---------------------------------------------------------------------------
 
 
-def refresh(force: bool) -> RefreshResult:  # noqa: FBT001 — registry RefreshFn signature
+def refresh(
+    force: bool,  # noqa: FBT001 — positional matches registry's RefreshFn signature
+    skip_if_same_version: bool = False,  # noqa: FBT001, FBT002 — opt-in default for the new flag
+) -> RefreshResult:
     """Refresh ClinVar clinical-significance annotations.
 
     Pipeline:
@@ -877,12 +885,21 @@ def refresh(force: bool) -> RefreshResult:  # noqa: FBT001 — registry RefreshF
     3. Download ``variant_summary.txt.gz`` via the audited
        :func:`genome.annotate.downloads.download_to_cache`
        (skip-if-exists by default; ``force=True`` re-downloads).
+    3a. If ``skip_if_same_version`` is ``True`` and the downloaded
+        file's (version, sha256) match the currently-active row, short-
+        circuit via :func:`maybe_skip_same_version`. This is the
+        finding-009 #14 safety net for ``--force`` re-runs against
+        unchanged ClinVar releases (~28 minutes of UPDATE+checkpoint
+        avoided when the file is byte-for-byte identical).
     4. Inside one DuckDB transaction: upsert
        ``annotation_source_versions``, deactivate prior ClinVar rows
        via :func:`_deactivate_for_refresh`, stream-parse the gzipped
        TSV, chunk-insert at :data:`_CHUNK_SIZE` rows per chunk via
        :func:`_stream_bulk_insert`, and update the version row's
-       ``record_count`` once the streaming completes.
+       ``record_count`` once the streaming completes. The supersession
+       transaction is closed via :func:`commit_and_checkpoint` so the
+       COMMIT + explicit CHECKPOINT phases are observable in the
+       structlog stream (finding-009 #9 and #11).
     5. Open a fresh read-only connection and emit a structlog summary
        line with the locked drift identifiers (active row total,
        distinct variation_id, distinct non-NULL rsID, clinical
@@ -921,6 +938,19 @@ def refresh(force: bool) -> RefreshResult:  # noqa: FBT001 — registry RefreshF
         sha256=download_result.sha256[:16],
         size_bytes=download_result.size_bytes,
     )
+
+    # 3a. --skip-if-same-version short-circuit (finding-009 #14). Fires
+    # after the download so the hash check is against the live file
+    # bytes, not just the version label. Off by default; when on, this
+    # is what makes a same-version --force re-run cheap.
+    skip = maybe_skip_same_version(
+        source_db=SOURCE_DB,
+        version=version,
+        source_file_hash=download_result.sha256,
+        skip_if_same_version=skip_if_same_version,
+    )
+    if skip is not None:
+        return skip
 
     # 4. Single-transaction load. The PharmGKB loader's "version row in
     # its own transaction, supersede + insert in the wrapping
@@ -970,7 +1000,7 @@ def refresh(force: bool) -> RefreshResult:  # noqa: FBT001 — registry RefreshF
                 "WHERE source_version_id = ?",
                 [inserted, source_version_id],
             )
-            conn.commit()
+            commit_and_checkpoint(conn, source_name=SOURCE_DB)
         except Exception:
             conn.rollback()
             _cleanup_orphan_version_row(conn, source_version_id)
