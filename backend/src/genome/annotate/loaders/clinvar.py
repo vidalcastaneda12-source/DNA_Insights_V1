@@ -748,40 +748,36 @@ def _deactivate_for_refresh(
 ) -> int:
     """Deactivate prior ClinVar rows ahead of a refresh insert.
 
-    Mirrors :func:`genome.annotate.loaders.pharmgkb._deactivate_for_refresh`
-    and :func:`genome.annotate.loaders.cpic._deactivate_for_refresh`:
-    on the normal (non-force) path defer to the schema's standard
-    supersession helper; on the force path blanket-deactivate every
-    active ClinVar row so a re-run against the same version label
-    doesn't leave duplicate active rows.
+    Thin per-source seam over the shared
+    :func:`genome.annotate.supersession.deactivate_prior_versions`
+    helper. Both the normal and ``--force`` paths route through the
+    same helper so the supersession UPDATE is one statement and the
+    structlog ``supersession_update_start`` /
+    ``supersession_update_complete`` events fire identically on both
+    paths (finding-009 #16). ``force_all_active=force`` flips the
+    WHERE clause between "rows older than the new version" (the
+    default) and "every active row" (force mode) so a same-version
+    ``--force`` re-run still sweeps the prior set even though
+    ``upsert_source_version`` reused the existing
+    ``source_version_id``.
 
     ``clinvar_annotations`` carries both ``is_active`` *and*
     ``superseded_by`` (the only Phase-5 source loader so far that
     populates the ``superseded_by`` chain), so we pass
-    ``has_superseded_by=True`` to the standard helper -- deactivated
-    rows get tagged with the new ``source_version_id`` so the
-    supersession history is followable.
+    ``has_superseded_by=True`` -- deactivated rows get tagged with the
+    new ``source_version_id`` so the supersession history is
+    followable.
 
     Returns the number of rows flipped to ``is_active=FALSE``.
     """
-    if not force:
-        return deactivate_prior_versions(
-            conn,
-            table=_TARGET_TABLE,
-            new_source_version_id=source_version_id,
-            has_superseded_by=True,
-            source_name=SOURCE_DB,
-        )
-    # _TARGET_TABLE is a module constant, not user input — S608 is a
-    # false positive here.
-    res = conn.execute(
-        f"UPDATE {_TARGET_TABLE} "  # noqa: S608
-        "SET is_active = FALSE, superseded_by = ? "
-        "WHERE is_active = TRUE",
-        [source_version_id],
+    return deactivate_prior_versions(
+        conn,
+        table=_TARGET_TABLE,
+        new_source_version_id=source_version_id,
+        has_superseded_by=True,
+        source_name=SOURCE_DB,
+        force_all_active=force,
     )
-    row = res.fetchone() if hasattr(res, "fetchone") else None
-    return int(row[0]) if row is not None and row[0] is not None else 0
 
 
 def _cleanup_orphan_version_row(

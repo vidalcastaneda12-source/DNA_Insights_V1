@@ -518,6 +518,326 @@ def test_maybe_skip_same_version_ignores_superseded_match(
     assert result is None
 
 
+# ---------------------------------------------------------------------------
+# force_all_active mode (finding-009 #16 — unified --force path).
+# ---------------------------------------------------------------------------
+
+
+def test_deactivate_prior_versions_force_all_active_deactivates_every_active_row(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """``force_all_active=True`` sweeps active rows regardless of version id.
+
+    Seeds three versions, all active, then calls the helper with
+    ``new_source_version_id=v3`` and ``force_all_active=True``. The
+    default predicate would only touch v1 and v2 (versions strictly
+    less than v3); force mode must touch v3 too, since the
+    same-version ``--force`` case is the whole reason the parameter
+    exists.
+    """
+    init_databases()
+    with duckdb_connection() as conn:
+        v1 = upsert_source_version(
+            conn,
+            source_db="clinvar",
+            version="2026_03_15",
+            source_url=None,
+            source_file_hash="a" * 64,
+            source_file_size=1,
+            record_count=2,
+        )
+        _seed_clinvar_rows(conn, v1, count=2)
+        v2 = upsert_source_version(
+            conn,
+            source_db="clinvar",
+            version="2026_04_15",
+            source_url=None,
+            source_file_hash="b" * 64,
+            source_file_size=1,
+            record_count=3,
+        )
+        _seed_clinvar_rows(conn, v2, count=3)
+        v3 = upsert_source_version(
+            conn,
+            source_db="clinvar",
+            version="2026_05_15",
+            source_url=None,
+            source_file_hash="c" * 64,
+            source_file_size=1,
+            record_count=1,
+        )
+        _seed_clinvar_rows(conn, v3, count=1)
+
+        touched = deactivate_prior_versions(
+            conn,
+            table="clinvar_annotations",
+            new_source_version_id=v3,
+            has_superseded_by=True,
+            force_all_active=True,
+        )
+        rows = conn.execute(
+            """
+            SELECT source_version_id, is_active, superseded_by
+              FROM clinvar_annotations
+             ORDER BY clinvar_id
+            """,
+        ).fetchall()
+
+    # 2 (v1) + 3 (v2) + 1 (v3) = 6 active rows; force mode touches them all.
+    assert touched == 6
+    by_version: dict[int, list[tuple[object, ...]]] = {}
+    for r in rows:
+        by_version.setdefault(int(r[0]), []).append(r)
+    for sv_id in (v1, v2, v3):
+        assert len(by_version[sv_id]) == ({v1: 2, v2: 3, v3: 1}[sv_id])
+        for r in by_version[sv_id]:
+            assert r[1] is False
+            # Every deactivated row points at the new (== v3) version id,
+            # including v3's own rows -- the "self supersession" shape
+            # that lets us identify which sweep deactivated them.
+            assert r[2] == v3
+
+
+def test_deactivate_prior_versions_default_mode_byte_identical_behavior(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """``force_all_active=False`` (default) preserves existing behavior.
+
+    Regression guard for the unification refactor: the default path
+    must touch exactly the rows whose ``source_version_id`` is
+    strictly less than the new id AND ``is_active`` is true. v3's own
+    rows (sharing the new id) stay active.
+    """
+    init_databases()
+    with duckdb_connection() as conn:
+        v1 = upsert_source_version(
+            conn,
+            source_db="clinvar",
+            version="2026_03_15",
+            source_url=None,
+            source_file_hash="a" * 64,
+            source_file_size=1,
+            record_count=2,
+        )
+        _seed_clinvar_rows(conn, v1, count=2)
+        v2 = upsert_source_version(
+            conn,
+            source_db="clinvar",
+            version="2026_04_15",
+            source_url=None,
+            source_file_hash="b" * 64,
+            source_file_size=1,
+            record_count=3,
+        )
+        _seed_clinvar_rows(conn, v2, count=3)
+        v3 = upsert_source_version(
+            conn,
+            source_db="clinvar",
+            version="2026_05_15",
+            source_url=None,
+            source_file_hash="c" * 64,
+            source_file_size=1,
+            record_count=1,
+        )
+        _seed_clinvar_rows(conn, v3, count=1)
+
+        touched = deactivate_prior_versions(
+            conn,
+            table="clinvar_annotations",
+            new_source_version_id=v3,
+            has_superseded_by=True,
+            # force_all_active defaults to False; assert the documented
+            # default behavior is preserved.
+        )
+        rows = conn.execute(
+            """
+            SELECT source_version_id, is_active, superseded_by
+              FROM clinvar_annotations
+             ORDER BY clinvar_id
+            """,
+        ).fetchall()
+
+    # v1 (2) + v2 (3) = 5 rows; v3's own rows are NOT touched.
+    assert touched == 5
+    by_version: dict[int, list[tuple[object, ...]]] = {}
+    for r in rows:
+        by_version.setdefault(int(r[0]), []).append(r)
+    for sv_id in (v1, v2):
+        for r in by_version[sv_id]:
+            assert r[1] is False
+            assert r[2] == v3
+    # v3's own row is untouched.
+    assert len(by_version[v3]) == 1
+    assert by_version[v3][0][1] is True
+    assert by_version[v3][0][2] is None
+
+
+def test_deactivate_prior_versions_force_mode_without_superseded_by(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """Force mode with ``has_superseded_by=False`` only flips ``is_active``.
+
+    Mirrors the PharmGKB / CPIC / GWAS / PGS schema shape: those
+    tables carry ``is_active`` but not ``superseded_by``. The helper
+    must respect the flag even in force mode -- it doesn't try to
+    write the (non-existent) ``superseded_by`` column.
+    """
+    init_databases()
+    with duckdb_connection() as conn:
+        v1 = upsert_source_version(
+            conn,
+            source_db="clinvar",
+            version="2026_03_15",
+            source_url=None,
+            source_file_hash="a" * 64,
+            source_file_size=1,
+            record_count=2,
+        )
+        _seed_clinvar_rows(conn, v1, count=2)
+
+        touched = deactivate_prior_versions(
+            conn,
+            table="clinvar_annotations",
+            new_source_version_id=v1,
+            has_superseded_by=False,
+            force_all_active=True,
+        )
+        rows = conn.execute(
+            """
+            SELECT is_active, superseded_by
+              FROM clinvar_annotations
+             ORDER BY clinvar_id
+            """,
+        ).fetchall()
+
+    assert touched == 2
+    for r in rows:
+        assert r[0] is False
+        # No has_superseded_by → superseded_by stays NULL even in force mode.
+        assert r[1] is None
+
+
+def test_deactivate_prior_versions_events_include_force_all_active_flag(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """Both ``_start`` and ``_complete`` events surface the mode flag.
+
+    Force mode must be distinguishable from default mode in the log
+    stream so an operator reading a `--force` re-run can confirm the
+    sweep semantics. Real-data verification of finding-009 #16 found
+    the previous inline UPDATE emitted no events at all; this
+    assertion is the regression guard for the new unified path.
+    """
+    init_databases()
+    with duckdb_connection() as conn:
+        v1 = upsert_source_version(
+            conn,
+            source_db="clinvar",
+            version="2026_03_15",
+            source_url=None,
+            source_file_hash="a" * 64,
+            source_file_size=1,
+            record_count=2,
+        )
+        _seed_clinvar_rows(conn, v1, count=2)
+
+        # Default mode emits force_all_active=False.
+        with capture_logs() as default_log:
+            deactivate_prior_versions(
+                conn,
+                table="clinvar_annotations",
+                new_source_version_id=v1 + 1,  # sentinel new id (no rows under it)
+                has_superseded_by=True,
+                source_name="clinvar",
+            )
+
+        # Re-seed since the above deactivated v1's rows.
+        v2 = upsert_source_version(
+            conn,
+            source_db="clinvar",
+            version="2026_04_15",
+            source_url=None,
+            source_file_hash="b" * 64,
+            source_file_size=1,
+            record_count=1,
+        )
+        _seed_clinvar_rows(conn, v2, count=1)
+
+        # Force mode emits force_all_active=True.
+        with capture_logs() as force_log:
+            deactivate_prior_versions(
+                conn,
+                table="clinvar_annotations",
+                new_source_version_id=v2,
+                has_superseded_by=True,
+                source_name="clinvar",
+                force_all_active=True,
+            )
+
+    for entry in default_log:
+        if entry["event"] in {"supersession_update_start", "supersession_update_complete"}:
+            assert entry["force_all_active"] is False
+    for entry in force_log:
+        if entry["event"] in {"supersession_update_start", "supersession_update_complete"}:
+            assert entry["force_all_active"] is True
+
+
+# ---------------------------------------------------------------------------
+# Loader-level — each Phase-5 loader's _deactivate_for_refresh routes through
+# the shared helper (finding-009 #16).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("loader_module", "table"),
+    [
+        ("genome.annotate.loaders.clinvar", "clinvar_annotations"),
+        ("genome.annotate.loaders.pharmgkb", "pharmgkb_annotations"),
+        ("genome.annotate.loaders.cpic", "cpic_guidelines"),
+        ("genome.annotate.loaders.gwas_catalog", "gwas_catalog_associations"),
+        ("genome.annotate.loaders.pgs_catalog", "pgs_catalog_scores"),
+    ],
+)
+def test_loader_deactivate_for_refresh_routes_through_shared_helper(
+    loader_module: str,
+    table: str,
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """Each loader's ``_deactivate_for_refresh`` wrapper calls the shared helper.
+
+    Regression guard for finding-009 #16: the prior inline UPDATE on
+    the ``force=True`` path bypassed
+    :func:`deactivate_prior_versions` and its observability events.
+    Patching the helper module-side and asserting it gets called with
+    ``force_all_active=force`` confirms the unification holds across
+    every Phase-5 loader and that no loader silently keeps an inline
+    UPDATE behind the wrapper.
+    """
+    from importlib import import_module  # noqa: PLC0415 — test-local
+    from unittest.mock import patch  # noqa: PLC0415 — test-local
+
+    loader = import_module(loader_module)
+    sentinel_version_id = 12345
+
+    for force in (False, True):
+        with patch.object(loader, "deactivate_prior_versions", return_value=0) as mock_helper:
+            loader._deactivate_for_refresh(  # noqa: SLF001 — test asserts the wrapper's contract
+                conn=None,  # the mock doesn't use it
+                source_version_id=sentinel_version_id,
+                force=force,
+            )
+            mock_helper.assert_called_once()
+            kwargs = mock_helper.call_args.kwargs
+            assert kwargs["table"] == table
+            assert kwargs["new_source_version_id"] == sentinel_version_id
+            assert kwargs["force_all_active"] is force
+            assert kwargs["source_name"] == loader.SOURCE_DB
+            # ClinVar is the only Phase-5 loader that populates
+            # superseded_by; the others must keep has_superseded_by=False.
+            expected_has_superseded_by = loader_module.endswith(".clinvar")
+            assert kwargs["has_superseded_by"] is expected_has_superseded_by
+
+
 @pytest.fixture(autouse=True)
 def _reset_structlog_after_each_test() -> object:
     """Restore structlog defaults so capture_logs doesn't leak between tests."""
