@@ -144,7 +144,7 @@ CREATE INDEX idx_vm_acmg_sf       ON variants_master(is_acmg_sf);
 
 ### `genotype_calls`
 
-One active row per `(variant, source)`. Old calls preserved with `is_active = FALSE` for audit.
+One active row per `(variant, source)`. Old calls preserved with `is_active = FALSE` for audit. The supersession grain here is **per-row** — re-ingesting the same chip type produces a new call row and deactivates the prior one for that `(variant_id, source)` pair. This is the row-grain mechanism in CLAUDE.md decision #7; the source-grain version-pointer pattern (used for group 2's evolving annotation sources) does not apply because each chip-derived call is independently updateable rather than part of an entire dataset that flips atomically.
 
 ```sql
 CREATE TABLE genotype_calls (

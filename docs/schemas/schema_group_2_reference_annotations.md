@@ -8,7 +8,7 @@ The bulk-loaded knowledge layer: dbSNP, ClinVar, GWAS Catalog, PharmGKB, CPIC, P
 
 ## Design principles
 
-1. **Versioning on every row.** Every annotation references `annotation_source_versions` for full traceability. When ClinVar updates, old rows are deactivated rather than overwritten — supports supersession (group 4) and snapshot reproducibility.
+1. **Versioning on every row.** Every annotation references `annotation_source_versions` for full traceability. When ClinVar updates, the new release is inserted under a fresh `source_version_id` and the single-row pointer in `annotation_sources` is flipped to it; prior rowsets stay in the table indexed by their older `source_version_id` and are filtered out of every reader join. Supports supersession (group 4) and snapshot reproducibility.
 
 2. **Two coverage strategies.** Some sources are bulk-loaded in full because their utility depends on completeness; others are filtered to variants we care about because they're too large.
 
@@ -16,7 +16,7 @@ The bulk-loaded knowledge layer: dbSNP, ClinVar, GWAS Catalog, PharmGKB, CPIC, P
 
 4. **Denormalized rollup table.** `variant_annotations_index` is a precomputed per-variant summary across all sources — powers fast SNP-detail page loads. Refreshed by job whenever source data changes.
 
-5. **Soft-delete for evolving sources.** ClinVar, GWAS Catalog, PharmGKB, CPIC all evolve. Keep history via `is_active` + `superseded_by` in the row, then refresh `variant_annotations_index`.
+5. **Version-pointer supersession for evolving sources.** ClinVar, GWAS Catalog, PharmGKB, CPIC, and PGS Catalog all evolve. Each refresh INSERTs the new rowset under a fresh `source_version_id`, then UPSERTs `annotation_sources.current_source_version_id` for that `source_db`. The pointer flip is the supersession event — atomically promotes the new rowset and demotes the prior one without touching a single annotation row. Readers join through `annotation_sources` to scope a query to the current version. Refresh `variant_annotations_index` after the flip lands. See [finding-010](../findings/finding-010-version-pointer-supersession-pattern.md) for the rationale and trade-offs vs the prior per-row `is_active` model.
 
 ---
 
@@ -39,27 +39,52 @@ The bulk-loaded knowledge layer: dbSNP, ClinVar, GWAS Catalog, PharmGKB, CPIC, P
 
 ## Master version registry
 
+One row per refresh. Identity is `source_version_id` alone — `(source_db, version)` is **not** unique, because a `--force` re-load against the same upstream release allocates a fresh `source_version_id` rather than reusing the prior one. The supersession audit trail is the row itself; the "currently active" version is named by the single-row pointer in `annotation_sources` (see below).
+
 ```sql
 CREATE TABLE annotation_source_versions (
   source_version_id     BIGINT PRIMARY KEY,
   source_db             VARCHAR NOT NULL,        -- 'clinvar', 'gwas_catalog', 'pharmgkb',
                                                  -- 'cpic', 'pgs_catalog', 'gnomad',
                                                  -- 'dbsnp', 'vep', 'hgnc', 'efo', 'kegg'
-  version               VARCHAR NOT NULL,        -- e.g. '2026_04_15'
+  version               VARCHAR NOT NULL,        -- e.g. '2026_04_15'; not unique
   ingested_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   source_url            VARCHAR,                 -- where downloaded from
   source_file_hash      VARCHAR(64),
   source_file_size      BIGINT,
   record_count          INTEGER,
-  is_current            BOOLEAN DEFAULT TRUE,    -- one current row per source_db
-  notes                 TEXT,
-  UNIQUE (source_db, version)
+  notes                 TEXT
 );
 
-CREATE INDEX idx_asv_current ON annotation_source_versions(source_db, is_current);
+CREATE INDEX idx_asv_source_db ON annotation_source_versions(source_db);
 ```
 
-> **Application invariant:** at most one `is_current = TRUE` row per `source_db`. New ingest deactivates the prior current row.
+## Per-source current-version pointer
+
+One row per `source_db`. `current_source_version_id` names the version that is "current" right now. A refresh INSERTs the new rowset into the per-source annotation table under a fresh `source_version_id`, then UPSERTs this pointer; the UPSERT *is* the supersession event. See `backend/src/genome/annotate/supersession.py` for the helper (`flip_to_new_version`) every loader calls.
+
+```sql
+CREATE TABLE annotation_sources (
+  source_db                    VARCHAR PRIMARY KEY,
+  current_source_version_id    BIGINT NOT NULL REFERENCES annotation_source_versions(source_version_id)
+);
+```
+
+> **Application invariant:** exactly one row per supersedable `source_db` once the first refresh lands. The pointer flip is atomic by virtue of being a single-row UPSERT — readers either see the prior version's id or the new one's, never a torn state. Per-row `is_active` flags on the annotation tables are not needed and are not present on the five supersedable tables (ClinVar, GWAS Catalog, PharmGKB, CPIC, PGS Catalog).
+
+## Canonical read pattern
+
+To select rows from a supersedable annotation table at the current version, join through `annotation_sources`:
+
+```sql
+SELECT ca.*
+FROM clinvar_annotations ca
+JOIN annotation_sources s
+  ON s.source_db = 'clinvar'
+ AND s.current_source_version_id = ca.source_version_id;
+```
+
+To select a *specific* historical version, filter on `source_version_id` directly (no join required — the version registry's `ingested_at` orders releases). Refresh-time loaders consult `annotation_sources` via `genome.annotate.source_versions.get_current_version`; view-layer SQL (e.g. `user_pgx_variants_v` below) does the join inline.
 
 ---
 
@@ -137,15 +162,12 @@ CREATE TABLE clinvar_annotations (
 
   -- Lifecycle
   source_version_id     BIGINT NOT NULL REFERENCES annotation_source_versions(source_version_id),
-  retrieval_date        TIMESTAMP NOT NULL,
-  is_active             BOOLEAN DEFAULT TRUE,
-  superseded_by         BIGINT
+  retrieval_date        TIMESTAMP NOT NULL
 );
 
 CREATE INDEX idx_cv_rsid          ON clinvar_annotations(rsid);
 CREATE INDEX idx_cv_pos           ON clinvar_annotations(chrom, pos_grch38);
-CREATE INDEX idx_cv_significance  ON clinvar_annotations(clinical_significance, is_active);
-CREATE INDEX idx_cv_active        ON clinvar_annotations(is_active);
+CREATE INDEX idx_cv_significance  ON clinvar_annotations(clinical_significance);
 ```
 
 ### `gwas_catalog_associations`
@@ -184,8 +206,7 @@ CREATE TABLE gwas_catalog_associations (
 
   -- Lifecycle
   source_version_id     BIGINT NOT NULL REFERENCES annotation_source_versions(source_version_id),
-  retrieval_date        TIMESTAMP NOT NULL,
-  is_active             BOOLEAN DEFAULT TRUE
+  retrieval_date        TIMESTAMP NOT NULL
 );
 
 CREATE INDEX idx_gwas_rsid    ON gwas_catalog_associations(rsid);
@@ -312,8 +333,7 @@ CREATE TABLE pharmgkb_annotations (
   guideline_url         VARCHAR,
 
   source_version_id     BIGINT NOT NULL REFERENCES annotation_source_versions(source_version_id),
-  retrieval_date        TIMESTAMP NOT NULL,
-  is_active             BOOLEAN DEFAULT TRUE
+  retrieval_date        TIMESTAMP NOT NULL
 );
 
 CREATE INDEX idx_pgkb_rsid  ON pharmgkb_annotations(rsid);
@@ -346,8 +366,7 @@ CREATE TABLE cpic_guidelines (
   last_updated            DATE,
 
   source_version_id       BIGINT NOT NULL REFERENCES annotation_source_versions(source_version_id),
-  retrieval_date          TIMESTAMP NOT NULL,
-  is_active               BOOLEAN DEFAULT TRUE
+  retrieval_date          TIMESTAMP NOT NULL
 );
 
 CREATE INDEX idx_cpic_gene_drug ON cpic_guidelines(gene_symbol, drug_name);
@@ -390,11 +409,10 @@ CREATE TABLE pgs_catalog_scores (
 
   -- Lifecycle
   source_version_id     BIGINT NOT NULL REFERENCES annotation_source_versions(source_version_id),
-  retrieval_date        TIMESTAMP NOT NULL,
-  is_active             BOOLEAN DEFAULT TRUE
+  retrieval_date        TIMESTAMP NOT NULL
 );
 
-CREATE INDEX idx_pgs_id    ON pgs_catalog_scores(pgs_id, is_active);
+CREATE INDEX idx_pgs_id    ON pgs_catalog_scores(pgs_id);
 CREATE INDEX idx_pgs_trait ON pgs_catalog_scores(trait_efo);
 ```
 
@@ -626,7 +644,9 @@ FROM variants_master vm
 JOIN consensus_genotypes cg ON cg.variant_id = vm.variant_id
 JOIN pharmgkb_annotations pa
   ON pa.rsid = vm.rsid
- AND pa.is_active
+JOIN annotation_sources pa_src
+  ON pa_src.source_db = 'pharmgkb'
+ AND pa_src.current_source_version_id = pa.source_version_id
 WHERE cg.dosage > 0
 GROUP BY vm.variant_id, vm.rsid, vm.chrom, vm.pos_grch38,
          cg.dosage, cg.consensus_method, pa.gene_symbol, pa.star_allele;
@@ -640,7 +660,7 @@ GROUP BY vm.variant_id, vm.rsid, vm.chrom, vm.pos_grch38,
 
 2. **rsID resolution at lookup.** All annotation joins should canonicalize via `variant_aliases` first — given an input rsID, look up `current_rsid`, then join.
 
-3. **Active-row filtering.** Most queries should filter `is_active = TRUE`. Convenience views or wrapper functions help avoid forgetting.
+3. **Current-version filtering via `annotation_sources` join.** Queries against the five supersedable annotation tables should join through `annotation_sources` on `source_db = '<source>' AND current_source_version_id = <table>.source_version_id`. The `user_pgx_variants_v` view above is the canonical example. Convenience views or wrapper functions help avoid forgetting; historical-version queries filter on `source_version_id` directly (no join). See [finding-010](../findings/finding-010-version-pointer-supersession-pattern.md) for the rationale.
 
 4. **gnomAD filtering set.** Before bulk-loading gnomAD, build the filter set: `(user variants) ∪ (ClinVar variants) ∪ (GWAS Catalog variants) ∪ (PGS Catalog variants)`. Drop everything else.
 
@@ -683,7 +703,8 @@ application-validated:
   it). The corresponding `derived_pgs.pgs_id` is now declared `VARCHAR NOT NULL`
   without a DB-level FK; application code in the PGS analysis pipeline is
   responsible for validating that the value exists in
-  `pgs_catalog_scores(pgs_id)` (typically the active row).
+  `pgs_catalog_scores(pgs_id)` at the current version (joined through
+  `annotation_sources` with `source_db = 'pgs_catalog'`).
 
 The polymorphic `insights.subject_id` remains application-validated; no DB-level FK.
 

@@ -10,7 +10,7 @@ The structured outputs of analysis pipelines: PGS scores, PGx star alleles, carr
 
 1. **Every derived row points to an `analysis_run`.** Same provenance pattern as `ingestion_runs` in group 1. Captures method, version, parameters, source-DB versions used, and timing.
 
-2. **Supersession over update.** When a pipeline re-runs (new PharmCAT version, fresh ClinVar), insert new rows and deactivate the old. Never overwrite. Identical to the pattern from groups 1 and 4.
+2. **Supersession over update — row-grain.** When a pipeline re-runs (new PharmCAT version, fresh ClinVar), insert new derived rows and deactivate the old via per-row `is_active` + `superseded_by`. Never overwrite. The supersession grain here is the derived row itself (one PGx call, one carrier finding, one PRS result) — re-derivation re-evaluates each row individually, so each gets its own active/superseded lifecycle. This is the row-grain side of CLAUDE.md decision #7; for evolving *source* data (group 2's annotation tables), supersession instead happens by flipping a single-row pointer in `annotation_sources` (version-pointer pattern — see [finding-010](../findings/finding-010-version-pointer-supersession-pattern.md)). A pipeline re-run triggered by an updated annotation source therefore sees a new `current_source_version_id` on the input side and produces new per-row rows on the output side.
 
 3. **Method version on every result.** `method` + `method_version` on every derived row. Lets you tell that one PGx call came from PharmCAT 2.13 and a re-run came from 2.14.
 
