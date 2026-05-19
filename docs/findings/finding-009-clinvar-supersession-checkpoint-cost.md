@@ -262,3 +262,40 @@
     transaction with the chunked INSERT. The change is structural
     (one code path instead of two) plus instrumentation (events
     fire on both paths).
+
+## Resolution
+
+17. **Refactor shipped in PR #43.** Items #13 ("chunked UPDATE vs
+    atomicity") and the broader question of whether the mass UPDATE
+    was load-bearing at all were resolved structurally rather than
+    by tuning the UPDATE. PR #43 replaced per-row `is_active` /
+    `superseded_by` flips on the five Phase-5 annotation tables
+    with a single-row version pointer in a new `annotation_sources`
+    table (the version-pointer supersession pattern). The
+    ~17-19 min UPDATE phase that dominated the cost decomposition
+    (item #15) disappears entirely: a refresh now INSERTs the new
+    rowset under a fresh `source_version_id` and UPSERTs the
+    one-row pointer; there is no mass UPDATE to wrap. Atomicity
+    (CLAUDE.md #7) is preserved by the single-row UPSERT.
+
+    Measured same-version ClinVar `--force` refresh against the
+    existing `2026_05_10` release: **4 m 56 s** end-to-end (down
+    from 1,699 s / ~28 min on the per-row path). Inside the new
+    window, the chunked INSERT of the new rowset and the
+    `commit_and_checkpoint` flush dominate; there is no
+    UPDATE-phase line item to attribute time to. PR #41's
+    `supersession_update_*` events are no longer emitted on the
+    supersession path (no UPDATE happens) and have been replaced by
+    `supersession_version_flip` carrying prior + new
+    `source_version_id` and per-version row counts.
+
+    The pattern itself is documented in
+    [finding-010](finding-010-version-pointer-supersession-pattern.md);
+    that finding carries the design rationale, the readers-side
+    reasoning, the implication for sub-phase 5.5 (gnomAD filtered,
+    which now no longer needs to pay a ClinVar-scale UPDATE cost),
+    and the follow-up items that survive into the new pattern
+    (PharmGKB/CPIC `already_current` cosmetic cleanup, the HEAD-
+    request-failure version-label fallback risk under the new
+    pattern, and the orphan-rows cleanup procedure for prior
+    versions left behind in the per-source table).

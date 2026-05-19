@@ -8,6 +8,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **Pre-5.5 — documentation reconcile for the version-pointer
+  supersession refactor (PR #43).** Documentation-only follow-up to
+  PR #43, which replaced per-row `is_active` / `superseded_by` flips
+  on the five Phase-5 annotation tables (ClinVar, GWAS Catalog,
+  PharmGKB, CPIC, PGS Catalog) with a single-row pointer in a new
+  `annotation_sources` table. New
+  [`docs/findings/finding-010-version-pointer-supersession-pattern.md`](docs/findings/finding-010-version-pointer-supersession-pattern.md)
+  carries the design rationale, the readers-side reasoning, and the
+  follow-up items that survive into the new pattern. CLAUDE.md
+  decision #7 is reworded to describe the dual mechanism — version-
+  pointer for source-grain supersession, per-row for row-grain
+  (`genotype_calls`, future insights / evidence / derived rows).
+  `docs/schemas/schema_group_2_reference_annotations.md` is rewritten
+  to match the post-PR-#43 DDL (`is_active` / `superseded_by` columns
+  removed from the five tables; new `annotation_sources` section
+  added; `annotation_source_versions` updated to reflect that
+  identity is `source_version_id` alone). Schema groups 1, 3, and 4
+  pick up dual-mechanism narrative updates; the existing per-row
+  DDL on `genotype_calls` (group 1) and the aspirational
+  per-row DDL on derived / insight / evidence tables (groups 3 / 4)
+  is unchanged — those tables supersede at the row grain, not the
+  source grain, and the version-pointer pattern is documented as the
+  convention for new source-grain supersedable tables only.
+  `docs/runbooks/annotations.md` reconciled to the new mechanism
+  (refresh procedure list, per-loader Force-mode semantics, drift-
+  identifier query shapes, disk/recovery notes). `finding-009`
+  amended in place with item #17 documenting the resolution and the
+  measured ClinVar `--force` refresh time (4 m 56 s end-to-end,
+  down from 1,699 s / ~28 min on the per-row path); items #1-#16
+  are preserved as the historical audit trail. No code changes; no
+  schema rebuild; no re-ingest. (PR #43 follow-up)
 - **Pre-5.5 — unified supersession deactivate path + finding-009
   cost-model correction.** Real-data verification of PR #41 against
   the existing ClinVar `2026_05_10` release showed the

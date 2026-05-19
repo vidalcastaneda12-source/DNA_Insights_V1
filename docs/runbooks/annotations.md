@@ -75,14 +75,52 @@ changes. Every refresh:
    (skip-if-already-cached unless `--force`).
 3. Resolves a stable version label (from source metadata when present;
    otherwise retrieval date as `YYYY_MM_DD`).
-4. Short-circuits if `annotation_source_versions` already names the
-   resolved version (idempotent re-runs).
-5. Parses the artifact and bulk-loads into the source's destination
-   table inside a transaction.
-6. Supersedes prior rows for the same source (`is_active = FALSE`).
-7. Records the version row at `is_current = TRUE`.
+4. Optional opt-in short-circuit (`--skip-if-same-version`): if
+   `annotation_sources` for this source already points at a
+   `annotation_source_versions` row whose `(version, source_file_hash)`
+   matches the freshly-resolved pair, the loader returns
+   `was_already_current=True` and exits without re-writing.
+5. Allocates a fresh `source_version_id` in `annotation_source_versions`.
+6. Parses the artifact and bulk-loads into the source's destination
+   table under the new `source_version_id` (chunked INSERTs inside one
+   DuckDB transaction).
+7. UPSERTs `annotation_sources.current_source_version_id` for this
+   `source_db` to the new id — the single-row pointer flip is the
+   supersession event. Prior-version rows remain in the per-source
+   table indefinitely, keyed by their older `source_version_id`, and
+   are filtered out of reader joins on `annotation_sources`. See
+   [finding-010](../findings/finding-010-version-pointer-supersession-pattern.md)
+   for the rationale.
 
-## Per-source notes
+## After a schema rebuild
+
+When a PR modifies `docs/schemas/` or `ddl/`, the
+project-wide remediation is `rm -rf data/` followed by `uv run genome
+init` (see CLAUDE.md "Schema changes require rebuilding local
+databases"). `genome init` recreates an empty `genome.duckdb` against
+the new DDL — it does **not** re-ingest anything. To return to a
+working state, every data source that previously populated the
+database needs to be reloaded:
+
+1. Re-ingest chip data: `genome ingest --source 23andme <path>` and
+   `genome ingest --source ancestry <path>` (Phase 2 commands).
+2. Re-run the merge and (if Phase 4 is in use) imputation pipelines
+   per the relevant runbooks.
+3. Re-load every annotation source that was previously refreshed:
+   ```
+   genome annotate refresh --source pharmgkb
+   genome annotate refresh --source cpic
+   genome annotate refresh --source clinvar
+   genome annotate refresh --source gwas_catalog
+   genome annotate refresh --source pgs_catalog
+   ```
+
+The annotation refreshes are idempotent on
+`(source_db, version, source_file_hash)` — if upstream hasn't moved
+since the last refresh, the cached download is reused and the version
+pointer is established for the new database. ClinVar is the longest
+single source by wall-clock; the rest combined take under a minute on
+a warm cache.
 
 ### PharmGKB (sub-phase 5.1a)
 
@@ -139,14 +177,17 @@ PharmGKB TSV is rsID/haplotype-keyed and does not carry genomic
 positions. The dbSNP loader in 5.4 will cross-reference rsID → chrom
 + pos and backfill these columns.
 
-**Force-mode semantics.** `--force` bypasses the idempotence
-short-circuit, re-downloads (via the cache's force flag), and
-blanket-deactivates every existing active PharmGKB row before
-inserting the new corpus. This avoids duplicate-active rows when the
-version label is unchanged — the standard
-`deactivate_prior_versions` helper's `source_version_id < new`
-predicate skips a same-id refresh, so the loader handles the force
-path with a separate UPDATE.
+**Force-mode semantics.** `--force` bypasses the
+`--skip-if-same-version` short-circuit (when set) and re-downloads
+via the cache's force flag, then runs the same supersession path as
+a normal refresh: allocate a fresh `source_version_id`, INSERT the
+new corpus under it, and call `flip_to_new_version` to UPSERT
+`annotation_sources.current_source_version_id` to the new id. A
+same-version `--force` against an unchanged upstream still allocates
+a new `source_version_id` (identity in
+`annotation_source_versions` is the row, not `(source_db, version)`);
+the prior rowset stays in `pharmgkb_annotations` keyed by the old id
+and is filtered out by reader joins on `annotation_sources`.
 
 **Download mechanism.** PharmGKB's canonical
 `api.pharmgkb.org/v1/download/file/data/clinicalAnnotations.zip` URL
@@ -292,15 +333,16 @@ join is too sparse to be worth the audit-log noise; the global
 `annotation_source_versions.ingested_at` timestamp is the loader's
 durable record of when each snapshot landed.
 
-**Force-mode semantics.** `--force` bypasses the idempotence
-short-circuit, re-downloads every endpoint (including the canary),
-and blanket-deactivates every existing active CPIC row before
-inserting the freshly joined corpus. This mirrors the PharmGKB
-loader's force path: the standard
-`deactivate_prior_versions` helper's
-`source_version_id < new` predicate would skip a same-version
-re-run, so the loader does a separate UPDATE to avoid
-duplicate-active rows.
+**Force-mode semantics.** `--force` bypasses the
+`--skip-if-same-version` short-circuit (when set), re-downloads every
+endpoint (including the canary), allocates a fresh
+`source_version_id`, INSERTs the freshly joined corpus under it, and
+calls `flip_to_new_version` to UPSERT
+`annotation_sources.current_source_version_id` to the new id.
+Mirrors the PharmGKB force path: a same-version `--force` still
+allocates a new id (the registry's identity is per row, not per
+`(source_db, version)` pair); prior CPIC rows stay in
+`cpic_guidelines` under their older `source_version_id`.
 
 **Troubleshooting.**
 
@@ -408,9 +450,11 @@ dash variants to NULL. Non-missing values are bare digit strings; the
 loader prefixes them with `"rs"` to match the project-wide rsID
 format (`variants_master`, `pharmgkb_annotations`, the dbSNP loader
 that lands in 5.4). The distinct non-NULL rsID drift identifier
-(`SELECT COUNT(DISTINCT rsid) ... WHERE is_active AND rsid IS NOT
-NULL`) is the durable test that the `-1 → NULL` coercion stayed
-correct across releases.
+(`SELECT COUNT(DISTINCT rsid) FROM clinvar_annotations ca
+JOIN annotation_sources s ON s.source_db = 'clinvar'
+AND s.current_source_version_id = ca.source_version_id
+WHERE rsid IS NOT NULL`) is the durable test that the `-1 → NULL`
+coercion stayed correct across releases.
 
 **Phenotype list fields.** Two list columns:
 
@@ -461,29 +505,46 @@ streaming parser is a generator; `_stream_bulk_insert` drains it,
 accumulates a chunk, registers it as a PyArrow Table, runs
 `INSERT INTO clinvar_annotations (...) SELECT ... FROM <temp>`,
 unregisters the table, and repeats. All chunks run inside one DuckDB
-transaction (the same `conn.begin()` ... `conn.commit()` block that
-brackets the `_deactivate_for_refresh` UPDATE). A mid-stream failure
-rolls every chunk back together with the deactivation, preserving the
-supersession-over-update invariant.
+transaction; the closing `commit_and_checkpoint` and the
+`flip_to_new_version` pointer UPSERT against `annotation_sources`
+run inside the same transaction. A mid-stream failure rolls every
+chunk back together with the pointer-flip step, preserving the
+supersession atomicity contract (CLAUDE.md decision #7) — readers
+never see a torn state.
 
-**Force-mode semantics.** `--force` bypasses the idempotence
-short-circuit, re-downloads (via the cache's force flag), and
-blanket-deactivates every existing active ClinVar row before
-re-inserting the new corpus. Mirrors PharmGKB and CPIC's force path:
-the standard `deactivate_prior_versions` helper's `source_version_id
-< new` predicate would skip a same-version re-run, so the loader
-issues a separate UPDATE that also tags `superseded_by = new_version`
-(ClinVar carries `superseded_by`; PharmGKB and CPIC do not).
+**Force-mode semantics.** `--force` bypasses the
+`--skip-if-same-version` short-circuit (when set) and re-downloads
+via the cache's force flag, then runs the same supersession path as
+a normal refresh: allocate a fresh `source_version_id`, INSERT the
+new corpus under it, and call `flip_to_new_version`. The pointer
+flip is a single-row UPSERT against `annotation_sources` regardless
+of upstream version label — a same-version `--force` re-run
+allocates a new id, lands a new rowset, and flips the pointer to it.
+Prior ClinVar rows stay in `clinvar_annotations` under their older
+`source_version_id`; the `clinvar_annotations` table no longer
+carries per-row `is_active` / `superseded_by` columns (the
+distinguishing feature ClinVar previously held vs PharmGKB / CPIC
+is now moot — every supersedable annotation table follows the
+version-pointer pattern).
 
 **Drift identifiers (locked).** The end-of-load structlog summary
 emits the durable signals real-data verification will compare across
-releases:
+releases. All `active_total` / `distinct_*` counts are computed at
+the new `source_version_id` the loader just landed — equivalently
+the rows scoped by the canonical
+`JOIN annotation_sources s ON s.source_db = 'clinvar' AND
+s.current_source_version_id = ca.source_version_id` read pattern:
 
-* `active_total` — `COUNT(*) WHERE is_active`
-* `distinct_variation_id` — `COUNT(DISTINCT variation_id) WHERE is_active`
-* `distinct_rsid_non_null` — `COUNT(DISTINCT rsid) WHERE is_active AND rsid IS NOT NULL`
-* `clinical_significance_distribution` — group-by-and-count
-* `review_status_distribution` — group-by-and-count
+* `active_total` — `COUNT(*)` of rows at the new
+  `source_version_id`
+* `distinct_variation_id` — `COUNT(DISTINCT variation_id)` at the new
+  `source_version_id`
+* `distinct_rsid_non_null` — `COUNT(DISTINCT rsid)` at the new
+  `source_version_id` `WHERE rsid IS NOT NULL`
+* `clinical_significance_distribution` — group-by-and-count at the
+  new `source_version_id`
+* `review_status_distribution` — group-by-and-count at the new
+  `source_version_id`
 
 A drift in any of these on a re-run against the same release is a
 regression signal; verify against the captured numbers in the 5.2
@@ -507,20 +568,25 @@ CHANGELOG entry.
   available RAM. The default 250K rows ≈ 125 MB working set; lower
   `_CHUNK_SIZE` if you hit OOM on a small machine.
 * **Disk space failure mid-supersession** — the supersession
-  transaction holds both the prior active rowset (now flipped to
-  inactive) and the new active rowset in the same WAL window, so the
-  on-disk DuckDB file roughly doubles in size during a re-run. Free
-  ~5-10 GB before running a refresh against the prior corpus.
+  transaction holds the prior rowset (still present, keyed by the
+  older `source_version_id`) and the new rowset (being inserted
+  under the freshly-allocated `source_version_id`) in the same WAL
+  window, so the on-disk DuckDB file roughly doubles in size during
+  a re-run. Free ~5-10 GB before running a refresh against the
+  prior corpus. Prior versions remain in the table after the
+  transaction commits — see finding-010 follow-up #14 for the
+  open cleanup procedure.
 * **Recovery after a partial-failure refresh.** Same shape as
-  PharmGKB / CPIC: if any chunk insert raises, the loader rolls the
-  per-source insert (every chunk + the prior-version deactivation)
-  back atomically and best-effort deletes the orphan
-  `annotation_source_versions` row that `upsert_source_version` had
-  already committed. A subsequent `refresh` starts clean. If the
-  cleanup itself fails (the loader logs
-  `clinvar.cleanup.orphan_version_row_delete_failed`),
+  PharmGKB / CPIC: if any chunk insert or the closing pointer flip
+  raises, the loader rolls the per-source insert (every chunk +
+  any partially-applied `annotation_sources` UPSERT) back atomically
+  and best-effort deletes the orphan `annotation_source_versions`
+  row that `upsert_source_version` had already committed. A
+  subsequent `refresh` starts clean. If the cleanup itself fails
+  (the loader logs `clinvar.cleanup.orphan_version_row_delete_failed`),
   manually `DELETE FROM annotation_source_versions WHERE source_db =
-  'clinvar' AND version = <the affected version>` before retrying.
+  'clinvar' AND source_version_id = <the affected id>` before
+  retrying.
 
 ### GWAS Catalog (sub-phase 5.3)
 
@@ -603,17 +669,17 @@ multi-SNP fan-outs / coordinate-less drops shift it).
 `~/.cache/genome/annotations/gwas_catalog/` — the downloaded ZIP
 is ~60 MB on disk (decompresses to a ~300 MB TSV the loader
 streams in memory); the supersession transaction's MVCC working
-set on a re-run holds both the prior ~600-700K active rows
-(flipped to inactive) and the new ~600-700K active rows in the
-same WAL window.
+set holds the new ~600-700K rowset (being inserted under a fresh
+`source_version_id`) alongside the prior rowset (still resident
+under its older `source_version_id`) in the same WAL window.
 End-to-end on a laptop is **under five minutes wall-clock** for a
 first-time load against the current release (the locked perf
-target). Same-version `--force` re-runs are slower because the
-deactivation UPDATE + checkpoint dominate, mirroring the ClinVar
-behaviour documented in `docs/findings/finding-009`. The
-finding-009 mitigations (explicit `CHECKPOINT`, chunked UPDATE)
-are not yet in `supersession.py` and apply to GWAS Catalog
-identically once they land.
+target). Same-version `--force` re-runs are no slower in the
+dominant phase than first-time loads — the supersession event is
+a single-row `annotation_sources` UPSERT (finding-010), so the
+ClinVar ~17-19 min UPDATE phase finding-009 #15 attributed to the
+per-row model does not apply to GWAS Catalog (or any other Phase-5
+loader) anymore.
 
 **Multi-SNP expansion.** A row whose `SNPS` cell carries multiple
 `;`-separated rsIDs (haplotype-style entries like
@@ -687,33 +753,43 @@ from the same first URI via a trailing `<PREFIX>_<digits>` match
 **Chunked bulk insert.** Locked at 250,000 rows per chunk to
 match the ClinVar loader. GWAS Catalog at ~600-700K rows fits in
 2-3 chunks; the chunked-insert code path is exercised identically
-across loaders. All chunks run inside one DuckDB transaction (the
-same `conn.begin()` ... `conn.commit()` block that brackets the
-`_deactivate_for_refresh` UPDATE). A mid-stream failure rolls
-every chunk back together with the deactivation, preserving the
-supersession-over-update invariant.
+across loaders. All chunks run inside one DuckDB transaction; the
+closing `commit_and_checkpoint` and the `flip_to_new_version`
+pointer UPSERT against `annotation_sources` run inside the same
+transaction. A mid-stream failure rolls every chunk back together
+with the pointer-flip step, preserving the supersession atomicity
+contract (CLAUDE.md decision #7).
 
-**Force-mode semantics.** `--force` bypasses the idempotence
-short-circuit, re-downloads (via the cache's force flag), and
-blanket-deactivates every existing active GWAS Catalog row before
-re-inserting the new corpus. `gwas_catalog_associations` carries
-`is_active` but **not** `superseded_by` (schema matches PharmGKB /
-CPIC; ClinVar is the outlier that carries both), so the
-deactivation is a pure `is_active = FALSE` flip and the
-supersession chain is followed via the prior rows'
-`source_version_id` column rather than a per-row tag. Same-version
-`--force` re-runs reuse the existing `source_version_id` (the
-upsert is idempotent on `(source_db, version)`).
+**Force-mode semantics.** `--force` bypasses the
+`--skip-if-same-version` short-circuit (when set), re-downloads
+via the cache's force flag, allocates a fresh `source_version_id`,
+INSERTs the new corpus under it, and calls `flip_to_new_version`
+to UPSERT `annotation_sources.current_source_version_id` to the
+new id. The per-source table no longer carries `is_active` /
+`superseded_by` columns — every supersedable annotation table now
+uses the version-pointer pattern uniformly (the
+ClinVar-was-the-outlier-that-carried-`superseded_by` distinction
+is moot post-PR-#43). Same-version `--force` allocates a new id
+rather than reusing the prior one (identity in the registry is
+per-row, not `(source_db, version)`).
 
 **Drift identifiers (locked).** The end-of-load structlog summary
 emits the durable signals real-data verification compares across
-releases:
+releases. All `active_total` / `distinct_*` counts are computed at
+the new `source_version_id` the loader just landed — equivalently
+the rows scoped by the canonical
+`JOIN annotation_sources s ON s.source_db = 'gwas_catalog' AND
+s.current_source_version_id = ga.source_version_id` read pattern:
 
-* `active_total` — `COUNT(*) WHERE is_active`
-* `distinct_study_accession` — `COUNT(DISTINCT study_accession)`
-* `distinct_pmid` — `COUNT(DISTINCT pmid)`
-* `distinct_rsid` — `COUNT(DISTINCT rsid)`
-* `distinct_trait_name` — `COUNT(DISTINCT trait_name)`
+* `active_total` — `COUNT(*)` at the new `source_version_id`
+* `distinct_study_accession` — `COUNT(DISTINCT study_accession)` at
+  the new `source_version_id`
+* `distinct_pmid` — `COUNT(DISTINCT pmid)` at the new
+  `source_version_id`
+* `distinct_rsid` — `COUNT(DISTINCT rsid)` at the new
+  `source_version_id`
+* `distinct_trait_name` — `COUNT(DISTINCT trait_name)` at the new
+  `source_version_id`
 
 Plus parser stats: `rows_read`, `rows_emitted`,
 `dropped_empty_pos`, `dropped_no_valid_snp`,
@@ -745,11 +821,12 @@ wall-clock. Expected ranges (refine after first real-data load):
 | First-load wall-clock | < 5 minutes |
 
 Re-run with `--force` to exercise the same-version supersession
-path. Expected deltas: the same `active_total` lands under the
-same `source_version_id`; an equal count of prior rows flips to
-`is_active = FALSE`. Wall-clock will be larger than the first-load
-window (the deactivation UPDATE + checkpoint dominate, per
-finding-009).
+path. Expected deltas: the same `active_total` lands under a fresh
+`source_version_id` (a new id is allocated for the re-run);
+`annotation_sources.current_source_version_id` flips to point at
+that new id. Wall-clock stays inside the same envelope as the
+first-load window — the version-pointer flip is O(1) so the
+finding-009 ClinVar-scale UPDATE penalty does not apply.
 
 **Troubleshooting.**
 
@@ -784,22 +861,26 @@ finding-009).
   `dropped_empty_pos` value; a jump of more than a few hundred
   warrants a manual look at the upstream release notes.
 * **Disk space failure mid-supersession** — the supersession
-  transaction holds both the prior active rowset (now flipped
-  to inactive) and the new active rowset in the same WAL window,
-  so the on-disk DuckDB file grows during a re-run. Free
-  ~1-2 GB before running a refresh against the prior corpus.
+  transaction holds the prior rowset (still resident under its
+  older `source_version_id`) and the new rowset (being inserted
+  under the freshly-allocated `source_version_id`) in the same
+  WAL window, so the on-disk DuckDB file grows during a re-run.
+  Free ~1-2 GB before running a refresh against the prior corpus.
+  Prior versions remain in the table after the transaction
+  commits — see finding-010 follow-up #14 for the open cleanup
+  procedure.
 * **Recovery after a partial-failure refresh.** Same shape as
-  PharmGKB / CPIC / ClinVar: if any chunk insert raises, the
-  loader rolls the per-source insert (every chunk + the
-  prior-version deactivation) back atomically and best-effort
-  deletes the orphan `annotation_source_versions` row that
-  `upsert_source_version` had already committed. A subsequent
-  `refresh` starts clean. If the cleanup itself fails (the loader
-  logs
+  PharmGKB / CPIC / ClinVar: if any chunk insert or the closing
+  pointer flip raises, the loader rolls the per-source insert
+  (every chunk + any partially-applied `annotation_sources`
+  UPSERT) back atomically and best-effort deletes the orphan
+  `annotation_source_versions` row that `upsert_source_version`
+  had already committed. A subsequent `refresh` starts clean. If
+  the cleanup itself fails (the loader logs
   `gwas_catalog.cleanup.orphan_version_row_delete_failed`),
   manually `DELETE FROM annotation_source_versions WHERE
-  source_db = 'gwas_catalog' AND version = <the affected
-  version>` before retrying.
+  source_db = 'gwas_catalog' AND source_version_id = <the
+  affected id>` before retrying.
 
 ### PGS Catalog (sub-phase 5.4)
 
@@ -1026,12 +1107,16 @@ is a coarse signal, not a calibration target.
 
 **Drift identifiers (locked).** The end-of-load structlog
 summary emits the durable signals real-data verification will
-compare across releases:
+compare across releases. All `active_total` / `distinct_*` counts
+are computed at the new `source_version_id` the loader just
+landed — equivalently the rows scoped by the canonical
+`JOIN annotation_sources s ON s.source_db = 'pgs_catalog' AND
+s.current_source_version_id = ps.source_version_id` read pattern:
 
-* `active_total` -- `COUNT(*) WHERE is_active`
-* `distinct_pgs_id` -- `COUNT(DISTINCT pgs_id) WHERE is_active`
-  (should equal `active_total` post-load if no upstream PGS
-  duplicates)
+* `active_total` -- `COUNT(*)` at the new `source_version_id`
+* `distinct_pgs_id` -- `COUNT(DISTINCT pgs_id)` at the new
+  `source_version_id` (should equal `active_total` post-load if
+  no upstream PGS duplicates)
 * `distinct_trait_efo`
 * `distinct_publication_pmid`
 * `distinct_trait_category` -- populated from the
@@ -1040,8 +1125,8 @@ compare across releases:
   download or parse failed (or returned an empty results list)
   -- treat as a regression signal.
 * `with_performance_auc` -- count where
-  `performance_auc IS NOT NULL`
-* `with_performance_or_per_sd`
+  `performance_auc IS NOT NULL` at the new `source_version_id`
+* `with_performance_or_per_sd` -- same shape
 
 Plus parser stats: `rows_read_scores`, `rows_read_publications`,
 `rows_read_traits`, `rows_read_performance`,
@@ -1080,11 +1165,13 @@ first real-data load):
 | First-load wall-clock | < 30 seconds |
 
 Re-run with `--force` to exercise the same-version supersession
-path. Expected deltas: the same `active_total` lands under the
-same `source_version_id`; an equal count of prior rows flips to
-`is_active = FALSE`. Wall-clock stays inside the 30 s target
-(PGS Catalog is small enough that the finding-009 UPDATE+
-checkpoint penalty does not materialize).
+path. Expected deltas: the same `active_total` lands under a
+fresh `source_version_id` (a new id is allocated each `--force`
+re-run), and `annotation_sources.current_source_version_id` flips
+to point at the new id. Wall-clock stays inside the 30 s target;
+the version-pointer flip is O(1) so the finding-009 UPDATE +
+checkpoint penalty does not apply anywhere on the supersession
+path.
 
 **Troubleshooting.**
 
@@ -1136,24 +1223,28 @@ checkpoint penalty does not materialize).
   release shipped scores without paired performance rows.
   Probably benign; verify against the upstream release notes.
 * **Disk space failure mid-supersession** -- the supersession
-  transaction holds both the prior active rowset (now flipped
-  to inactive) and the new active rowset in the same WAL
-  window, so the on-disk DuckDB file grows during a re-run.
+  transaction holds the prior rowset (still resident under its
+  older `source_version_id`) and the new rowset (being inserted
+  under the freshly-allocated `source_version_id`) in the same
+  WAL window, so the on-disk DuckDB file grows during a re-run.
   PGS Catalog at ~5-7K rows is much smaller than the ClinVar
   case but free ~100 MB before running a refresh against the
-  prior corpus.
+  prior corpus. Prior versions remain in the table after the
+  transaction commits — see finding-010 follow-up #14 for the
+  open cleanup procedure.
 * **Recovery after a partial-failure refresh.** Same shape as
   PharmGKB / CPIC / ClinVar / GWAS Catalog: if the bulk insert
-  raises, the loader rolls the per-source insert (every chunk
-  + the prior-version deactivation) back atomically and
-  best-effort deletes the orphan `annotation_source_versions`
-  row that `upsert_source_version` had already committed. A
-  subsequent `refresh` starts clean. If the cleanup itself
-  fails (the loader logs
+  or the closing pointer flip raises, the loader rolls the
+  per-source insert (every chunk + any partially-applied
+  `annotation_sources` UPSERT) back atomically and best-effort
+  deletes the orphan `annotation_source_versions` row that
+  `upsert_source_version` had already committed. A subsequent
+  `refresh` starts clean. If the cleanup itself fails (the
+  loader logs
   `pgs_catalog.cleanup.orphan_version_row_delete_failed`),
   manually `DELETE FROM annotation_source_versions WHERE
-  source_db = 'pgs_catalog' AND version = <the affected
-  version>` before retrying.
+  source_db = 'pgs_catalog' AND source_version_id = <the
+  affected id>` before retrying.
 
 ## Audit log review
 
