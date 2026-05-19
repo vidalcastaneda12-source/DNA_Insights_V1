@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
+import structlog
 from typer.testing import CliRunner
 
 from genome.annotate import downloads as annotate_downloads
@@ -548,22 +549,28 @@ def test_refresh_inserts_rows_and_records_source_version(
 
     with duckdb_connection() as conn:
         active_count = conn.execute(
-            "SELECT COUNT(*) FROM pharmgkb_annotations WHERE is_active = TRUE",
+            "SELECT COUNT(*) FROM pharmgkb_annotations p "
+            "JOIN annotation_sources s "
+            "ON s.source_db = 'pharmgkb' AND s.current_source_version_id = p.source_version_id",
         ).fetchone()
-        all_active = conn.execute(
-            "SELECT COUNT(*) FROM pharmgkb_annotations WHERE is_active = FALSE",
+        non_current = conn.execute(
+            "SELECT COUNT(*) FROM pharmgkb_annotations p "
+            "WHERE NOT EXISTS ("
+            "  SELECT 1 FROM annotation_sources s "
+            "  WHERE s.source_db = 'pharmgkb' AND s.current_source_version_id = p.source_version_id"
+            ")",
         ).fetchone()
         version_rows = conn.execute(
-            "SELECT version, record_count, is_current FROM annotation_source_versions"
+            "SELECT version, record_count FROM annotation_source_versions"
             " WHERE source_db = 'pharmgkb'",
         ).fetchall()
 
     assert active_count is not None
     assert active_count[0] == _EXPECTED_DB_ROW_COUNT
-    assert all_active is not None
-    assert all_active[0] == 0
+    assert non_current is not None
+    assert non_current[0] == 0
     assert len(version_rows) == 1
-    assert version_rows[0] == ("2026_04_15", _EXPECTED_DB_ROW_COUNT, True)
+    assert version_rows[0] == ("2026_04_15", _EXPECTED_DB_ROW_COUNT)
 
 
 def test_refresh_second_call_is_short_circuit(
@@ -586,7 +593,9 @@ def test_refresh_second_call_is_short_circuit(
 
     with duckdb_connection() as conn:
         n_active = conn.execute(
-            "SELECT COUNT(*) FROM pharmgkb_annotations WHERE is_active = TRUE",
+            "SELECT COUNT(*) FROM pharmgkb_annotations p "
+            "JOIN annotation_sources s "
+            "ON s.source_db = 'pharmgkb' AND s.current_source_version_id = p.source_version_id",
         ).fetchone()
         n_versions = conn.execute(
             "SELECT COUNT(*) FROM annotation_source_versions WHERE source_db = 'pharmgkb'",
@@ -620,33 +629,43 @@ def test_refresh_new_version_supersedes_prior_rows(
     assert second.source_version_id > first.source_version_id
 
     with duckdb_connection() as conn:
-        inactive = conn.execute(
-            "SELECT COUNT(*) FROM pharmgkb_annotations"
-            " WHERE is_active = FALSE AND source_version_id = ?",
+        current_pointer = conn.execute(
+            "SELECT current_source_version_id FROM annotation_sources WHERE source_db = 'pharmgkb'",
+        ).fetchone()
+        prior_rows = conn.execute(
+            "SELECT COUNT(*) FROM pharmgkb_annotations WHERE source_version_id = ?",
             [first.source_version_id],
         ).fetchone()
         active = conn.execute(
-            "SELECT COUNT(*) FROM pharmgkb_annotations"
-            " WHERE is_active = TRUE AND source_version_id = ?",
+            "SELECT COUNT(*) FROM pharmgkb_annotations WHERE source_version_id = ?",
             [second.source_version_id],
         ).fetchone()
         version_rows = conn.execute(
-            "SELECT version, is_current FROM annotation_source_versions"
+            "SELECT version FROM annotation_source_versions"
             " WHERE source_db = 'pharmgkb' ORDER BY source_version_id",
         ).fetchall()
 
-    assert inactive is not None
-    assert inactive[0] == _EXPECTED_DB_ROW_COUNT
+    assert current_pointer is not None
+    assert int(current_pointer[0]) == second.source_version_id
+    assert prior_rows is not None
+    assert prior_rows[0] == _EXPECTED_DB_ROW_COUNT
     # Trimmed v2 expansion: 1+5+1 = 7 rows.
     assert active is not None
     assert active[0] == 7
-    assert version_rows == [("2026_04_15", False), ("2026_05_15", True)]
+    assert version_rows == [("2026_04_15",), ("2026_05_15",)]
 
 
 def test_refresh_force_reloads_even_when_version_matches(
     fixture_zip: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """``--force`` against the same upstream version → new id, new rows, pointer flips.
+
+    Symmetric to the ClinVar test of the same shape: every refresh
+    that reaches the INSERT path allocates a fresh
+    ``source_version_id``; the pointer flips to it; the prior set
+    stays in the table under the older id.
+    """
     init_databases()
     _patch_download_to_cache(monkeypatch, fixture_zip)
     first = pharmgkb_loader.refresh(force=False)
@@ -654,30 +673,70 @@ def test_refresh_force_reloads_even_when_version_matches(
 
     assert first.was_already_current is False
     assert second.was_already_current is False
-    # ``force=True`` with the same version label reuses the existing
-    # source_version_id (``upsert_source_version`` is idempotent on
-    # ``(source_db, version)``). The force path blanket-deactivates
-    # every prior active PharmGKB row before re-inserting, so:
-    #   * the first refresh's rows flip to is_active=FALSE,
-    #   * the second refresh's rows land as is_active=TRUE,
-    #   * every row carries the same source_version_id,
-    #   * total active row count matches the fixture's expected count.
-    assert second.source_version_id == first.source_version_id
+    assert second.source_version_id != first.source_version_id
 
     with duckdb_connection() as conn:
-        active = conn.execute(
-            "SELECT COUNT(*) FROM pharmgkb_annotations WHERE is_active = TRUE",
+        current_pointer = conn.execute(
+            "SELECT current_source_version_id FROM annotation_sources WHERE source_db = 'pharmgkb'",
         ).fetchone()
-        deactivated = conn.execute(
-            "SELECT COUNT(*) FROM pharmgkb_annotations WHERE is_active = FALSE",
+        active = conn.execute(
+            "SELECT COUNT(*) FROM pharmgkb_annotations p "
+            "JOIN annotation_sources s "
+            "ON s.source_db = 'pharmgkb' AND s.current_source_version_id = p.source_version_id",
+        ).fetchone()
+        prior = conn.execute(
+            "SELECT COUNT(*) FROM pharmgkb_annotations WHERE source_version_id = ?",
+            [first.source_version_id],
         ).fetchone()
         total = conn.execute("SELECT COUNT(*) FROM pharmgkb_annotations").fetchone()
+        version_rows = conn.execute(
+            "SELECT source_version_id, version, record_count"
+            " FROM annotation_source_versions"
+            " WHERE source_db = 'pharmgkb' ORDER BY source_version_id",
+        ).fetchall()
+    assert current_pointer is not None
+    assert int(current_pointer[0]) == second.source_version_id
     assert active is not None
     assert active[0] == _EXPECTED_DB_ROW_COUNT
-    assert deactivated is not None
-    assert deactivated[0] == _EXPECTED_DB_ROW_COUNT
+    assert prior is not None
+    assert prior[0] == _EXPECTED_DB_ROW_COUNT
     assert total is not None
     assert total[0] == 2 * _EXPECTED_DB_ROW_COUNT
+    assert [(int(r[0]), r[1], int(r[2])) for r in version_rows] == [
+        (first.source_version_id, "2026_04_15", _EXPECTED_DB_ROW_COUNT),
+        (second.source_version_id, "2026_04_15", _EXPECTED_DB_ROW_COUNT),
+    ]
+
+
+def test_refresh_skip_if_same_version_short_circuits_force(
+    fixture_zip: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--skip-if-same-version`` makes a same-version --force a no-op."""
+    from structlog.testing import capture_logs  # noqa: PLC0415 — test-local
+
+    init_databases()
+    _patch_download_to_cache(monkeypatch, fixture_zip)
+    first = pharmgkb_loader.refresh(force=False)
+    with capture_logs() as captured:
+        second = pharmgkb_loader.refresh(force=True, skip_if_same_version=True)
+
+    assert second.was_already_current is True
+    assert second.source_version_id == first.source_version_id
+
+    events = [c["event"] for c in captured]
+    assert "supersession_skipped_same_version" in events
+    assert "supersession_version_flip" not in events
+
+    with duckdb_connection() as conn:
+        n_versions = conn.execute(
+            "SELECT COUNT(*) FROM annotation_source_versions WHERE source_db = 'pharmgkb'",
+        ).fetchone()
+        total = conn.execute("SELECT COUNT(*) FROM pharmgkb_annotations").fetchone()
+    assert n_versions is not None
+    assert n_versions[0] == 1
+    assert total is not None
+    assert total[0] == _EXPECTED_DB_ROW_COUNT
 
 
 def test_refresh_writes_expected_column_values(
@@ -693,8 +752,7 @@ def test_refresh_writes_expected_column_values(
             """
             SELECT pgkb_accession, rsid, star_allele, gene_symbol,
                    drug_name, phenotype_category, evidence_level,
-                   guideline_summary, guideline_url, chrom, pos_grch38,
-                   is_active
+                   guideline_summary, guideline_url, chrom, pos_grch38
               FROM pharmgkb_annotations
              WHERE pgkb_accession = '1001'
             """,
@@ -712,7 +770,6 @@ def test_refresh_writes_expected_column_values(
         url,
         chrom,
         pos,
-        active,
     ) = row
     assert pgkb == "1001"
     assert rsid == "rs951439"
@@ -725,7 +782,6 @@ def test_refresh_writes_expected_column_values(
     assert url == "https://www.pharmgkb.org/clinicalAnnotation/1001"
     assert chrom is None
     assert pos is None
-    assert active is True
 
 
 # ---------------------------------------------------------------------------
@@ -902,7 +958,6 @@ def test_refresh_get_current_version_lookup_uses_pharmgkb_label(
     assert current is not None
     assert current.version == "2026_04_15"
     assert current.source_db == "pharmgkb"
-    assert current.is_current is True
     # source_url + file_hash + file_size persisted from the download_to_cache
     # stub's payload.
     assert current.source_url == pharmgkb_loader.CLINICAL_ANN_ZIP_URL
@@ -912,3 +967,12 @@ def test_refresh_get_current_version_lookup_uses_pharmgkb_label(
     # Idempotence path on second invocation returns the same row.
     second = pharmgkb_loader.refresh(force=False)
     assert second.source_version_id == current.source_version_id
+
+
+@pytest.fixture(autouse=True)
+def _reset_structlog_after_each_test() -> object:
+    """Restore structlog defaults so capture_logs and CLI runs don't leak between tests."""
+    try:
+        yield
+    finally:
+        structlog.reset_defaults()

@@ -42,10 +42,10 @@ def _format_status_line(name: str, width: int, value: str) -> str:
 def annotate_status() -> None:
     """Print loaded version + ingested_at + record_count per known source.
 
-    Reads ``annotation_source_versions`` only. Sources with no
-    ``is_current = TRUE`` row print as ``not loaded``. The on-disk
-    cache directory is *not* touched — running ``annotate status``
-    against a fresh checkout must not create
+    Reads ``annotation_source_versions`` via the ``annotation_sources``
+    pointer. Sources with no pointer row print as ``not loaded``. The
+    on-disk cache directory is *not* touched — running ``annotate
+    status`` against a fresh checkout must not create
     ``~/.cache/genome/annotations/``.
     """
     sources = sorted(KNOWN_SOURCE_DBS)

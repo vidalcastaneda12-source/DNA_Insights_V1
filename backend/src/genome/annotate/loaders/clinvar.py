@@ -72,11 +72,12 @@ from genome.annotate.downloads import download_to_cache
 from genome.annotate.registry import RefreshResult, register_loader
 from genome.annotate.source_versions import (
     get_current_version,
-    upsert_source_version,
+    insert_source_version,
 )
 from genome.annotate.supersession import (
+    VersionFlipResult,
     commit_and_checkpoint,
-    deactivate_prior_versions,
+    flip_to_new_version,
     maybe_skip_same_version,
 )
 from genome.db.duckdb_conn import duckdb_connection
@@ -209,8 +210,6 @@ _ARROW_SCHEMA: Final[pa.Schema] = pa.schema(
         pa.field("inheritance", pa.string()),
         pa.field("source_version_id", pa.int64(), nullable=False),
         pa.field("retrieval_date", pa.timestamp("us"), nullable=False),
-        pa.field("is_active", pa.bool_(), nullable=False),
-        pa.field("superseded_by", pa.int64()),
     ],
 )
 
@@ -220,9 +219,8 @@ class _ParsedRow:
     """One row destined for ``clinvar_annotations``.
 
     Mirrors the destination schema's variable columns. ``clinvar_id``,
-    ``source_version_id``, ``retrieval_date``, ``is_active``, and
-    ``superseded_by`` are assigned at bulk-insert time after parsing
-    completes.
+    ``source_version_id``, and ``retrieval_date`` are assigned at
+    bulk-insert time after parsing completes.
     """
 
     variation_id: str | None
@@ -604,9 +602,8 @@ def _insert_chunk(
     """Insert one chunk of ``_ParsedRow`` into ``clinvar_annotations``.
 
     Builds a PyArrow Table with one column per destination column
-    (including ``clinvar_id``, ``source_version_id``, ``retrieval_date``,
-    ``is_active=True``, and ``superseded_by=NULL``), registers it under
-    a temp name, then issues
+    (including ``clinvar_id``, ``source_version_id``, and
+    ``retrieval_date``), registers it under a temp name, then issues
     ``INSERT INTO clinvar_annotations (...) SELECT ... FROM <temp>``
     and unregisters. ``chrom`` is cast through ``chromosome_enum`` in
     the SELECT so the NULLs that are correct for non-canonical or
@@ -657,8 +654,6 @@ def _insert_chunk(
             "inheritance": pa.array([r.inheritance for r in rows], type=pa.string()),
             "source_version_id": pa.array([source_version_id] * n, type=pa.int64()),
             "retrieval_date": pa.array([naive_retrieval] * n, type=pa.timestamp("us")),
-            "is_active": pa.array([True] * n, type=pa.bool_()),
-            "superseded_by": pa.array([None] * n, type=pa.int64()),
         },
         schema=_ARROW_SCHEMA,
     )
@@ -673,7 +668,7 @@ def _insert_chunk(
                 conditions, condition_ids,
                 submission_count, submitter_categories,
                 hgvs_c, hgvs_p, inheritance,
-                source_version_id, retrieval_date, is_active, superseded_by
+                source_version_id, retrieval_date
             )
             SELECT
                 clinvar_id, variation_id, rsid,
@@ -682,7 +677,7 @@ def _insert_chunk(
                 conditions, condition_ids,
                 submission_count, submitter_categories,
                 hgvs_c, hgvs_p, inheritance,
-                source_version_id, retrieval_date, is_active, superseded_by
+                source_version_id, retrieval_date
               FROM _clinvar_stage_arrow
             """,  # noqa: S608 — table name is a module constant, not user input
         )
@@ -736,48 +731,8 @@ def _stream_bulk_insert(
 
 
 # ---------------------------------------------------------------------------
-# Supersession + rollback helpers (mirror PharmGKB / CPIC).
+# Rollback helper.
 # ---------------------------------------------------------------------------
-
-
-def _deactivate_for_refresh(
-    conn: DuckDBPyConnection,
-    *,
-    source_version_id: int,
-    force: bool,
-) -> int:
-    """Deactivate prior ClinVar rows ahead of a refresh insert.
-
-    Thin per-source seam over the shared
-    :func:`genome.annotate.supersession.deactivate_prior_versions`
-    helper. Both the normal and ``--force`` paths route through the
-    same helper so the supersession UPDATE is one statement and the
-    structlog ``supersession_update_start`` /
-    ``supersession_update_complete`` events fire identically on both
-    paths (finding-009 #16). ``force_all_active=force`` flips the
-    WHERE clause between "rows older than the new version" (the
-    default) and "every active row" (force mode) so a same-version
-    ``--force`` re-run still sweeps the prior set even though
-    ``upsert_source_version`` reused the existing
-    ``source_version_id``.
-
-    ``clinvar_annotations`` carries both ``is_active`` *and*
-    ``superseded_by`` (the only Phase-5 source loader so far that
-    populates the ``superseded_by`` chain), so we pass
-    ``has_superseded_by=True`` -- deactivated rows get tagged with the
-    new ``source_version_id`` so the supersession history is
-    followable.
-
-    Returns the number of rows flipped to ``is_active=FALSE``.
-    """
-    return deactivate_prior_versions(
-        conn,
-        table=_TARGET_TABLE,
-        new_source_version_id=source_version_id,
-        has_superseded_by=True,
-        source_name=SOURCE_DB,
-        force_all_active=force,
-    )
 
 
 def _cleanup_orphan_version_row(
@@ -788,7 +743,7 @@ def _cleanup_orphan_version_row(
 
     Same shape as the PharmGKB / CPIC helpers -- called when the
     supersede + chunked-insert transaction rolls back so the version
-    row that :func:`upsert_source_version` committed in its own
+    row that :func:`insert_source_version` committed in its own
     transaction doesn't leave a dangling "version exists but zero rows
     referenced" state. The DELETE is FK-safe because no
     ``clinvar_annotations`` rows reference the new ``source_version_id``
@@ -820,26 +775,39 @@ def _summarize_active(conn: DuckDBPyConnection) -> dict[str, object]:
     drift signals for ClinVar: total active row count, distinct
     variation_id count, distinct non-NULL rsid count, the
     clinical_significance distribution, and the review_status
-    distribution. Run after the supersession transaction commits so
-    only ``is_active = TRUE`` rows count.
+    distribution. Counts rows whose ``source_version_id`` matches the
+    ``annotation_sources`` pointer for ``clinvar`` -- i.e. the rows
+    belonging to the currently-active release. Run after the
+    supersession transaction commits so the pointer already names the
+    new version.
     """
     total_row = conn.execute(
-        f"SELECT COUNT(*) FROM {_TARGET_TABLE} WHERE is_active",  # noqa: S608
+        f"SELECT COUNT(*) FROM {_TARGET_TABLE} c "  # noqa: S608
+        "JOIN annotation_sources s "
+        "ON s.source_db = 'clinvar' AND s.current_source_version_id = c.source_version_id",
     ).fetchone()
     distinct_variation_row = conn.execute(
-        f"SELECT COUNT(DISTINCT variation_id) FROM {_TARGET_TABLE} WHERE is_active",  # noqa: S608
+        f"SELECT COUNT(DISTINCT c.variation_id) FROM {_TARGET_TABLE} c "  # noqa: S608
+        "JOIN annotation_sources s "
+        "ON s.source_db = 'clinvar' AND s.current_source_version_id = c.source_version_id",
     ).fetchone()
     distinct_rsid_row = conn.execute(
-        f"SELECT COUNT(DISTINCT rsid) FROM {_TARGET_TABLE} "  # noqa: S608
-        "WHERE is_active AND rsid IS NOT NULL",
+        f"SELECT COUNT(DISTINCT c.rsid) FROM {_TARGET_TABLE} c "  # noqa: S608
+        "JOIN annotation_sources s "
+        "ON s.source_db = 'clinvar' AND s.current_source_version_id = c.source_version_id "
+        "WHERE c.rsid IS NOT NULL",
     ).fetchone()
     significance_rows = conn.execute(
-        f"SELECT clinical_significance, COUNT(*) FROM {_TARGET_TABLE} "  # noqa: S608
-        "WHERE is_active GROUP BY 1 ORDER BY 2 DESC",
+        f"SELECT c.clinical_significance, COUNT(*) FROM {_TARGET_TABLE} c "  # noqa: S608
+        "JOIN annotation_sources s "
+        "ON s.source_db = 'clinvar' AND s.current_source_version_id = c.source_version_id "
+        "GROUP BY 1 ORDER BY 2 DESC",
     ).fetchall()
     review_rows = conn.execute(
-        f"SELECT review_status, COUNT(*) FROM {_TARGET_TABLE} "  # noqa: S608
-        "WHERE is_active GROUP BY 1 ORDER BY 2 DESC",
+        f"SELECT c.review_status, COUNT(*) FROM {_TARGET_TABLE} c "  # noqa: S608
+        "JOIN annotation_sources s "
+        "ON s.source_db = 'clinvar' AND s.current_source_version_id = c.source_version_id "
+        "GROUP BY 1 ORDER BY 2 DESC",
     ).fetchall()
     return {
         "active_total": int(total_row[0]) if total_row is not None else 0,
@@ -888,11 +856,15 @@ def refresh(
         unchanged ClinVar releases (~28 minutes of UPDATE+checkpoint
         avoided when the file is byte-for-byte identical).
     4. Inside one DuckDB transaction: upsert
-       ``annotation_source_versions``, deactivate prior ClinVar rows
-       via :func:`_deactivate_for_refresh`, stream-parse the gzipped
-       TSV, chunk-insert at :data:`_CHUNK_SIZE` rows per chunk via
-       :func:`_stream_bulk_insert`, and update the version row's
-       ``record_count`` once the streaming completes. The supersession
+       ``annotation_source_versions``, stream-parse the gzipped TSV,
+       chunk-insert at :data:`_CHUNK_SIZE` rows per chunk via
+       :func:`_stream_bulk_insert`, update the version row's
+       ``record_count`` once the streaming completes, and flip the
+       ``annotation_sources`` pointer for ``clinvar`` to the new
+       ``source_version_id`` via
+       :func:`flip_to_new_version`. The pointer flip is the
+       supersession event; the prior set stays in the table indefinitely
+       under its older ``source_version_id``. The supersession
        transaction is closed via :func:`commit_and_checkpoint` so the
        COMMIT + explicit CHECKPOINT phases are observable in the
        structlog stream (finding-009 #9 and #11).
@@ -949,17 +921,19 @@ def refresh(
         return skip
 
     # 4. Single-transaction load. The PharmGKB loader's "version row in
-    # its own transaction, supersede + insert in the wrapping
-    # transaction" shape applies verbatim here -- DuckDB does not
-    # support nested transactions and ``upsert_source_version`` manages
-    # its own due to the FK + index quirk documented in that module.
-    # The only difference for ClinVar is the bulk insert is *streamed*
-    # in chunks, all of which sit inside the same transaction so a
-    # mid-stream failure rolls every chunk back together.
+    # autocommit, INSERT + pointer flip in the wrapping transaction"
+    # shape applies verbatim here. The only difference for ClinVar is
+    # the bulk insert is *streamed* in chunks, all of which sit inside
+    # the same transaction so a mid-stream failure rolls every chunk
+    # back together. The pointer flip runs *after* the INSERT so
+    # ``flip_to_new_version`` can count the just-inserted rows for the
+    # event payload; INSERT + flip are atomic together (CLAUDE.md #7
+    # preserved as "pointer flip IS the supersession event").
     started = time.monotonic()
     retrieval_date = datetime.now(UTC)
+    flip: VersionFlipResult | None = None
     with duckdb_connection() as conn:
-        source_version_id = upsert_source_version(
+        source_version_id = insert_source_version(
             conn,
             source_db=SOURCE_DB,
             version=version,
@@ -970,11 +944,6 @@ def refresh(
         )
         conn.begin()
         try:
-            deactivated = _deactivate_for_refresh(
-                conn,
-                source_version_id=source_version_id,
-                force=force,
-            )
             with gzip.open(
                 download_result.path,
                 mode="rt",
@@ -988,13 +957,17 @@ def refresh(
                     retrieval_date=retrieval_date,
                 )
             # Backfill record_count now that we know the streaming total.
-            # The column isn't indexed, so this UPDATE is FK-safe and
-            # doesn't trigger the ``idx_asv_current`` quirk.
             conn.execute(
                 "UPDATE annotation_source_versions "
                 "SET record_count = ? "
                 "WHERE source_version_id = ?",
                 [inserted, source_version_id],
+            )
+            flip = flip_to_new_version(
+                conn,
+                source=SOURCE_DB,
+                table=_TARGET_TABLE,
+                new_source_version_id=source_version_id,
             )
             commit_and_checkpoint(conn, source_name=SOURCE_DB)
         except Exception:
@@ -1003,6 +976,7 @@ def refresh(
             raise
 
     elapsed = time.monotonic() - started
+    assert flip is not None  # noqa: S101 — guaranteed by the try block returning normally
 
     # 5. Post-load summary (drift identifiers). Read-only; runs against
     # the just-committed state.
@@ -1015,7 +989,8 @@ def refresh(
         sha256=download_result.sha256[:16],
         size_bytes=download_result.size_bytes,
         inserted=inserted,
-        deactivated=deactivated,
+        prior_version_id=flip.prior_version_id,
+        prior_row_count=flip.prior_row_count,
         source_version_id=source_version_id,
         elapsed_seconds=round(elapsed, 1),
         active_total=summary["active_total"],

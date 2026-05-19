@@ -27,19 +27,14 @@ ClinVar (5.2), and GWAS Catalog (5.3). Mirrors the locked
 
 What sets PGS Catalog apart from the prior four loaders:
 
-* **Schema correction shipping in the same PR.** 5.0 created
-  ``pgs_catalog_scores`` with ``pgs_id VARCHAR PRIMARY KEY``, which
-  conflicts with the locked supersession pattern -- a refresh would
-  insert new rows with the same ``pgs_id`` while flipping the prior
-  rows to ``is_active=FALSE``, violating the PK constraint. 5.4
-  corrects the schema to a surrogate ``score_record_id BIGINT
-  PRIMARY KEY`` (mirroring the four other annotation tables) and
-  drops the DB-level FK on ``pgs_score_weights.pgs_id`` (DuckDB
-  requires the FK target to carry a ``PRIMARY KEY`` or ``UNIQUE``
-  constraint and the corrected schema no longer satisfies that
-  requirement -- the link becomes application-validated, consistent
-  with the cross-group references already documented in the schema
-  doc).
+* **Surrogate score_record_id primary key.** The schema uses a
+  surrogate ``score_record_id BIGINT PRIMARY KEY`` rather than
+  ``pgs_id`` directly so the same ``pgs_id`` can appear under
+  multiple ``source_version_id`` values (one row per release) without
+  violating the PK. ``pgs_score_weights.pgs_id`` is therefore
+  application-validated rather than DB-FK-enforced (DuckDB requires
+  the FK target to carry a ``PRIMARY KEY`` or ``UNIQUE`` constraint,
+  which the surrogate-PK shape no longer satisfies for ``pgs_id``).
 * **Four-CSV in-memory join + REST trait_category lookup.** The
   bundle ships four metadata CSVs relevant to score-level state:
   scores (one row per PGS), publications (one row per PGP ID),
@@ -78,12 +73,13 @@ What sets PGS Catalog apart from the prior four loaders:
   module per the GWAS Catalog precedent of not promoting
   source-specific archive shapes to ``downloads.py``.
 
-Schema asymmetry: ``pgs_catalog_scores`` carries ``is_active`` but
-**not** ``superseded_by`` (matches the PharmGKB / CPIC / GWAS Catalog
-schema shape; ClinVar is the outlier). The supersession helper's
-``has_superseded_by=False`` path applies here, and the ``--force``
-blanket-deactivate does the same flip without tagging
-``superseded_by``.
+Supersession is via the ``annotation_sources`` pointer table (PR 1's
+version-pointer refactor): the loader inserts the new active set under
+a fresh ``source_version_id`` and then flips the pointer for
+``pgs_catalog`` to that id in one statement. Readers that want
+current-version rows join through ``annotation_sources``. The prior
+set stays in ``pgs_catalog_scores`` indefinitely under its older
+``source_version_id``.
 
 The loader does **not** touch ``variant_annotations_index`` (refresh
 is a separate downstream concern in sub-phase 5.8), and it does
@@ -112,11 +108,12 @@ from genome.annotate.downloads import download_to_cache
 from genome.annotate.registry import RefreshResult, register_loader
 from genome.annotate.source_versions import (
     get_current_version,
-    upsert_source_version,
+    insert_source_version,
 )
 from genome.annotate.supersession import (
+    VersionFlipResult,
     commit_and_checkpoint,
-    deactivate_prior_versions,
+    flip_to_new_version,
     maybe_skip_same_version,
 )
 from genome.db.duckdb_conn import duckdb_connection
@@ -277,7 +274,6 @@ _ARROW_SCHEMA: Final[pa.Schema] = pa.schema(
         pa.field("performance_or_per_sd", pa.float64()),
         pa.field("source_version_id", pa.int64(), nullable=False),
         pa.field("retrieval_date", pa.timestamp("us"), nullable=False),
-        pa.field("is_active", pa.bool_(), nullable=False),
     ],
 )
 
@@ -287,9 +283,9 @@ class _ParsedRow:
     """One row destined for ``pgs_catalog_scores``.
 
     Mirrors the destination schema's variable columns.
-    ``score_record_id``, ``source_version_id``, ``retrieval_date``,
-    and ``is_active`` are assigned at bulk-insert time after parsing
-    completes. ``weights_storage`` is left to the schema default
+    ``score_record_id``, ``source_version_id``, and ``retrieval_date``
+    are assigned at bulk-insert time after parsing completes.
+    ``weights_storage`` is left to the schema default
     (``'overlapping_only'``).
     """
 
@@ -1047,12 +1043,12 @@ def _insert_chunk(
     """Insert one chunk of ``_ParsedRow`` into ``pgs_catalog_scores``.
 
     Builds a PyArrow Table with one column per destination column
-    (including ``score_record_id``, ``source_version_id``,
-    ``retrieval_date``, and ``is_active=True``), registers it under
-    a temp name, then issues ``INSERT INTO pgs_catalog_scores (...)
-    SELECT ... FROM <temp>`` and unregisters. ``weights_storage`` is
-    omitted from the INSERT column list so the schema's
-    ``DEFAULT 'overlapping_only'`` applies to every new row.
+    (including ``score_record_id``, ``source_version_id``, and
+    ``retrieval_date``), registers it under a temp name, then issues
+    ``INSERT INTO pgs_catalog_scores (...) SELECT ... FROM <temp>``
+    and unregisters. ``weights_storage`` is omitted from the INSERT
+    column list so the schema's ``DEFAULT 'overlapping_only'`` applies
+    to every new row.
 
     Returns the number of rows inserted (== ``len(rows)``). A
     zero-row call inserts nothing and returns 0.
@@ -1107,7 +1103,6 @@ def _insert_chunk(
                 [naive_retrieval] * n,
                 type=pa.timestamp("us"),
             ),
-            "is_active": pa.array([True] * n, type=pa.bool_()),
         },
         schema=_ARROW_SCHEMA,
     )
@@ -1122,7 +1117,7 @@ def _insert_chunk(
                 variants_total,
                 reference_population, ancestry_distribution,
                 performance_auc, performance_or_per_sd,
-                source_version_id, retrieval_date, is_active
+                source_version_id, retrieval_date
             )
             SELECT
                 score_record_id, pgs_id, pgs_name,
@@ -1131,7 +1126,7 @@ def _insert_chunk(
                 variants_total,
                 reference_population, ancestry_distribution,
                 performance_auc, performance_or_per_sd,
-                source_version_id, retrieval_date, is_active
+                source_version_id, retrieval_date
               FROM _pgs_stage_arrow
             """,  # noqa: S608 — table name is a module constant, not user input
         )
@@ -1185,44 +1180,8 @@ def _stream_bulk_insert(
 
 
 # ---------------------------------------------------------------------------
-# Supersession + rollback helpers (mirror GWAS Catalog).
+# Rollback helper.
 # ---------------------------------------------------------------------------
-
-
-def _deactivate_for_refresh(
-    conn: DuckDBPyConnection,
-    *,
-    source_version_id: int,
-    force: bool,
-) -> int:
-    """Deactivate prior PGS Catalog rows ahead of a refresh insert.
-
-    Thin per-source seam over the shared
-    :func:`genome.annotate.supersession.deactivate_prior_versions`
-    helper (finding-009 #16). Both the normal and ``--force`` paths
-    route through the same helper; ``force_all_active=force`` flips
-    the WHERE clause between "rows older than the new version" (the
-    default) and "every active row" (force mode), so a same-version
-    ``--force`` re-run sweeps the prior set even though
-    ``upsert_source_version`` reused the existing
-    ``source_version_id``.
-
-    ``pgs_catalog_scores`` carries ``is_active`` but **not**
-    ``superseded_by`` (schema matches PharmGKB / CPIC / GWAS Catalog;
-    ClinVar is the outlier). We pass ``has_superseded_by=False``;
-    the supersession chain is followed via the prior rows'
-    ``source_version_id`` column.
-
-    Returns the number of rows flipped to ``is_active=FALSE``.
-    """
-    return deactivate_prior_versions(
-        conn,
-        table=_TARGET_TABLE,
-        new_source_version_id=source_version_id,
-        has_superseded_by=False,
-        source_name=SOURCE_DB,
-        force_all_active=force,
-    )
 
 
 def _cleanup_orphan_version_row(
@@ -1234,7 +1193,7 @@ def _cleanup_orphan_version_row(
     Same shape as the PharmGKB / CPIC / ClinVar / GWAS Catalog
     helpers -- called when the supersede + chunked-insert
     transaction rolls back so the version row that
-    :func:`upsert_source_version` committed in its own transaction
+    :func:`insert_source_version` committed in its own transaction
     doesn't leave a dangling "version exists but zero rows
     referenced" state. The DELETE is FK-safe because no
     ``pgs_catalog_scores`` rows reference the new
@@ -1266,7 +1225,7 @@ def _summarize_active(conn: DuckDBPyConnection) -> dict[str, object]:
     Returns the durable signals real-data verification compares
     across releases:
 
-    * ``active_total`` -- ``COUNT(*) WHERE is_active``
+    * ``active_total`` -- count of rows under the currently-active version
     * ``distinct_pgs_id`` -- ``COUNT(DISTINCT pgs_id)``
     * ``distinct_trait_efo`` -- ``COUNT(DISTINCT trait_efo)``
     * ``distinct_publication_pmid`` -- ``COUNT(DISTINCT publication_pmid)``
@@ -1275,34 +1234,50 @@ def _summarize_active(conn: DuckDBPyConnection) -> dict[str, object]:
     * ``with_performance_or_per_sd`` -- count where
       ``performance_or_per_sd IS NOT NULL``
 
-    Run after the supersession transaction commits so only
-    ``is_active = TRUE`` rows count.
+    Counts rows whose ``source_version_id`` matches the
+    ``annotation_sources`` pointer for ``pgs_catalog``. Run after the
+    supersession transaction commits so the pointer already names the
+    new version.
     """
     total_row = conn.execute(
-        f"SELECT COUNT(*) FROM {_TARGET_TABLE} WHERE is_active",  # noqa: S608
+        f"SELECT COUNT(*) FROM {_TARGET_TABLE} p "  # noqa: S608
+        "JOIN annotation_sources s "
+        "ON s.source_db = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id",
     ).fetchone()
     distinct_pgs_row = conn.execute(
-        f"SELECT COUNT(DISTINCT pgs_id) FROM {_TARGET_TABLE} WHERE is_active",  # noqa: S608
+        f"SELECT COUNT(DISTINCT p.pgs_id) FROM {_TARGET_TABLE} p "  # noqa: S608
+        "JOIN annotation_sources s "
+        "ON s.source_db = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id",
     ).fetchone()
     distinct_efo_row = conn.execute(
-        f"SELECT COUNT(DISTINCT trait_efo) FROM {_TARGET_TABLE} "  # noqa: S608
-        "WHERE is_active AND trait_efo IS NOT NULL",
+        f"SELECT COUNT(DISTINCT p.trait_efo) FROM {_TARGET_TABLE} p "  # noqa: S608
+        "JOIN annotation_sources s "
+        "ON s.source_db = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id "
+        "WHERE p.trait_efo IS NOT NULL",
     ).fetchone()
     distinct_pmid_row = conn.execute(
-        f"SELECT COUNT(DISTINCT publication_pmid) FROM {_TARGET_TABLE} "  # noqa: S608
-        "WHERE is_active AND publication_pmid IS NOT NULL",
+        f"SELECT COUNT(DISTINCT p.publication_pmid) FROM {_TARGET_TABLE} p "  # noqa: S608
+        "JOIN annotation_sources s "
+        "ON s.source_db = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id "
+        "WHERE p.publication_pmid IS NOT NULL",
     ).fetchone()
     distinct_category_row = conn.execute(
-        f"SELECT COUNT(DISTINCT trait_category) FROM {_TARGET_TABLE} "  # noqa: S608
-        "WHERE is_active AND trait_category IS NOT NULL",
+        f"SELECT COUNT(DISTINCT p.trait_category) FROM {_TARGET_TABLE} p "  # noqa: S608
+        "JOIN annotation_sources s "
+        "ON s.source_db = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id "
+        "WHERE p.trait_category IS NOT NULL",
     ).fetchone()
     with_auc_row = conn.execute(
-        f"SELECT COUNT(*) FROM {_TARGET_TABLE} "  # noqa: S608
-        "WHERE is_active AND performance_auc IS NOT NULL",
+        f"SELECT COUNT(*) FROM {_TARGET_TABLE} p "  # noqa: S608
+        "JOIN annotation_sources s "
+        "ON s.source_db = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id "
+        "WHERE p.performance_auc IS NOT NULL",
     ).fetchone()
     with_or_row = conn.execute(
-        f"SELECT COUNT(*) FROM {_TARGET_TABLE} "  # noqa: S608
-        "WHERE is_active AND performance_or_per_sd IS NOT NULL",
+        f"SELECT COUNT(*) FROM {_TARGET_TABLE} p "  # noqa: S608
+        "JOIN annotation_sources s "
+        "ON s.source_db = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id "
+        "WHERE p.performance_or_per_sd IS NOT NULL",
     ).fetchone()
     return {
         "active_total": int(total_row[0]) if total_row is not None else 0,
@@ -1353,20 +1328,23 @@ def refresh(
         bundle's (version, sha256) match the currently-active row,
         short-circuit via :func:`maybe_skip_same_version` (finding-009
         #14). ``source_file_hash`` is the bundle's SHA-256 -- the same
-        value ``upsert_source_version`` stores -- so the trait-category
+        value ``insert_source_version`` stores -- so the trait-category
         sibling is not included in the match (matches the
-        ``upsert_source_version`` call below). Off by default.
+        ``insert_source_version`` call below). Off by default.
     4. Inside one DuckDB transaction: upsert
-       ``annotation_source_versions``, deactivate prior PGS Catalog
-       rows via :func:`_deactivate_for_refresh`, open the bundle
-       four times (one per metadata file) and parse each into its
-       in-memory dict, parse the trait_category JSON into a
-       separate dict, run :func:`_join_metadata` to produce the
-       joined ``list[_ParsedRow]``, chunk-insert via
-       :func:`_stream_bulk_insert`, and update the version row's
-       ``record_count`` once the streaming completes. The
-       supersession transaction is closed via
-       :func:`commit_and_checkpoint` so the COMMIT + explicit
+       ``annotation_source_versions``, open the bundle four times
+       (one per metadata file) and parse each into its in-memory dict,
+       parse the trait_category JSON into a separate dict, run
+       :func:`_join_metadata` to produce the joined
+       ``list[_ParsedRow]``, chunk-insert via
+       :func:`_stream_bulk_insert`, update the version row's
+       ``record_count`` once the streaming completes, and flip the
+       ``annotation_sources`` pointer for ``pgs_catalog`` to the new
+       ``source_version_id`` via :func:`flip_to_new_version`. The
+       pointer flip is the supersession event; the prior set stays in
+       ``pgs_catalog_scores`` indefinitely under its older
+       ``source_version_id``. The supersession transaction is closed
+       via :func:`commit_and_checkpoint` so the COMMIT + explicit
        CHECKPOINT phases are observable in the structlog stream
        (finding-009 #9 and #11).
     5. On exception: ``conn.rollback()``,
@@ -1430,7 +1408,7 @@ def refresh(
 
     # 3c. --skip-if-same-version short-circuit (finding-009 #14). Off by
     # default. The match key is the bundle's SHA-256 only -- the same
-    # value upsert_source_version stores -- so the trait-category
+    # value insert_source_version stores -- so the trait-category
     # sibling does not participate in the match.
     skip = maybe_skip_same_version(
         source_db=SOURCE_DB,
@@ -1442,17 +1420,17 @@ def refresh(
         return skip
 
     # 4. Single-transaction load. Mirrors the GWAS Catalog shape:
-    # the version row upsert runs in its own transaction (DuckDB
-    # FK+index quirk documented in source_versions.py), then a
-    # second transaction wraps the supersession + chunked insert
-    # atomically.
+    # the version row insert runs in autocommit, then a second
+    # transaction wraps the chunked insert + pointer flip atomically.
+    # The flip runs after the INSERT so ``flip_to_new_version`` can
+    # count the just-inserted rows for the event payload.
     started = time.monotonic()
     retrieval_date = datetime.now(UTC)
     stats = _ParseStats()
     inserted = 0
-    deactivated = 0
+    flip: VersionFlipResult | None = None
     with duckdb_connection() as conn:
-        source_version_id = upsert_source_version(
+        source_version_id = insert_source_version(
             conn,
             source_db=SOURCE_DB,
             version=version,
@@ -1463,11 +1441,6 @@ def refresh(
         )
         conn.begin()
         try:
-            deactivated = _deactivate_for_refresh(
-                conn,
-                source_version_id=source_version_id,
-                force=force,
-            )
             # Four bundle scans, one per metadata file, plus one
             # JSON load for the trait_category payload.
             with _open_csv_from_bundle(
@@ -1514,6 +1487,12 @@ def refresh(
                 "WHERE source_version_id = ?",
                 [inserted, source_version_id],
             )
+            flip = flip_to_new_version(
+                conn,
+                source=SOURCE_DB,
+                table=_TARGET_TABLE,
+                new_source_version_id=source_version_id,
+            )
             commit_and_checkpoint(conn, source_name=SOURCE_DB)
         except Exception:
             conn.rollback()
@@ -1521,6 +1500,7 @@ def refresh(
             raise
 
     elapsed = time.monotonic() - started
+    assert flip is not None  # noqa: S101 — guaranteed by the try block returning normally
 
     # 5. Post-load summary (drift identifiers). Read-only; runs
     # against the just-committed state.
@@ -1533,7 +1513,8 @@ def refresh(
         sha256=download_result.sha256[:16],
         size_bytes=download_result.size_bytes,
         inserted=inserted,
-        deactivated=deactivated,
+        prior_version_id=flip.prior_version_id,
+        prior_row_count=flip.prior_row_count,
         source_version_id=source_version_id,
         elapsed_seconds=round(elapsed, 1),
         rows_read_scores=stats.rows_read_scores,

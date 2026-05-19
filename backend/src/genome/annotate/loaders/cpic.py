@@ -44,11 +44,12 @@ from genome.annotate.downloads import download_to_cache
 from genome.annotate.registry import RefreshResult, register_loader
 from genome.annotate.source_versions import (
     get_current_version,
-    upsert_source_version,
+    insert_source_version,
 )
 from genome.annotate.supersession import (
+    VersionFlipResult,
     commit_and_checkpoint,
-    deactivate_prior_versions,
+    flip_to_new_version,
     maybe_skip_same_version,
 )
 from genome.db.duckdb_conn import duckdb_connection
@@ -132,7 +133,6 @@ _ARROW_SCHEMA: Final[pa.Schema] = pa.schema(
         pa.field("last_updated", pa.date32()),
         pa.field("source_version_id", pa.int64(), nullable=False),
         pa.field("retrieval_date", pa.timestamp("us"), nullable=False),
-        pa.field("is_active", pa.bool_(), nullable=False),
     ],
 )
 
@@ -142,8 +142,8 @@ class _ParsedRow:
     """One row destined for ``cpic_guidelines``.
 
     Mirrors the destination schema's variable columns. ``guideline_id``,
-    ``source_version_id``, ``retrieval_date``, and ``is_active`` are
-    assigned at bulk-insert time after parsing completes.
+    ``source_version_id``, and ``retrieval_date`` are assigned at
+    bulk-insert time after parsing completes.
 
     ``gene_symbol`` and ``drug_name`` are required by the schema (NOT
     NULL); every other column is nullable. ``phenotype`` is technically
@@ -584,10 +584,10 @@ def _bulk_insert(
     """Bulk-load ``rows`` into ``cpic_guidelines``.
 
     Builds a PyArrow Table with one column per destination column
-    (including ``guideline_id``, ``source_version_id``,
-    ``retrieval_date``, and ``is_active=True``), registers it under a
-    temp name, then issues ``INSERT INTO cpic_guidelines (...)
-    SELECT ... FROM <temp>`` and unregisters.
+    (including ``guideline_id``, ``source_version_id``, and
+    ``retrieval_date``), registers it under a temp name, then issues
+    ``INSERT INTO cpic_guidelines (...) SELECT ... FROM <temp>``
+    and unregisters.
 
     Returns the number of rows inserted. A zero-row call inserts
     nothing and returns 0.
@@ -624,7 +624,6 @@ def _bulk_insert(
             "last_updated": pa.array([r.last_updated for r in rows], type=pa.date32()),
             "source_version_id": pa.array([source_version_id] * n, type=pa.int64()),
             "retrieval_date": pa.array([naive_retrieval] * n, type=pa.timestamp("us")),
-            "is_active": pa.array([True] * n, type=pa.bool_()),
         },
         schema=_ARROW_SCHEMA,
     )
@@ -638,7 +637,7 @@ def _bulk_insert(
                 phenotype, recommendation, classification_strength,
                 cpic_level, pediatric,
                 guideline_url, publication_pmid, last_updated,
-                source_version_id, retrieval_date, is_active
+                source_version_id, retrieval_date
             )
             SELECT
                 guideline_id, cpic_id,
@@ -646,48 +645,13 @@ def _bulk_insert(
                 phenotype, recommendation, classification_strength,
                 cpic_level, pediatric,
                 guideline_url, publication_pmid, last_updated,
-                source_version_id, retrieval_date, is_active
+                source_version_id, retrieval_date
               FROM _cpic_stage_arrow
             """,  # noqa: S608 — table name is a module constant, not user input
         )
     finally:
         conn.unregister("_cpic_stage_arrow")
     return n
-
-
-def _deactivate_for_refresh(
-    conn: DuckDBPyConnection,
-    *,
-    source_version_id: int,
-    force: bool,
-) -> int:
-    """Deactivate prior CPIC rows ahead of a refresh insert.
-
-    Thin per-source seam over the shared
-    :func:`genome.annotate.supersession.deactivate_prior_versions`
-    helper (finding-009 #16). Both the normal and ``--force`` paths
-    route through the same helper; ``force_all_active=force`` flips
-    the WHERE clause between "rows older than the new version" (the
-    default) and "every active row" (force mode), so a same-version
-    ``--force`` re-run sweeps the prior set even though
-    ``upsert_source_version`` reused the existing
-    ``source_version_id``.
-
-    ``cpic_guidelines`` carries ``is_active`` but not ``superseded_by``
-    (verified against ``docs/schemas/schema_group_2_reference_annotations.md``
-    and ``ddl/group_2_annotations.sql``), so we pass
-    ``has_superseded_by=False``.
-
-    Returns the number of rows flipped to ``is_active=FALSE``.
-    """
-    return deactivate_prior_versions(
-        conn,
-        table=_TARGET_TABLE,
-        new_source_version_id=source_version_id,
-        has_superseded_by=False,
-        source_name=SOURCE_DB,
-        force_all_active=force,
-    )
 
 
 def _cleanup_orphan_version_row(
@@ -698,7 +662,7 @@ def _cleanup_orphan_version_row(
 
     Same shape as PharmGKB's helper -- called when the supersede+insert
     transaction rolls back so the version row that
-    :func:`upsert_source_version` committed in its own transaction
+    :func:`insert_source_version` committed in its own transaction
     doesn't leave a dangling "version exists but zero rows referenced"
     state. The DELETE is FK-safe because no ``cpic_guidelines`` rows
     reference the new ``source_version_id`` yet (the bulk_insert never
@@ -745,9 +709,13 @@ def refresh(
     4. Parse the four JSON payloads and join them client-side.
        Multi-gene recommendations split into one ``_ParsedRow`` per gene.
     5. Inside one DuckDB transaction: upsert
-       ``annotation_source_versions``, deactivate prior CPIC rows via
-       :func:`deactivate_prior_versions`, and bulk-insert the freshly
-       joined rows. The supersession transaction is closed via
+       ``annotation_source_versions``, bulk-insert the freshly joined
+       rows under the new ``source_version_id``, and flip the
+       ``annotation_sources`` pointer for ``cpic`` to that id via
+       :func:`flip_to_new_version`. The pointer flip is the
+       supersession event; the prior set stays in ``cpic_guidelines``
+       indefinitely under its older ``source_version_id``. The
+       supersession transaction is closed via
        :func:`commit_and_checkpoint` so the COMMIT + explicit
        CHECKPOINT phases are observable in the structlog stream
        (finding-009 #9 and #11).
@@ -787,7 +755,7 @@ def refresh(
 
     # 3a. --skip-if-same-version short-circuit (finding-009 #14). The
     # match key is CPIC's combined SHA-256 across the four endpoints --
-    # the same fingerprint upsert_source_version stores in
+    # the same fingerprint insert_source_version stores in
     # source_file_hash. Off by default.
     combined_hash = _combined_file_hash(downloads)
     skip = maybe_skip_same_version(
@@ -815,14 +783,15 @@ def refresh(
     )
 
     # 5. Single-transaction load. The PharmGKB loader's "version row
-    # in its own transaction, supersede+insert in the wrapping
-    # transaction" shape applies verbatim here -- DuckDB does not
-    # support nested transactions and ``upsert_source_version`` manages
-    # its own due to the FK+index quirk documented in that module.
+    # in autocommit, insert + pointer flip in the wrapping transaction"
+    # shape applies verbatim here. The flip runs after the INSERT so
+    # ``flip_to_new_version`` can count the just-inserted rows for the
+    # event payload.
     total_size = sum(dr.size_bytes for dr in downloads.values())
     retrieval_date = datetime.now(UTC)
+    flip: VersionFlipResult | None = None
     with duckdb_connection() as conn:
-        source_version_id = upsert_source_version(
+        source_version_id = insert_source_version(
             conn,
             source_db=SOURCE_DB,
             version=version,
@@ -833,21 +802,17 @@ def refresh(
         )
         conn.begin()
         try:
-            # ``cpic_guidelines`` carries ``is_active`` but not
-            # ``superseded_by`` (schema-verified). Same supersession
-            # pattern as PharmGKB: standard helper on non-force,
-            # blanket sweep on force to avoid duplicate-active rows
-            # when the version label is unchanged.
-            deactivated = _deactivate_for_refresh(
-                conn,
-                source_version_id=source_version_id,
-                force=force,
-            )
             inserted = _bulk_insert(
                 conn,
                 rows,
                 source_version_id=source_version_id,
                 retrieval_date=retrieval_date,
+            )
+            flip = flip_to_new_version(
+                conn,
+                source=SOURCE_DB,
+                table=_TARGET_TABLE,
+                new_source_version_id=source_version_id,
             )
             commit_and_checkpoint(conn, source_name=SOURCE_DB)
         except Exception:
@@ -855,11 +820,13 @@ def refresh(
             _cleanup_orphan_version_row(conn, source_version_id)
             raise
 
+    assert flip is not None  # noqa: S101 — guaranteed by the try block returning normally
     log.info(
         "cpic.refresh.complete",
         version=version,
         inserted=inserted,
-        deactivated=deactivated,
+        prior_version_id=flip.prior_version_id,
+        prior_row_count=flip.prior_row_count,
         source_version_id=source_version_id,
     )
 

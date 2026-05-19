@@ -9,7 +9,8 @@ import structlog
 from typer.testing import CliRunner
 
 from genome.annotate.registry import _clear_loaders_for_testing
-from genome.annotate.source_versions import KNOWN_SOURCE_DBS, upsert_source_version
+from genome.annotate.source_versions import KNOWN_SOURCE_DBS, insert_source_version
+from genome.annotate.supersession import flip_to_new_version
 from genome.cli import app
 from genome.db import duckdb_connection, init_databases
 
@@ -89,7 +90,7 @@ def test_annotate_status_reports_loaded_source_with_metadata(
 ) -> None:
     init_databases()
     with duckdb_connection() as conn:
-        upsert_source_version(
+        sv_id = insert_source_version(
             conn,
             source_db="clinvar",
             version="2026_04_15",
@@ -97,6 +98,22 @@ def test_annotate_status_reports_loaded_source_with_metadata(
             source_file_hash="a" * 64,
             source_file_size=12_345,
             record_count=24,
+        )
+        # Seed one clinvar_annotations row so the flip's COUNT(*) is happy.
+        conn.execute(
+            """
+            INSERT INTO clinvar_annotations (
+                clinvar_id, variation_id, source_version_id, retrieval_date
+            )
+            VALUES (1, 'VCV1', ?, CURRENT_TIMESTAMP)
+            """,
+            [sv_id],
+        )
+        flip_to_new_version(
+            conn,
+            source="clinvar",
+            table="clinvar_annotations",
+            new_source_version_id=sv_id,
         )
     runner = CliRunner()
     result = runner.invoke(app, ["annotate", "status"])
