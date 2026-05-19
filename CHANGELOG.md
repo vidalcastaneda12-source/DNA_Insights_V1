@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Schema
+- Added `gnomad_frequencies.af_mid` (`DOUBLE`, nullable) so the upcoming
+  sub-phase 5.5 gnomAD loader can store Middle Eastern allele frequencies
+  as a distinct population. gnomAD v4 has ten inferred ancestry groups;
+  the schema previously had columns for nine. Schema markdown
+  (`docs/schemas/schema_group_2_reference_annotations.md`) and the
+  extracted DDL (`ddl/group_2_annotations.sql`) are updated together;
+  existing local DuckDB files need a rebuild
+  (`rm -rf data/ && uv run genome init`) per the CLAUDE.md schema-change
+  convention, followed by a re-ingest of 23andMe + Ancestry and a re-run
+  of every shipped Phase 5 loader.
+
 ### Changed
 - **Pre-5.5 — documentation reconcile for the version-pointer
   supersession refactor (PR #43).** Documentation-only follow-up to
