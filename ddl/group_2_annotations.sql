@@ -176,6 +176,7 @@ CREATE TABLE gnomad_frequencies (
   af_asj                DOUBLE,                  -- Ashkenazi Jewish
   af_eas                DOUBLE,                  -- East Asian
   af_fin                DOUBLE,                  -- Finnish
+  af_mid                DOUBLE,                  -- Middle Eastern
   af_nfe                DOUBLE,                  -- Non-Finnish European
   af_sas                DOUBLE,                  -- South Asian
   af_oth                DOUBLE,                  -- Other / unspecified
