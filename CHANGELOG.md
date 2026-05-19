@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+- **Pre-5.5 — `annotations.md` locks real-data numbers for GWAS
+  Catalog `2026_05_16` and PGS Catalog `2026_05_07`.**
+  Documentation-only follow-up to PR #46 (gnomAD `af_mid` schema
+  correction). A clean rebuild after PR #46 merged re-ran every
+  shipped Phase 5 loader and produced the first locked real-data
+  numbers for GWAS Catalog (5.3) and PGS Catalog (5.4); this PR
+  replaces the bracketed placeholder ranges in the
+  `Real-data verification commands` tables of the GWAS Catalog
+  and PGS Catalog sections of `docs/runbooks/annotations.md` with
+  the locked exact values. GWAS Catalog: `active_total=919,446`,
+  `distinct_study_accession=59,310`, `distinct_pmid=6,627`,
+  `distinct_rsid=410,192`, `distinct_trait_name=16,162`. PGS
+  Catalog: `active_total=5,337`, `distinct_pgs_id=5,337`,
+  `distinct_trait_efo=696`, `distinct_publication_pmid=590`,
+  `distinct_trait_category=10`, `with_performance_auc=1,517`,
+  `with_performance_or_per_sd=1,413`,
+  `multi_cohort_performance=3,089`. A new **Notes.** paragraph in
+  the GWAS Catalog section documents the ~8.95 distinct-GCST-per-
+  PMID ratio observed in the `2026_05_16` release — consistent
+  with the modern GWAS Catalog practice of splitting one
+  publication into multiple GCSTs by ancestry, sex, cohort, and
+  meta-analysis stage — against the catalog-level ~15.7 ratio
+  reported in the 2024 NAR paper (108,850 analyses / 6,921
+  publications), with a ~2× shift in either direction as the
+  drift-detection threshold for future re-locking. ClinVar,
+  PharmGKB, CPIC, and gnomAD runbook sections are untouched —
+  those numbers were already locked in prior PRs. No code,
+  schema, DDL, or test changes; no schema rebuild required.
+  (PR #XX)
+
 ### Schema
 - Added `gnomad_frequencies.af_mid` (`DOUBLE`, nullable) so the upcoming
   sub-phase 5.5 gnomAD loader can store Middle Eastern allele frequencies
