@@ -56,25 +56,45 @@ completes against real 23andMe + Ancestry corpus.
 
 **Status:** in progress.
 
-- Per-source downloaders (ClinVar, GWAS Catalog, PharmGKB, CPIC, PGS Catalog metadata, gnomAD filtered, dbSNP filtered, genes, traits, pathways)
-- Each writes to `annotation_source_versions` and the per-source table
-- VEP runs locally on user variants
-- Refresh `variant_annotations_index`
+- Per-source downloaders (ClinVar, GWAS Catalog, PharmGKB, CPIC, PGS Catalog metadata, gnomAD filtered, dbSNP filtered)
+- Each writes to `annotation_source_versions` and the per-source table; supersession is via the version-pointer pattern (see CLAUDE.md #7 and [`finding-010`](docs/findings/finding-010-version-pointer-supersession-pattern.md))
+- Refresh `variant_annotations_index` rollup across all loaded sources
+- Profile-level QC rollup combining per-source `sample_qc` rows into one per-profile answer (finding-005 #2)
+- `variants_master.is_acmg_sf` flag enrichment from the curated ACMG SF v3.x gene list intersected with ClinVar rows (finding-005 #5)
 - CLI: `genome annotate refresh [--source ...]`
 
 Sub-phase status:
-- [x] 5.0 — scaffold (PR #33)
+- [x] 5.0 — Loader scaffold (PR #33)
 - [x] 5.1a — PharmGKB loader (PR #34)
 - [x] 5.1b — CPIC loader (PR #35)
 - [x] 5.2 — ClinVar loader (PR #36)
 - [x] 5.3 — GWAS Catalog loader (PR #38)
-- [x] 5.4 — PGS Catalog metadata (PR #39)
+- [x] 5.4 — PGS Catalog metadata loader (PR #39)
 - [ ] 5.5 — gnomAD filtered (next)
 - [ ] 5.6 — dbSNP filtered
-- [ ] 5.7 — genes / traits / pathways
-- [ ] 5.8 — VEP local run + variant_annotations_index refresh
+- [ ] 5.7 — `variant_annotations_index` refresh
+- [ ] 5.8 — Profile-level QC rollup
 
-**Verification:** all sources loaded; `variant_annotations_index` populated; queries against `variant_full_v` view return joined annotations.
+Follow-ups (small PRs, slot between sub-phases as convenient):
+- PharmGKB / CPIC `already_current=True` cosmetic cleanup (finding-010 #12)
+- HEAD-request-failure version-label fallback behavior — capture as its own finding (finding-010 #13)
+- Cleanup of orphan rows under superseded `source_version_id`s (finding-010 #14)
+- Cross-source generalization of the version-pointer pattern (finding-010 #15)
+- `MAPPED_TRAIT_URI` truncation entry for finding-005 (deferred from sub-phase 5.3)
+
+Enrichment (depends on ClinVar from 5.2, can slot any time after 5.2):
+- `variants_master.is_acmg_sf` flag population — populate via the curated ACMG SF v3.x gene list intersected with ClinVar rows. Phase 3 deferred ACMG SF severity escalation pending this flag (finding-005 #5). Consumed by Phase 6's ACMG SF detection pipeline.
+
+Backfills (require dbSNP from 5.6, slot after 5.6 lands):
+- Canonical REF/ALT for strand-flip dedupe (finding-005 #1)
+- Tier-2 rsID matching via `variant_aliases` (finding-005 #4)
+- Hom-only recovery via canonical REF/ALT (finding-005 #6)
+
+Deferred from Phase 5 to later phases:
+- VEP local runner — fits Phase 6's runner pattern (Beagle / PharmCAT / HIBAG); structurally a subprocess tool that runs against user variants, not a download-and-load source. The `variant_annotations_index` ships with the VEP column NULL initially and gets refreshed when VEP lands in Phase 6.
+- Genes / traits / pathways dictionary tables — primarily serve insight generation and rendering; defer to Phase 7. The loaders we ship in Phase 5 carry gene symbols and trait IDs inline, so the index does not need the dictionaries to do its joins.
+
+**Verification:** all seven annotation source loaders complete (ClinVar, GWAS Catalog, PharmGKB, CPIC, PGS Catalog metadata, gnomAD, dbSNP); `variant_annotations_index` populated with the expected per-variant join across them; queries against `variant_full_v` view return joined annotations; profile-level QC rollup combines per-source `sample_qc` rows into a single per-profile answer that resolves CLAUDE.md "Real-data observations" #1; `variants_master.is_acmg_sf` flag is populated on the expected gene set.
 
 ## Phase 6 — Analysis pipelines
 - PRS computation against PGS Catalog (overlapping-only weights)
@@ -82,6 +102,7 @@ Sub-phase status:
 - Carrier detection rules
 - ACMG SF detection
 - HIBAG → `derived_hla_typing`
+- VEP local runner against user variants → populates VEP columns in `variant_annotations_index` via the rollup refresh.
 - ROH via plink2
 - Y/mtDNA haplogroup assignment
 - Global ancestry (RFMix or admixture)

@@ -791,6 +791,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   future regression of this text is caught by the suite.
 
 ### Documentation
+- **Pre-5.5 — ROADMAP refresh and remaining-Phase-5 sequencing.**
+  Documentation-only refresh that locks the Option A sub-phase
+  plan for the remainder of Phase 5 and pins the outstanding
+  follow-ups, enrichment, and backfills to their slots. The new
+  ROADMAP Phase 5 scope drops the deferred items (VEP runner →
+  Phase 6; genes / traits / pathways dictionary tables → Phase 7)
+  and adds the two missing-but-required pieces (profile-level QC
+  rollup as 5.8; `variant_annotations_index` refresh as 5.7).
+  Sub-phase checklist is rewritten in completion order: 5.0
+  (scaffold, PR #33), 5.1a (PharmGKB, PR #34), 5.1b (CPIC,
+  PR #35), 5.2 (ClinVar, PR #36), 5.3 (GWAS Catalog, PR #38),
+  5.4 (PGS Catalog metadata, PR #39) — shipped; 5.5 (gnomAD
+  filtered) next, then 5.6 (dbSNP filtered), 5.7
+  (`variant_annotations_index` refresh), 5.8 (profile-level QC
+  rollup). Phase 5 supersession is documented as version-pointer
+  (CLAUDE.md #7 / `finding-010`), reflecting the post-PR-#43
+  state. Follow-up section sequences the four open finding-010
+  items (#12 PharmGKB / CPIC `already_current=True` cosmetic
+  cleanup, #13 HEAD-request-failure version-label fallback
+  capture, #14 orphan-row cleanup under superseded
+  `source_version_id`s, #15 cross-source generalization
+  opportunity) plus the deferred-from-5.3 `MAPPED_TRAIT_URI`
+  truncation entry for finding-005, all as small PRs slotted
+  between sub-phases. Enrichment section pins the
+  `variants_master.is_acmg_sf` flag population task (finding-005
+  #5) as ClinVar-dependent and consumed by Phase 6's ACMG SF
+  detection pipeline. Backfills section pins the three
+  finding-005 dbSNP-dependent items (#1 canonical REF/ALT for
+  strand-flip dedupe, #4 tier-2 rsID matching via
+  `variant_aliases`, #6 hom-only recovery via canonical
+  REF/ALT) as 5.6-dependent. Phase 6 scope gains one bullet
+  for the VEP local runner (clustered with the other runner-
+  pattern tools — Beagle / PharmCAT / HIBAG). README's Status
+  section is updated to reflect 5.0-5.4 shipped and 5.5
+  (gnomAD) as the next substantive sub-phase. No code changes;
+  no schema rebuild; no re-ingest; `docs/schemas/` is untouched,
+  `finding-005` / `finding-010` are referenced but not edited.
+  (PR #XX)
 - Added `docs/findings/finding-008-phase4-rebuild-and-chrx-observations.md`
   capturing two durable Phase 4 real-data observations surfaced by the
   PR #31 schema-change rebuild: (1) the rebuild-from-preserved-archive
