@@ -828,7 +828,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (gnomAD) as the next substantive sub-phase. No code changes;
   no schema rebuild; no re-ingest; `docs/schemas/` is untouched,
   `finding-005` / `finding-010` are referenced but not edited.
-  (PR #XX)
+  (PR #45)
 - Added `docs/findings/finding-008-phase4-rebuild-and-chrx-observations.md`
   capturing two durable Phase 4 real-data observations surfaced by the
   PR #31 schema-change rebuild: (1) the rebuild-from-preserved-archive
