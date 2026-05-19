@@ -501,7 +501,7 @@ LEFT JOIN cpic_guidelines cg
   ON cg.gene_symbol = p.gene_symbol
  AND cg.phenotype LIKE p.phenotype || '%'
  AND cg.source_version_id = (
-   SELECT current_source_version_id FROM annotation_sources WHERE source = 'cpic'
+   SELECT current_source_version_id FROM annotation_sources WHERE source_db = 'cpic'
  )
 WHERE p.is_active
 GROUP BY p.derived_pgx_id, p.gene_symbol, p.diplotype,

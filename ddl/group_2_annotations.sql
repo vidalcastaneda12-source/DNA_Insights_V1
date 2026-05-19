@@ -2,25 +2,28 @@
 -- Target: DuckDB (genome.duckdb)
 -- Extracted verbatim from docs/schemas/schema_group_2_reference_annotations.md
 
--- Master version registry
+-- Master version registry. One row per refresh. Identity is
+-- source_version_id alone; (source_db, version) is *not* unique because
+-- a `--force` re-load against the same upstream release still allocates
+-- a fresh source_version_id (its supersession audit trail is the row,
+-- not a per-row is_active flip). The "currently active" version is named
+-- by the single-row pointer in annotation_sources.
 
 CREATE TABLE annotation_source_versions (
   source_version_id     BIGINT PRIMARY KEY,
   source_db             VARCHAR NOT NULL,        -- 'clinvar', 'gwas_catalog', 'pharmgkb',
                                                  -- 'cpic', 'pgs_catalog', 'gnomad',
                                                  -- 'dbsnp', 'vep', 'hgnc', 'efo', 'kegg'
-  version               VARCHAR NOT NULL,        -- e.g. '2026_04_15'
+  version               VARCHAR NOT NULL,        -- e.g. '2026_04_15'; not unique
   ingested_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   source_url            VARCHAR,                 -- where downloaded from
   source_file_hash      VARCHAR(64),
   source_file_size      BIGINT,
   record_count          INTEGER,
-  is_current            BOOLEAN DEFAULT TRUE,    -- one current row per source_db
-  notes                 TEXT,
-  UNIQUE (source_db, version)
+  notes                 TEXT
 );
 
-CREATE INDEX idx_asv_current ON annotation_source_versions(source_db, is_current);
+CREATE INDEX idx_asv_source_db ON annotation_source_versions(source_db);
 
 -- Per-source "currently active version" pointer. One row per source_db.
 -- Updated atomically by the supersession workflow: the pointer flip IS the
@@ -28,7 +31,7 @@ CREATE INDEX idx_asv_current ON annotation_source_versions(source_db, is_current
 -- annotation tables. See backend/src/genome/annotate/supersession.py.
 
 CREATE TABLE annotation_sources (
-  source                       VARCHAR PRIMARY KEY,
+  source_db                    VARCHAR PRIMARY KEY,
   current_source_version_id    BIGINT NOT NULL REFERENCES annotation_source_versions(source_version_id)
 );
 
@@ -548,7 +551,7 @@ JOIN consensus_genotypes cg ON cg.variant_id = vm.variant_id
 JOIN pharmgkb_annotations pa
   ON pa.rsid = vm.rsid
 JOIN annotation_sources pa_src
-  ON pa_src.source = 'pharmgkb'
+  ON pa_src.source_db = 'pharmgkb'
  AND pa_src.current_source_version_id = pa.source_version_id
 WHERE cg.dosage > 0
 GROUP BY vm.variant_id, vm.rsid, vm.chrom, vm.pos_grch38,

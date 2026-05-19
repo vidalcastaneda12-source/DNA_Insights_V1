@@ -870,24 +870,24 @@ def test_refresh_inserts_rows_and_records_source_version(
         active = conn.execute(
             "SELECT COUNT(*) FROM cpic_guidelines c "
             "JOIN annotation_sources s "
-            "ON s.source = 'cpic' AND s.current_source_version_id = c.source_version_id",
+            "ON s.source_db = 'cpic' AND s.current_source_version_id = c.source_version_id",
         ).fetchone()
         non_current = conn.execute(
             "SELECT COUNT(*) FROM cpic_guidelines c "
             "WHERE NOT EXISTS ("
             "  SELECT 1 FROM annotation_sources s "
-            "  WHERE s.source = 'cpic' AND s.current_source_version_id = c.source_version_id"
+            "  WHERE s.source_db = 'cpic' AND s.current_source_version_id = c.source_version_id"
             ")",
         ).fetchone()
         version_rows = conn.execute(
-            "SELECT version, record_count, is_current FROM annotation_source_versions"
+            "SELECT version, record_count FROM annotation_source_versions"
             " WHERE source_db = 'cpic'",
         ).fetchall()
     assert active is not None
     assert active[0] == _EXPECTED_DB_ROW_COUNT
     assert non_current is not None
     assert non_current[0] == 0
-    assert version_rows == [("2026_05_14", _EXPECTED_DB_ROW_COUNT, True)]
+    assert version_rows == [("2026_05_14", _EXPECTED_DB_ROW_COUNT)]
 
 
 def test_refresh_second_call_is_short_circuit(
@@ -916,7 +916,7 @@ def test_refresh_second_call_is_short_circuit(
         n_active = conn.execute(
             "SELECT COUNT(*) FROM cpic_guidelines c "
             "JOIN annotation_sources s "
-            "ON s.source = 'cpic' AND s.current_source_version_id = c.source_version_id",
+            "ON s.source_db = 'cpic' AND s.current_source_version_id = c.source_version_id",
         ).fetchone()
         n_versions = conn.execute(
             "SELECT COUNT(*) FROM annotation_source_versions WHERE source_db = 'cpic'",
@@ -966,7 +966,7 @@ def test_refresh_new_version_supersedes_prior_rows(
     expected_v2_rows = 3
     with duckdb_connection() as conn:
         current_pointer = conn.execute(
-            "SELECT current_source_version_id FROM annotation_sources WHERE source = 'cpic'",
+            "SELECT current_source_version_id FROM annotation_sources WHERE source_db = 'cpic'",
         ).fetchone()
         prior_rows = conn.execute(
             "SELECT COUNT(*) FROM cpic_guidelines WHERE source_version_id = ?",
@@ -977,7 +977,7 @@ def test_refresh_new_version_supersedes_prior_rows(
             [second.source_version_id],
         ).fetchone()
         version_rows = conn.execute(
-            "SELECT version, is_current FROM annotation_source_versions"
+            "SELECT version FROM annotation_source_versions"
             " WHERE source_db = 'cpic' ORDER BY source_version_id",
         ).fetchall()
     assert current_pointer is not None
@@ -986,13 +986,14 @@ def test_refresh_new_version_supersedes_prior_rows(
     assert prior_rows[0] == _EXPECTED_DB_ROW_COUNT
     assert active is not None
     assert active[0] == expected_v2_rows
-    assert version_rows == [("2026_05_14", False), ("2026_06_01", True)]
+    assert version_rows == [("2026_05_14",), ("2026_06_01",)]
 
 
 def test_refresh_force_reloads_even_when_version_matches(
     fixture_endpoint_files: dict[str, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """``--force`` against the same upstream version → new id, new rows, pointer flips."""
     init_databases()
     _patch_download_to_cache(monkeypatch, fixture_endpoint_files)
     first = cpic_loader.refresh(force=False)
@@ -1000,28 +1001,39 @@ def test_refresh_force_reloads_even_when_version_matches(
 
     assert first.was_already_current is False
     assert second.was_already_current is False
-    # Same-version --force: upsert_source_version is idempotent on
-    # (source_db, version), so source_version_id is unchanged. Under
-    # the version-pointer pattern both inserts land under the same id
-    # and both are "current"; dedup is a downstream concern.
-    assert second.source_version_id == first.source_version_id
+    assert second.source_version_id != first.source_version_id
 
     with duckdb_connection() as conn:
         current_pointer = conn.execute(
-            "SELECT current_source_version_id FROM annotation_sources WHERE source = 'cpic'",
+            "SELECT current_source_version_id FROM annotation_sources WHERE source_db = 'cpic'",
         ).fetchone()
         active = conn.execute(
             "SELECT COUNT(*) FROM cpic_guidelines c "
             "JOIN annotation_sources s "
-            "ON s.source = 'cpic' AND s.current_source_version_id = c.source_version_id",
+            "ON s.source_db = 'cpic' AND s.current_source_version_id = c.source_version_id",
+        ).fetchone()
+        prior = conn.execute(
+            "SELECT COUNT(*) FROM cpic_guidelines WHERE source_version_id = ?",
+            [first.source_version_id],
         ).fetchone()
         total = conn.execute("SELECT COUNT(*) FROM cpic_guidelines").fetchone()
+        version_rows = conn.execute(
+            "SELECT source_version_id, version, record_count"
+            " FROM annotation_source_versions"
+            " WHERE source_db = 'cpic' ORDER BY source_version_id",
+        ).fetchall()
     assert current_pointer is not None
-    assert int(current_pointer[0]) == first.source_version_id
+    assert int(current_pointer[0]) == second.source_version_id
     assert active is not None
-    assert active[0] == 2 * _EXPECTED_DB_ROW_COUNT
+    assert active[0] == _EXPECTED_DB_ROW_COUNT
+    assert prior is not None
+    assert prior[0] == _EXPECTED_DB_ROW_COUNT
     assert total is not None
     assert total[0] == 2 * _EXPECTED_DB_ROW_COUNT
+    assert [(int(r[0]), r[1], int(r[2])) for r in version_rows] == [
+        (first.source_version_id, "2026_05_14", _EXPECTED_DB_ROW_COUNT),
+        (second.source_version_id, "2026_05_14", _EXPECTED_DB_ROW_COUNT),
+    ]
 
 
 def test_refresh_writes_expected_column_values(

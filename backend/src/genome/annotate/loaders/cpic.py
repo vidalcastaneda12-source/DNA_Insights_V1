@@ -44,7 +44,7 @@ from genome.annotate.downloads import download_to_cache
 from genome.annotate.registry import RefreshResult, register_loader
 from genome.annotate.source_versions import (
     get_current_version,
-    upsert_source_version,
+    insert_source_version,
 )
 from genome.annotate.supersession import (
     VersionFlipResult,
@@ -662,7 +662,7 @@ def _cleanup_orphan_version_row(
 
     Same shape as PharmGKB's helper -- called when the supersede+insert
     transaction rolls back so the version row that
-    :func:`upsert_source_version` committed in its own transaction
+    :func:`insert_source_version` committed in its own transaction
     doesn't leave a dangling "version exists but zero rows referenced"
     state. The DELETE is FK-safe because no ``cpic_guidelines`` rows
     reference the new ``source_version_id`` yet (the bulk_insert never
@@ -755,7 +755,7 @@ def refresh(
 
     # 3a. --skip-if-same-version short-circuit (finding-009 #14). The
     # match key is CPIC's combined SHA-256 across the four endpoints --
-    # the same fingerprint upsert_source_version stores in
+    # the same fingerprint insert_source_version stores in
     # source_file_hash. Off by default.
     combined_hash = _combined_file_hash(downloads)
     skip = maybe_skip_same_version(
@@ -783,17 +783,15 @@ def refresh(
     )
 
     # 5. Single-transaction load. The PharmGKB loader's "version row
-    # in its own transaction, insert + pointer flip in the wrapping
-    # transaction" shape applies verbatim here -- DuckDB does not
-    # support nested transactions and ``upsert_source_version`` manages
-    # its own due to the FK+index quirk documented in that module. The
-    # flip runs after the INSERT so ``flip_to_new_version`` can count
-    # the just-inserted rows for the event payload.
+    # in autocommit, insert + pointer flip in the wrapping transaction"
+    # shape applies verbatim here. The flip runs after the INSERT so
+    # ``flip_to_new_version`` can count the just-inserted rows for the
+    # event payload.
     total_size = sum(dr.size_bytes for dr in downloads.values())
     retrieval_date = datetime.now(UTC)
     flip: VersionFlipResult | None = None
     with duckdb_connection() as conn:
-        source_version_id = upsert_source_version(
+        source_version_id = insert_source_version(
             conn,
             source_db=SOURCE_DB,
             version=version,

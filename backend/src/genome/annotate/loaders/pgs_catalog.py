@@ -108,7 +108,7 @@ from genome.annotate.downloads import download_to_cache
 from genome.annotate.registry import RefreshResult, register_loader
 from genome.annotate.source_versions import (
     get_current_version,
-    upsert_source_version,
+    insert_source_version,
 )
 from genome.annotate.supersession import (
     VersionFlipResult,
@@ -1193,7 +1193,7 @@ def _cleanup_orphan_version_row(
     Same shape as the PharmGKB / CPIC / ClinVar / GWAS Catalog
     helpers -- called when the supersede + chunked-insert
     transaction rolls back so the version row that
-    :func:`upsert_source_version` committed in its own transaction
+    :func:`insert_source_version` committed in its own transaction
     doesn't leave a dangling "version exists but zero rows
     referenced" state. The DELETE is FK-safe because no
     ``pgs_catalog_scores`` rows reference the new
@@ -1242,41 +1242,41 @@ def _summarize_active(conn: DuckDBPyConnection) -> dict[str, object]:
     total_row = conn.execute(
         f"SELECT COUNT(*) FROM {_TARGET_TABLE} p "  # noqa: S608
         "JOIN annotation_sources s "
-        "ON s.source = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id",
+        "ON s.source_db = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id",
     ).fetchone()
     distinct_pgs_row = conn.execute(
         f"SELECT COUNT(DISTINCT p.pgs_id) FROM {_TARGET_TABLE} p "  # noqa: S608
         "JOIN annotation_sources s "
-        "ON s.source = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id",
+        "ON s.source_db = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id",
     ).fetchone()
     distinct_efo_row = conn.execute(
         f"SELECT COUNT(DISTINCT p.trait_efo) FROM {_TARGET_TABLE} p "  # noqa: S608
         "JOIN annotation_sources s "
-        "ON s.source = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id "
+        "ON s.source_db = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id "
         "WHERE p.trait_efo IS NOT NULL",
     ).fetchone()
     distinct_pmid_row = conn.execute(
         f"SELECT COUNT(DISTINCT p.publication_pmid) FROM {_TARGET_TABLE} p "  # noqa: S608
         "JOIN annotation_sources s "
-        "ON s.source = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id "
+        "ON s.source_db = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id "
         "WHERE p.publication_pmid IS NOT NULL",
     ).fetchone()
     distinct_category_row = conn.execute(
         f"SELECT COUNT(DISTINCT p.trait_category) FROM {_TARGET_TABLE} p "  # noqa: S608
         "JOIN annotation_sources s "
-        "ON s.source = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id "
+        "ON s.source_db = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id "
         "WHERE p.trait_category IS NOT NULL",
     ).fetchone()
     with_auc_row = conn.execute(
         f"SELECT COUNT(*) FROM {_TARGET_TABLE} p "  # noqa: S608
         "JOIN annotation_sources s "
-        "ON s.source = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id "
+        "ON s.source_db = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id "
         "WHERE p.performance_auc IS NOT NULL",
     ).fetchone()
     with_or_row = conn.execute(
         f"SELECT COUNT(*) FROM {_TARGET_TABLE} p "  # noqa: S608
         "JOIN annotation_sources s "
-        "ON s.source = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id "
+        "ON s.source_db = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id "
         "WHERE p.performance_or_per_sd IS NOT NULL",
     ).fetchone()
     return {
@@ -1328,9 +1328,9 @@ def refresh(
         bundle's (version, sha256) match the currently-active row,
         short-circuit via :func:`maybe_skip_same_version` (finding-009
         #14). ``source_file_hash`` is the bundle's SHA-256 -- the same
-        value ``upsert_source_version`` stores -- so the trait-category
+        value ``insert_source_version`` stores -- so the trait-category
         sibling is not included in the match (matches the
-        ``upsert_source_version`` call below). Off by default.
+        ``insert_source_version`` call below). Off by default.
     4. Inside one DuckDB transaction: upsert
        ``annotation_source_versions``, open the bundle four times
        (one per metadata file) and parse each into its in-memory dict,
@@ -1408,7 +1408,7 @@ def refresh(
 
     # 3c. --skip-if-same-version short-circuit (finding-009 #14). Off by
     # default. The match key is the bundle's SHA-256 only -- the same
-    # value upsert_source_version stores -- so the trait-category
+    # value insert_source_version stores -- so the trait-category
     # sibling does not participate in the match.
     skip = maybe_skip_same_version(
         source_db=SOURCE_DB,
@@ -1420,19 +1420,17 @@ def refresh(
         return skip
 
     # 4. Single-transaction load. Mirrors the GWAS Catalog shape:
-    # the version row upsert runs in its own transaction (DuckDB
-    # FK+index quirk documented in source_versions.py), then a
-    # second transaction wraps the chunked insert + pointer flip
-    # atomically. The flip runs after the INSERT so
-    # ``flip_to_new_version`` can count the just-inserted rows for
-    # the event payload.
+    # the version row insert runs in autocommit, then a second
+    # transaction wraps the chunked insert + pointer flip atomically.
+    # The flip runs after the INSERT so ``flip_to_new_version`` can
+    # count the just-inserted rows for the event payload.
     started = time.monotonic()
     retrieval_date = datetime.now(UTC)
     stats = _ParseStats()
     inserted = 0
     flip: VersionFlipResult | None = None
     with duckdb_connection() as conn:
-        source_version_id = upsert_source_version(
+        source_version_id = insert_source_version(
             conn,
             source_db=SOURCE_DB,
             version=version,

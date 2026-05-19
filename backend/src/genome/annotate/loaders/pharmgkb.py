@@ -42,7 +42,7 @@ from genome.annotate.downloads import download_to_cache
 from genome.annotate.registry import RefreshResult, register_loader
 from genome.annotate.source_versions import (
     get_current_version,
-    upsert_source_version,
+    insert_source_version,
 )
 from genome.annotate.supersession import (
     VersionFlipResult,
@@ -427,7 +427,7 @@ def _cleanup_orphan_version_row(
     """Best-effort delete of an orphan ``annotation_source_versions`` row.
 
     Called when the supersede+insert transaction rolls back. The row was
-    inserted by ``upsert_source_version`` in its own (already-committed)
+    inserted by ``insert_source_version`` in its own (already-committed)
     transaction, so a normal rollback won't remove it. The DELETE is
     FK-safe because no ``pharmgkb_annotations`` rows reference the new
     ``source_version_id`` yet (the bulk_insert never committed).
@@ -538,23 +538,15 @@ def refresh(
 
     # 5. Single-transaction load.
     #
-    # ``upsert_source_version`` manages its own transaction internally
-    # (DuckDB's FK+index quirk forces the index drop/recreate to bracket
-    # an inner BEGIN/COMMIT pair; see the function's module docstring).
-    # DuckDB does not support nested transactions, so we cannot wrap
-    # ``upsert_source_version`` in an outer ``conn.begin()`` — doing so
-    # raises ``TransactionContext Error: Current transaction is aborted``
-    # from the inner BEGIN. The locked scaffold forbids modifying the
-    # helper, so the workable shape is:
-    #
-    #  5a. ``upsert_source_version`` runs (its own transaction).
-    #  5b. A separate transaction wraps ``_bulk_insert`` +
-    #      ``flip_to_new_version`` — the two writes that the
-    #      supersession invariant requires to land atomically (the
-    #      insertion of the new active set and the pointer flip that
-    #      makes it "current"). The flip runs *after* the insert so
-    #      ``flip_to_new_version`` can count the just-inserted rows for
-    #      the event payload.
+    # ``insert_source_version`` runs in autocommit (no explicit
+    # ``conn.begin()`` wrapping it), so the new source_version_id row
+    # is durable before the wrapping transaction starts. The wrapping
+    # transaction then bundles ``_bulk_insert`` + ``flip_to_new_version``
+    # — the two writes that the supersession invariant requires to land
+    # atomically: the insertion of the new active set and the pointer
+    # flip that designates it "current". The flip runs *after* the
+    # insert so ``flip_to_new_version`` can count the just-inserted
+    # rows for the event payload.
     #
     # If 5b fails, the version row from 5a is orphaned: it claims
     # ``record_count > 0`` but no annotation rows exist for it. The
@@ -566,7 +558,7 @@ def refresh(
     retrieval_date = datetime.now(UTC)
     flip: VersionFlipResult | None = None
     with duckdb_connection() as conn:
-        source_version_id = upsert_source_version(
+        source_version_id = insert_source_version(
             conn,
             source_db=SOURCE_DB,
             version=version,

@@ -21,7 +21,7 @@ import pytest
 import structlog
 from structlog.testing import capture_logs
 
-from genome.annotate.source_versions import upsert_source_version
+from genome.annotate.source_versions import insert_source_version
 from genome.annotate.supersession import (
     VersionFlipResult,
     commit_and_checkpoint,
@@ -69,7 +69,7 @@ def test_flip_to_new_version_first_load_inserts_pointer_row(
     """First load for a source: pointer row doesn't exist yet → INSERT it."""
     init_databases()
     with duckdb_connection() as conn:
-        v1 = upsert_source_version(
+        v1 = insert_source_version(
             conn,
             source_db="clinvar",
             version="2026_05_10",
@@ -87,7 +87,7 @@ def test_flip_to_new_version_first_load_inserts_pointer_row(
             new_source_version_id=v1,
         )
         pointer = conn.execute(
-            "SELECT current_source_version_id FROM annotation_sources WHERE source = ?",
+            "SELECT current_source_version_id FROM annotation_sources WHERE source_db = ?",
             ["clinvar"],
         ).fetchone()
 
@@ -109,7 +109,7 @@ def test_flip_to_new_version_refresh_updates_existing_pointer(
     """Refresh path: pointer row exists → UPDATE its current_source_version_id."""
     init_databases()
     with duckdb_connection() as conn:
-        v1 = upsert_source_version(
+        v1 = insert_source_version(
             conn,
             source_db="clinvar",
             version="2026_04_15",
@@ -128,7 +128,7 @@ def test_flip_to_new_version_refresh_updates_existing_pointer(
         )
 
         # Now load v2 and flip again — UPDATE path.
-        v2 = upsert_source_version(
+        v2 = insert_source_version(
             conn,
             source_db="clinvar",
             version="2026_05_10",
@@ -146,7 +146,7 @@ def test_flip_to_new_version_refresh_updates_existing_pointer(
             new_source_version_id=v2,
         )
         pointer_rows = conn.execute(
-            "SELECT source, current_source_version_id FROM annotation_sources",
+            "SELECT source_db, current_source_version_id FROM annotation_sources",
         ).fetchall()
 
     # Pointer flipped from v1 to v2; only one row per source.
@@ -159,13 +159,83 @@ def test_flip_to_new_version_refresh_updates_existing_pointer(
     assert result.new_row_count == 3
 
 
+def test_flip_to_new_version_same_upstream_version_allocates_new_id(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """Same upstream version label, two refreshes → two distinct ids, pointer flips.
+
+    This is the regression case the PR fixes. Under the prior model the
+    second refresh re-used the first refresh's source_version_id and
+    the loader inserted new rows under it (duplicates). Under the new
+    model every call to ``insert_source_version`` allocates a fresh
+    id; the pointer flips to it; ``supersession_version_flip``'s
+    ``prior_version_id`` and ``new_version_id`` are distinct.
+    """
+    init_databases()
+    with duckdb_connection() as conn:
+        v1 = insert_source_version(
+            conn,
+            source_db="clinvar",
+            version="2026_05_10",
+            source_url=None,
+            source_file_hash="a" * 64,
+            source_file_size=1,
+            record_count=4,
+        )
+        _seed_clinvar_rows(conn, v1, count=4)
+        flip_to_new_version(
+            conn,
+            source="clinvar",
+            table="clinvar_annotations",
+            new_source_version_id=v1,
+        )
+        # Same upstream version label, fresh refresh: a NEW row in
+        # annotation_source_versions with a distinct source_version_id.
+        v2 = insert_source_version(
+            conn,
+            source_db="clinvar",
+            version="2026_05_10",
+            source_url=None,
+            source_file_hash="a" * 64,
+            source_file_size=1,
+            record_count=4,
+        )
+        _seed_clinvar_rows(conn, v2, count=4)
+        result = flip_to_new_version(
+            conn,
+            source="clinvar",
+            table="clinvar_annotations",
+            new_source_version_id=v2,
+        )
+
+        version_rows = conn.execute(
+            "SELECT source_version_id, version FROM annotation_source_versions"
+            " WHERE source_db = 'clinvar' ORDER BY source_version_id",
+        ).fetchall()
+        pointer = conn.execute(
+            "SELECT current_source_version_id FROM annotation_sources WHERE source_db = 'clinvar'",
+        ).fetchone()
+
+    assert v2 != v1
+    assert [(int(r[0]), r[1]) for r in version_rows] == [
+        (v1, "2026_05_10"),
+        (v2, "2026_05_10"),
+    ]
+    assert pointer is not None
+    assert int(pointer[0]) == v2
+    assert result.prior_version_id == v1
+    assert result.new_version_id == v2
+    assert result.prior_row_count == 4
+    assert result.new_row_count == 4
+
+
 def test_flip_to_new_version_emits_event_with_full_payload(
     isolated_settings: dict[str, str],  # noqa: ARG001
 ) -> None:
     """The ``supersession_version_flip`` event carries the full payload."""
     init_databases()
     with duckdb_connection() as conn:
-        v1 = upsert_source_version(
+        v1 = insert_source_version(
             conn,
             source_db="clinvar",
             version="2026_04_15",
@@ -181,7 +251,7 @@ def test_flip_to_new_version_emits_event_with_full_payload(
             table="clinvar_annotations",
             new_source_version_id=v1,
         )
-        v2 = upsert_source_version(
+        v2 = insert_source_version(
             conn,
             source_db="clinvar",
             version="2026_05_10",
@@ -276,7 +346,7 @@ def test_commit_and_checkpoint_emits_four_events_and_issues_checkpoint(
     """COMMIT + explicit CHECKPOINT both fire start/complete events with duration_ms."""
     init_databases()
     with duckdb_connection() as conn:
-        v1 = upsert_source_version(
+        v1 = insert_source_version(
             conn,
             source_db="clinvar",
             version="2026_03_15",
@@ -328,19 +398,47 @@ def test_commit_and_checkpoint_issues_explicit_commit_then_checkpoint() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _insert_and_flip(  # noqa: PLR0913 — keyword-only audit fields are not collapsible
+    conn: DuckDBPyConnection,
+    *,
+    source_db: str,
+    table: str,
+    version: str,
+    source_file_hash: str,
+    record_count: int,
+) -> int:
+    """Helper: insert a version row, seed one annotation row, flip the pointer."""
+    sv_id = insert_source_version(
+        conn,
+        source_db=source_db,
+        version=version,
+        source_url=None,
+        source_file_hash=source_file_hash,
+        source_file_size=1,
+        record_count=record_count,
+    )
+    _seed_clinvar_rows(conn, sv_id, count=1)
+    flip_to_new_version(
+        conn,
+        source=source_db,
+        table=table,
+        new_source_version_id=sv_id,
+    )
+    return sv_id
+
+
 def test_maybe_skip_same_version_returns_none_when_flag_disabled(
     isolated_settings: dict[str, str],  # noqa: ARG001
 ) -> None:
     """The flag is opt-in -- with it off the helper never short-circuits."""
     init_databases()
     with duckdb_connection() as conn:
-        upsert_source_version(
+        _insert_and_flip(
             conn,
             source_db="clinvar",
+            table="clinvar_annotations",
             version="2026_05_10",
-            source_url=None,
             source_file_hash="a" * 64,
-            source_file_size=1,
             record_count=1,
         )
     result = maybe_skip_same_version(
@@ -358,13 +456,12 @@ def test_maybe_skip_same_version_short_circuits_when_active_row_matches(
     """Matching active (version + hash) → returns RefreshResult, emits event."""
     init_databases()
     with duckdb_connection() as conn:
-        v1 = upsert_source_version(
+        v1 = _insert_and_flip(
             conn,
             source_db="clinvar",
+            table="clinvar_annotations",
             version="2026_05_10",
-            source_url=None,
             source_file_hash="a" * 64,
-            source_file_size=1,
             record_count=42,
         )
 
@@ -412,13 +509,12 @@ def test_maybe_skip_same_version_returns_none_when_version_differs(
     """Active row has a different version label → proceed normally."""
     init_databases()
     with duckdb_connection() as conn:
-        upsert_source_version(
+        _insert_and_flip(
             conn,
             source_db="clinvar",
+            table="clinvar_annotations",
             version="2026_05_10",
-            source_url=None,
             source_file_hash="a" * 64,
-            source_file_size=1,
             record_count=1,
         )
 
@@ -442,13 +538,12 @@ def test_maybe_skip_same_version_returns_none_when_hash_differs(
     """
     init_databases()
     with duckdb_connection() as conn:
-        upsert_source_version(
+        _insert_and_flip(
             conn,
             source_db="clinvar",
+            table="clinvar_annotations",
             version="2026_05_10",
-            source_url=None,
             source_file_hash="a" * 64,
-            source_file_size=1,
             record_count=1,
         )
 
@@ -466,33 +561,31 @@ def test_maybe_skip_same_version_ignores_superseded_match(
 ) -> None:
     """A matching but superseded (older) row does NOT short-circuit.
 
-    The match has to be against the *currently-active* row (the version
-    whose ``is_current = TRUE`` in ``annotation_source_versions``).
-    Earlier versions in the supersession chain are not eligible.
+    The match has to be against the *currently-active* row -- the one
+    the ``annotation_sources`` pointer names. Earlier rows in the
+    supersession chain are not eligible.
     """
     init_databases()
     with duckdb_connection() as conn:
-        # Insert v1, then v2. v1 becomes superseded (is_current=FALSE).
-        upsert_source_version(
+        # Insert v1, flip pointer; then insert v2 and flip pointer.
+        _insert_and_flip(
             conn,
             source_db="clinvar",
+            table="clinvar_annotations",
             version="2026_03_15",
-            source_url=None,
             source_file_hash="a" * 64,
-            source_file_size=1,
             record_count=1,
         )
-        upsert_source_version(
+        _insert_and_flip(
             conn,
             source_db="clinvar",
+            table="clinvar_annotations",
             version="2026_04_15",
-            source_url=None,
             source_file_hash="b" * 64,
-            source_file_size=1,
             record_count=1,
         )
 
-    # Asking about v1 (now superseded) should NOT short-circuit.
+    # Asking about v1 (now superseded by the pointer) should NOT short-circuit.
     result = maybe_skip_same_version(
         source_db="clinvar",
         version="2026_03_15",
@@ -531,7 +624,7 @@ def test_flip_to_new_version_supports_every_phase_5_source(
     """
     init_databases()
     with duckdb_connection() as conn:
-        new_id = upsert_source_version(
+        new_id = insert_source_version(
             conn,
             source_db=source,
             version="2026_05_15",
@@ -547,7 +640,7 @@ def test_flip_to_new_version_supports_every_phase_5_source(
             new_source_version_id=new_id,
         )
         pointer = conn.execute(
-            "SELECT current_source_version_id FROM annotation_sources WHERE source = ?",
+            "SELECT current_source_version_id FROM annotation_sources WHERE source_db = ?",
             [source],
         ).fetchone()
 

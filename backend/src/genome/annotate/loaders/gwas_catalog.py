@@ -87,7 +87,7 @@ from genome.annotate.downloads import download_to_cache
 from genome.annotate.registry import RefreshResult, register_loader
 from genome.annotate.source_versions import (
     get_current_version,
-    upsert_source_version,
+    insert_source_version,
 )
 from genome.annotate.supersession import (
     VersionFlipResult,
@@ -1040,7 +1040,7 @@ def _cleanup_orphan_version_row(
 
     Same shape as the PharmGKB / CPIC / ClinVar helpers -- called
     when the supersede + chunked-insert transaction rolls back so
-    the version row that :func:`upsert_source_version` committed in
+    the version row that :func:`insert_source_version` committed in
     its own transaction doesn't leave a dangling "version exists
     but zero rows referenced" state. The DELETE is FK-safe because
     no ``gwas_catalog_associations`` rows reference the new
@@ -1086,29 +1086,29 @@ def _summarize_active(conn: DuckDBPyConnection) -> dict[str, object]:
     total_row = conn.execute(
         f"SELECT COUNT(*) FROM {_TARGET_TABLE} g "  # noqa: S608
         "JOIN annotation_sources s "
-        "ON s.source = 'gwas_catalog' AND s.current_source_version_id = g.source_version_id",
+        "ON s.source_db = 'gwas_catalog' AND s.current_source_version_id = g.source_version_id",
     ).fetchone()
     distinct_study_row = conn.execute(
         f"SELECT COUNT(DISTINCT g.study_accession) FROM {_TARGET_TABLE} g "  # noqa: S608
         "JOIN annotation_sources s "
-        "ON s.source = 'gwas_catalog' AND s.current_source_version_id = g.source_version_id "
+        "ON s.source_db = 'gwas_catalog' AND s.current_source_version_id = g.source_version_id "
         "WHERE g.study_accession IS NOT NULL",
     ).fetchone()
     distinct_pmid_row = conn.execute(
         f"SELECT COUNT(DISTINCT g.pmid) FROM {_TARGET_TABLE} g "  # noqa: S608
         "JOIN annotation_sources s "
-        "ON s.source = 'gwas_catalog' AND s.current_source_version_id = g.source_version_id "
+        "ON s.source_db = 'gwas_catalog' AND s.current_source_version_id = g.source_version_id "
         "WHERE g.pmid IS NOT NULL",
     ).fetchone()
     distinct_rsid_row = conn.execute(
         f"SELECT COUNT(DISTINCT g.rsid) FROM {_TARGET_TABLE} g "  # noqa: S608
         "JOIN annotation_sources s "
-        "ON s.source = 'gwas_catalog' AND s.current_source_version_id = g.source_version_id",
+        "ON s.source_db = 'gwas_catalog' AND s.current_source_version_id = g.source_version_id",
     ).fetchone()
     distinct_trait_row = conn.execute(
         f"SELECT COUNT(DISTINCT g.trait_name) FROM {_TARGET_TABLE} g "  # noqa: S608
         "JOIN annotation_sources s "
-        "ON s.source = 'gwas_catalog' AND s.current_source_version_id = g.source_version_id "
+        "ON s.source_db = 'gwas_catalog' AND s.current_source_version_id = g.source_version_id "
         "WHERE g.trait_name IS NOT NULL",
     ).fetchone()
     return {
@@ -1220,17 +1220,16 @@ def refresh(
         return skip
 
     # 4. Single-transaction load. Same shape as ClinVar: the version
-    # row upsert runs in its own transaction (DuckDB FK+index quirk
-    # documented in source_versions.py), then a second transaction
-    # wraps the chunked insert + pointer flip pair atomically. The
-    # flip runs after the INSERT so ``flip_to_new_version`` can count
-    # the just-inserted rows for the event payload.
+    # row insert runs in autocommit, then a second transaction wraps
+    # the chunked insert + pointer flip pair atomically. The flip
+    # runs after the INSERT so ``flip_to_new_version`` can count the
+    # just-inserted rows for the event payload.
     started = time.monotonic()
     retrieval_date = datetime.now(UTC)
     stats = _ParseStats()
     flip: VersionFlipResult | None = None
     with duckdb_connection() as conn:
-        source_version_id = upsert_source_version(
+        source_version_id = insert_source_version(
             conn,
             source_db=SOURCE_DB,
             version=version,

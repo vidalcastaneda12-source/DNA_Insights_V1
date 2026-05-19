@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 import pytest
+import structlog
 from typer.testing import CliRunner
 
 from genome.annotate import downloads as annotate_downloads
@@ -946,18 +947,18 @@ def test_refresh_full_transaction_inserts_1000_rows(
         active = conn.execute(
             "SELECT COUNT(*) FROM clinvar_annotations c "
             "JOIN annotation_sources s "
-            "ON s.source = 'clinvar' AND s.current_source_version_id = c.source_version_id",
+            "ON s.source_db = 'clinvar' AND s.current_source_version_id = c.source_version_id",
         ).fetchone()
         # No prior versions exist on a first load → no rows under non-current ids.
         non_current = conn.execute(
             "SELECT COUNT(*) FROM clinvar_annotations c "
             "WHERE NOT EXISTS ("
             "  SELECT 1 FROM annotation_sources s "
-            "  WHERE s.source = 'clinvar' AND s.current_source_version_id = c.source_version_id"
+            "  WHERE s.source_db = 'clinvar' AND s.current_source_version_id = c.source_version_id"
             ")",
         ).fetchone()
         version_rows = conn.execute(
-            "SELECT version, record_count, is_current FROM annotation_source_versions"
+            "SELECT version, record_count FROM annotation_source_versions"
             " WHERE source_db = 'clinvar'",
         ).fetchall()
         sv_count = conn.execute(
@@ -967,7 +968,7 @@ def test_refresh_full_transaction_inserts_1000_rows(
     assert active[0] == expected_n
     assert non_current is not None
     assert non_current[0] == 0
-    assert version_rows == [("2026_05_10", expected_n, True)]
+    assert version_rows == [("2026_05_10", expected_n)]
     assert sv_count is not None
     assert sv_count[0] == 1
 
@@ -1081,7 +1082,7 @@ def test_refresh_supersedes_prior_rows_on_new_version(
 
     with duckdb_connection() as conn:
         current_pointer = conn.execute(
-            "SELECT current_source_version_id FROM annotation_sources WHERE source = 'clinvar'",
+            "SELECT current_source_version_id FROM annotation_sources WHERE source_db = 'clinvar'",
         ).fetchone()
         active = conn.execute(
             "SELECT COUNT(*) FROM clinvar_annotations WHERE source_version_id = ?",
@@ -1092,7 +1093,7 @@ def test_refresh_supersedes_prior_rows_on_new_version(
             [first.source_version_id],
         ).fetchone()
         version_rows = conn.execute(
-            "SELECT version, is_current FROM annotation_source_versions"
+            "SELECT version FROM annotation_source_versions"
             " WHERE source_db = 'clinvar' ORDER BY source_version_id",
         ).fetchall()
         total = conn.execute("SELECT COUNT(*) FROM clinvar_annotations").fetchone()
@@ -1104,7 +1105,7 @@ def test_refresh_supersedes_prior_rows_on_new_version(
     assert prior[0] == expected_n
     assert total is not None
     assert total[0] == 2 * expected_n
-    assert version_rows == [("2026_05_10", False), ("2026_05_17", True)]
+    assert version_rows == [("2026_05_10",), ("2026_05_17",)]
 
 
 def test_refresh_modified_row_supersession(
@@ -1159,7 +1160,7 @@ def test_refresh_modified_row_supersession(
             " ORDER BY clinvar_id",
         ).fetchall()
         current_pointer = conn.execute(
-            "SELECT current_source_version_id FROM annotation_sources WHERE source = 'clinvar'",
+            "SELECT current_source_version_id FROM annotation_sources WHERE source_db = 'clinvar'",
         ).fetchone()
     assert len(history) == 2
     prior, current = history[0], history[1]
@@ -1195,7 +1196,7 @@ def test_refresh_idempotent_short_circuit(
         active = conn.execute(
             "SELECT COUNT(*) FROM clinvar_annotations c "
             "JOIN annotation_sources s "
-            "ON s.source = 'clinvar' AND s.current_source_version_id = c.source_version_id",
+            "ON s.source_db = 'clinvar' AND s.current_source_version_id = c.source_version_id",
         ).fetchone()
         n_versions = conn.execute(
             "SELECT COUNT(*) FROM annotation_source_versions WHERE source_db = 'clinvar'",
@@ -1210,17 +1211,14 @@ def test_refresh_force_reloads_same_version(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``force=True`` re-runs even when version is unchanged.
+    """``force=True`` against the same upstream version → new id, new rows, pointer flips.
 
-    Same-version --force: ``upsert_source_version`` is idempotent on
-    (source_db, version), so source_version_id is unchanged. Under
-    the version-pointer pattern both refreshes' rows share the same
-    ``source_version_id`` and both are "active" (the pointer still
-    points at that id). The result is 2N total rows all tagged with
-    the same id -- the duplicate-active shape the original loader
-    couldn't avoid, but now it's an explicit downstream concern
-    (e.g. dedup at read time) rather than a supersession-correctness
-    issue.
+    Regression case the PR fixes: under the prior model the second
+    refresh re-used the first refresh's ``source_version_id`` and the
+    chunked INSERT wrote duplicates under it (no audit separation,
+    pointer self-flip). Under the version-pointer model every refresh
+    that reaches the INSERT path allocates a fresh ``source_version_id``
+    in ``annotation_source_versions`` and flips the pointer to it.
     """
     init_databases()
     gz_path = tmp_path / "variant_summary.txt.gz"
@@ -1234,26 +1232,121 @@ def test_refresh_force_reloads_same_version(
     expected_n = 100
     assert first.was_already_current is False
     assert second.was_already_current is False
-    assert second.source_version_id == first.source_version_id
+    # Distinct ids: --force allocates a new annotation_source_versions
+    # row even though the upstream version label is unchanged.
+    assert second.source_version_id != first.source_version_id
 
     with duckdb_connection() as conn:
         current_pointer = conn.execute(
-            "SELECT current_source_version_id FROM annotation_sources WHERE source = 'clinvar'",
+            "SELECT current_source_version_id FROM annotation_sources WHERE source_db = 'clinvar'",
         ).fetchone()
-        # Both inserts under the same source_version_id; both are
-        # "current" because the pointer matches.
+        # New active set: only the second refresh's rows count as "current".
         active = conn.execute(
             "SELECT COUNT(*) FROM clinvar_annotations c "
             "JOIN annotation_sources s "
-            "ON s.source = 'clinvar' AND s.current_source_version_id = c.source_version_id",
+            "ON s.source_db = 'clinvar' AND s.current_source_version_id = c.source_version_id",
         ).fetchone()
+        prior = conn.execute(
+            "SELECT COUNT(*) FROM clinvar_annotations WHERE source_version_id = ?",
+            [first.source_version_id],
+        ).fetchone()
+        version_rows = conn.execute(
+            "SELECT source_version_id, version, record_count"
+            " FROM annotation_source_versions"
+            " WHERE source_db = 'clinvar' ORDER BY source_version_id",
+        ).fetchall()
         total = conn.execute("SELECT COUNT(*) FROM clinvar_annotations").fetchone()
     assert current_pointer is not None
-    assert int(current_pointer[0]) == first.source_version_id
+    assert int(current_pointer[0]) == second.source_version_id
     assert active is not None
-    assert active[0] == 2 * expected_n
+    assert active[0] == expected_n
+    assert prior is not None
+    assert prior[0] == expected_n
     assert total is not None
     assert total[0] == 2 * expected_n
+    # Two annotation_source_versions rows, both labeled '2026_05_10',
+    # each with record_count==N (no double-count under the second id).
+    assert [(int(r[0]), r[1], int(r[2])) for r in version_rows] == [
+        (first.source_version_id, "2026_05_10", expected_n),
+        (second.source_version_id, "2026_05_10", expected_n),
+    ]
+
+
+def test_refresh_force_emits_supersession_flip_with_distinct_versions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--force` against unchanged upstream version emits a flip with prior != new.
+
+    Ties the user-visible structlog event to the fix: a successful
+    same-version `--force` re-run must emit
+    ``supersession_version_flip`` with ``prior_version_id`` !=
+    ``new_version_id`` and ``new_row_count`` equal to the fixture size
+    (not double).
+    """
+    from structlog.testing import capture_logs  # noqa: PLC0415 — test-local
+
+    init_databases()
+    gz_path = tmp_path / "variant_summary.txt.gz"
+    _write_gz(gz_path, _build_n_row_tsv(50))
+    _patch_download_to_cache(monkeypatch, gz_path)
+    _patch_resolve_version(monkeypatch, "2026_05_10")
+
+    first = clinvar_loader.refresh(force=False)
+    with capture_logs() as captured:
+        second = clinvar_loader.refresh(force=True)
+
+    flips = [c for c in captured if c["event"] == "supersession_version_flip"]
+    assert len(flips) == 1
+    flip = flips[0]
+    assert flip["source"] == "clinvar"
+    assert flip["prior_version_id"] == first.source_version_id
+    assert flip["new_version_id"] == second.source_version_id
+    assert flip["prior_version_id"] != flip["new_version_id"]
+    expected_n = 50
+    assert flip["prior_row_count"] == expected_n
+    assert flip["new_row_count"] == expected_n
+
+
+def test_refresh_skip_if_same_version_short_circuits_force(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--skip-if-same-version`` makes a same-version --force a no-op.
+
+    No new annotation_source_versions row, no INSERT, no pointer flip
+    event. The loader emits ``supersession_skipped_same_version`` and
+    returns ``was_already_current=True``.
+    """
+    from structlog.testing import capture_logs  # noqa: PLC0415 — test-local
+
+    init_databases()
+    gz_path = tmp_path / "variant_summary.txt.gz"
+    _write_gz(gz_path, _build_n_row_tsv(50))
+    _patch_download_to_cache(monkeypatch, gz_path)
+    _patch_resolve_version(monkeypatch, "2026_05_10")
+
+    first = clinvar_loader.refresh(force=False)
+    with capture_logs() as captured:
+        second = clinvar_loader.refresh(force=True, skip_if_same_version=True)
+
+    assert second.was_already_current is True
+    assert second.source_version_id == first.source_version_id
+
+    events = [c["event"] for c in captured]
+    assert "supersession_skipped_same_version" in events
+    assert "supersession_version_flip" not in events
+
+    with duckdb_connection() as conn:
+        n_versions = conn.execute(
+            "SELECT COUNT(*) FROM annotation_source_versions WHERE source_db = 'clinvar'",
+        ).fetchone()
+        total = conn.execute("SELECT COUNT(*) FROM clinvar_annotations").fetchone()
+    assert n_versions is not None
+    assert n_versions[0] == 1
+    expected_n = 50
+    assert total is not None
+    assert total[0] == expected_n
 
 
 def test_refresh_transaction_rolls_back_on_bulk_insert_failure(
@@ -1486,10 +1579,10 @@ def test_insert_chunk_handles_nulls_for_grch37_columns(tmp_path: Path) -> None: 
     with duckdb_connection() as conn:
         # We need an annotation_source_versions row to satisfy the FK.
         from genome.annotate.source_versions import (  # noqa: PLC0415
-            upsert_source_version,
+            insert_source_version,
         )
 
-        sv_id = upsert_source_version(
+        sv_id = insert_source_version(
             conn,
             source_db="clinvar",
             version="2026_05_10",
@@ -1519,3 +1612,12 @@ def test_insert_chunk_handles_nulls_for_grch37_columns(tmp_path: Path) -> None: 
     assert condition_ids is None
     star_for_practice_guideline = 4
     assert star == star_for_practice_guideline
+
+
+@pytest.fixture(autouse=True)
+def _reset_structlog_after_each_test() -> object:
+    """Restore structlog defaults so capture_logs and CLI runs don't leak between tests."""
+    try:
+        yield
+    finally:
+        structlog.reset_defaults()

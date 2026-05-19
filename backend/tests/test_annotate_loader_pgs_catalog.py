@@ -1134,18 +1134,18 @@ def test_refresh_full_transaction_inserts_expected_rows(
         active = conn.execute(
             "SELECT COUNT(*) FROM pgs_catalog_scores p "
             "JOIN annotation_sources s "
-            "ON s.source = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id",
+            "ON s.source_db = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id",
         ).fetchone()
         non_current = conn.execute(
             "SELECT COUNT(*) FROM pgs_catalog_scores p "
             "WHERE NOT EXISTS ("
             "  SELECT 1 FROM annotation_sources s "
-            "  WHERE s.source = 'pgs_catalog' "
+            "  WHERE s.source_db = 'pgs_catalog' "
             "    AND s.current_source_version_id = p.source_version_id"
             ")",
         ).fetchone()
         version_rows = conn.execute(
-            "SELECT version, record_count, is_current FROM annotation_source_versions"
+            "SELECT version, record_count FROM annotation_source_versions"
             " WHERE source_db = 'pgs_catalog'",
         ).fetchall()
         # End-to-end regression for the trait_category=0 finding: the
@@ -1154,20 +1154,20 @@ def test_refresh_full_transaction_inserts_expected_rows(
         distinct_category = conn.execute(
             "SELECT COUNT(DISTINCT p.trait_category) FROM pgs_catalog_scores p "
             "JOIN annotation_sources s "
-            "ON s.source = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id "
+            "ON s.source_db = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id "
             "WHERE p.trait_category IS NOT NULL",
         ).fetchone()
         with_category = conn.execute(
             "SELECT COUNT(*) FROM pgs_catalog_scores p "
             "JOIN annotation_sources s "
-            "ON s.source = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id "
+            "ON s.source_db = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id "
             "WHERE p.trait_category IS NOT NULL",
         ).fetchone()
     assert active is not None
     assert active[0] == _EXPECTED_INSERTED
     assert non_current is not None
     assert non_current[0] == 0
-    assert version_rows == [("2026_05_07", _EXPECTED_INSERTED, True)]
+    assert version_rows == [("2026_05_07", _EXPECTED_INSERTED)]
     expected_distinct_categories = 4  # Body measurement, CVD, Other measurement, Other trait
     expected_rows_with_category = 9  # all 10 except PGS000005 (EFO_9999999)
     assert distinct_category is not None
@@ -1237,14 +1237,7 @@ def test_refresh_supersedes_prior_rows_same_version_force(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Same-version ``--force`` re-run.
-
-    Under the version-pointer pattern, ``--force`` against the same
-    version label reuses the existing ``source_version_id`` and both
-    refreshes' rows land under that id -- both are "current" because
-    the ``annotation_sources`` pointer matches. Dedup is a downstream
-    concern.
-    """
+    """Same-version ``--force`` re-run → new id, new rows, pointer flips."""
     init_databases()
     bundle = _build_bundle(tmp_path)
     _patch_download_to_cache(monkeypatch, bundle)
@@ -1255,26 +1248,42 @@ def test_refresh_supersedes_prior_rows_same_version_force(
 
     assert first.was_already_current is False
     assert second.was_already_current is False
-    assert second.source_version_id == first.source_version_id
+    assert second.source_version_id != first.source_version_id
 
     with duckdb_connection() as conn:
         current_pointer = conn.execute(
-            "SELECT current_source_version_id FROM annotation_sources WHERE source = 'pgs_catalog'",
+            "SELECT current_source_version_id FROM annotation_sources "
+            "WHERE source_db = 'pgs_catalog'",
         ).fetchone()
         active = conn.execute(
             "SELECT COUNT(*) FROM pgs_catalog_scores p "
             "JOIN annotation_sources s "
-            "ON s.source = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id",
+            "ON s.source_db = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id",
+        ).fetchone()
+        prior = conn.execute(
+            "SELECT COUNT(*) FROM pgs_catalog_scores WHERE source_version_id = ?",
+            [first.source_version_id],
         ).fetchone()
         total = conn.execute(
             "SELECT COUNT(*) FROM pgs_catalog_scores",
         ).fetchone()
+        version_rows = conn.execute(
+            "SELECT source_version_id, version, record_count"
+            " FROM annotation_source_versions"
+            " WHERE source_db = 'pgs_catalog' ORDER BY source_version_id",
+        ).fetchall()
     assert current_pointer is not None
-    assert int(current_pointer[0]) == first.source_version_id
+    assert int(current_pointer[0]) == second.source_version_id
     assert active is not None
-    assert active[0] == 2 * _EXPECTED_INSERTED
+    assert active[0] == _EXPECTED_INSERTED
+    assert prior is not None
+    assert prior[0] == _EXPECTED_INSERTED
     assert total is not None
     assert total[0] == 2 * _EXPECTED_INSERTED
+    assert [(int(r[0]), r[1], int(r[2])) for r in version_rows] == [
+        (first.source_version_id, "2026_05_07", _EXPECTED_INSERTED),
+        (second.source_version_id, "2026_05_07", _EXPECTED_INSERTED),
+    ]
 
 
 def test_refresh_supersedes_prior_rows_on_new_version(
@@ -1297,7 +1306,8 @@ def test_refresh_supersedes_prior_rows_on_new_version(
 
     with duckdb_connection() as conn:
         current_pointer = conn.execute(
-            "SELECT current_source_version_id FROM annotation_sources WHERE source = 'pgs_catalog'",
+            "SELECT current_source_version_id FROM annotation_sources "
+            "WHERE source_db = 'pgs_catalog'",
         ).fetchone()
         active = conn.execute(
             "SELECT COUNT(*) FROM pgs_catalog_scores WHERE source_version_id = ?",
@@ -1308,7 +1318,7 @@ def test_refresh_supersedes_prior_rows_on_new_version(
             [first.source_version_id],
         ).fetchone()
         version_rows = conn.execute(
-            "SELECT version, is_current FROM annotation_source_versions"
+            "SELECT version FROM annotation_source_versions"
             " WHERE source_db = 'pgs_catalog' ORDER BY source_version_id",
         ).fetchall()
     assert current_pointer is not None
@@ -1318,8 +1328,8 @@ def test_refresh_supersedes_prior_rows_on_new_version(
     assert prior_rows is not None
     assert prior_rows[0] == _EXPECTED_INSERTED
     assert version_rows == [
-        ("2026_04_13", False),
-        ("2026_05_07", True),
+        ("2026_04_13",),
+        ("2026_05_07",),
     ]
 
 
@@ -1345,7 +1355,7 @@ def test_refresh_idempotent_short_circuit(
         active = conn.execute(
             "SELECT COUNT(*) FROM pgs_catalog_scores p "
             "JOIN annotation_sources s "
-            "ON s.source = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id",
+            "ON s.source_db = 'pgs_catalog' AND s.current_source_version_id = p.source_version_id",
         ).fetchone()
         n_versions = conn.execute(
             "SELECT COUNT(*) FROM annotation_source_versions WHERE source_db = 'pgs_catalog'",
@@ -1534,10 +1544,10 @@ def test_insert_chunk_handles_null_columns_and_default_weights_storage() -> None
     ]
     with duckdb_connection() as conn:
         from genome.annotate.source_versions import (  # noqa: PLC0415
-            upsert_source_version,
+            insert_source_version,
         )
 
-        sv_id = upsert_source_version(
+        sv_id = insert_source_version(
             conn,
             source_db="pgs_catalog",
             version="2026_05_07",

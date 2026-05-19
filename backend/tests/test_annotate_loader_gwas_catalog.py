@@ -808,25 +808,25 @@ def test_refresh_full_transaction_inserts_expected_rows(
         active = conn.execute(
             "SELECT COUNT(*) FROM gwas_catalog_associations g "
             "JOIN annotation_sources s "
-            "ON s.source = 'gwas_catalog' AND s.current_source_version_id = g.source_version_id",
+            "ON s.source_db = 'gwas_catalog' AND s.current_source_version_id = g.source_version_id",
         ).fetchone()
         non_current = conn.execute(
             "SELECT COUNT(*) FROM gwas_catalog_associations g "
             "WHERE NOT EXISTS ("
             "  SELECT 1 FROM annotation_sources s "
-            "  WHERE s.source = 'gwas_catalog' "
+            "  WHERE s.source_db = 'gwas_catalog' "
             "    AND s.current_source_version_id = g.source_version_id"
             ")",
         ).fetchone()
         version_rows = conn.execute(
-            "SELECT version, record_count, is_current FROM annotation_source_versions"
+            "SELECT version, record_count FROM annotation_source_versions"
             " WHERE source_db = 'gwas_catalog'",
         ).fetchall()
     assert active is not None
     assert active[0] == _EXPECTED_EMITTED
     assert non_current is not None
     assert non_current[0] == 0
-    assert version_rows == [("2026_05_12", _EXPECTED_EMITTED, True)]
+    assert version_rows == [("2026_05_12", _EXPECTED_EMITTED)]
 
 
 def test_refresh_writes_expected_column_values(
@@ -903,17 +903,11 @@ def test_refresh_supersedes_prior_rows_same_version_force(
 ) -> None:
     """Same-version ``--force`` re-run.
 
-    Per the prompt's round-trip spec: load fixture twice (second run
-    forced at the same version). Under the version-pointer pattern
-    both refreshes' rows land under the same ``source_version_id`` and
-    both are "current" because the pointer matches. Dedup at read time
-    is a downstream concern, not a supersession-correctness issue.
-
-    * ``source_version_id`` is unchanged (idempotent upsert on
-      ``(source_db, version)``).
-    * ``annotation_sources`` pointer still names that id.
-    * Active (= current-version) count == 2 x fixture emit count.
-    * Total row count == 2 x fixture emit count.
+    Under the version-pointer pattern (PR 1 follow-up), every refresh
+    that reaches the INSERT path allocates a fresh
+    ``source_version_id`` even when the upstream version label is
+    unchanged. The pointer flips to the new id; the prior rows stay
+    in the table under the older id.
     """
     init_databases()
     _patch_download_to_cache(monkeypatch, _FIXTURE_PATH)
@@ -924,35 +918,42 @@ def test_refresh_supersedes_prior_rows_same_version_force(
 
     assert first.was_already_current is False
     assert second.was_already_current is False
-    # Same version label → same source_version_id (idempotent upsert).
-    assert second.source_version_id == first.source_version_id
+    assert second.source_version_id != first.source_version_id
 
     with duckdb_connection() as conn:
         current_pointer = conn.execute(
             "SELECT current_source_version_id FROM annotation_sources "
-            "WHERE source = 'gwas_catalog'",
+            "WHERE source_db = 'gwas_catalog'",
         ).fetchone()
         active = conn.execute(
             "SELECT COUNT(*) FROM gwas_catalog_associations g "
             "JOIN annotation_sources s "
-            "ON s.source = 'gwas_catalog' AND s.current_source_version_id = g.source_version_id",
+            "ON s.source_db = 'gwas_catalog' AND s.current_source_version_id = g.source_version_id",
+        ).fetchone()
+        prior = conn.execute(
+            "SELECT COUNT(*) FROM gwas_catalog_associations WHERE source_version_id = ?",
+            [first.source_version_id],
         ).fetchone()
         total = conn.execute(
             "SELECT COUNT(*) FROM gwas_catalog_associations",
         ).fetchone()
         version_rows = conn.execute(
-            "SELECT version, is_current FROM annotation_source_versions"
-            " WHERE source_db = 'gwas_catalog'",
+            "SELECT source_version_id, version, record_count"
+            " FROM annotation_source_versions"
+            " WHERE source_db = 'gwas_catalog' ORDER BY source_version_id",
         ).fetchall()
     assert current_pointer is not None
-    assert int(current_pointer[0]) == first.source_version_id
+    assert int(current_pointer[0]) == second.source_version_id
     assert active is not None
-    assert active[0] == 2 * _EXPECTED_EMITTED
+    assert active[0] == _EXPECTED_EMITTED
+    assert prior is not None
+    assert prior[0] == _EXPECTED_EMITTED
     assert total is not None
     assert total[0] == 2 * _EXPECTED_EMITTED
-    # One version row -- same-version refresh did not insert a new
-    # ``annotation_source_versions`` entry.
-    assert version_rows == [("2026_05_12", True)]
+    assert [(int(r[0]), r[1], int(r[2])) for r in version_rows] == [
+        (first.source_version_id, "2026_05_12", _EXPECTED_EMITTED),
+        (second.source_version_id, "2026_05_12", _EXPECTED_EMITTED),
+    ]
 
 
 def test_refresh_supersedes_prior_rows_on_new_version(
@@ -979,7 +980,7 @@ def test_refresh_supersedes_prior_rows_on_new_version(
     with duckdb_connection() as conn:
         current_pointer = conn.execute(
             "SELECT current_source_version_id FROM annotation_sources "
-            "WHERE source = 'gwas_catalog'",
+            "WHERE source_db = 'gwas_catalog'",
         ).fetchone()
         active = conn.execute(
             "SELECT COUNT(*) FROM gwas_catalog_associations WHERE source_version_id = ?",
@@ -990,7 +991,7 @@ def test_refresh_supersedes_prior_rows_on_new_version(
             [first.source_version_id],
         ).fetchone()
         version_rows = conn.execute(
-            "SELECT version, is_current FROM annotation_source_versions"
+            "SELECT version FROM annotation_source_versions"
             " WHERE source_db = 'gwas_catalog' ORDER BY source_version_id",
         ).fetchall()
     assert current_pointer is not None
@@ -1000,8 +1001,8 @@ def test_refresh_supersedes_prior_rows_on_new_version(
     assert prior_rows is not None
     assert prior_rows[0] == _EXPECTED_EMITTED
     assert version_rows == [
-        ("2026_05_10", False),
-        ("2026_05_17", True),
+        ("2026_05_10",),
+        ("2026_05_17",),
     ]
 
 
@@ -1025,7 +1026,7 @@ def test_refresh_idempotent_short_circuit(
         active = conn.execute(
             "SELECT COUNT(*) FROM gwas_catalog_associations g "
             "JOIN annotation_sources s "
-            "ON s.source = 'gwas_catalog' AND s.current_source_version_id = g.source_version_id",
+            "ON s.source_db = 'gwas_catalog' AND s.current_source_version_id = g.source_version_id",
         ).fetchone()
         n_versions = conn.execute(
             "SELECT COUNT(*) FROM annotation_source_versions WHERE source_db = 'gwas_catalog'",
@@ -1210,10 +1211,10 @@ def test_insert_chunk_handles_null_columns() -> None:
     ]
     with duckdb_connection() as conn:
         from genome.annotate.source_versions import (  # noqa: PLC0415
-            upsert_source_version,
+            insert_source_version,
         )
 
-        sv_id = upsert_source_version(
+        sv_id = insert_source_version(
             conn,
             source_db="gwas_catalog",
             version="2026_05_12",

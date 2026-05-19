@@ -24,8 +24,8 @@ column. The prior rows stay in the per-source table indefinitely, keyed
 by the older ``source_version_id``; readers that want the prior set
 filter on that id directly. The supersession chain lives in
 ``annotation_source_versions`` (the version registry's ``ingested_at``
-gives the ordering; ``is_current`` is true for the row matching the
-current pointer).
+gives the ordering; the current pointer in ``annotation_sources``
+names the active row).
 
 This module owns three observability helpers used by every loader:
 
@@ -136,7 +136,7 @@ def flip_to_new_version(
     started = time.monotonic()
 
     prior_row = conn.execute(
-        "SELECT current_source_version_id FROM annotation_sources WHERE source = ?",
+        "SELECT current_source_version_id FROM annotation_sources WHERE source_db = ?",
         [source],
     ).fetchone()
     prior_version_id: int | None = int(prior_row[0]) if prior_row is not None else None
@@ -155,9 +155,9 @@ def flip_to_new_version(
     # in one statement.
     conn.execute(
         """
-        INSERT INTO annotation_sources (source, current_source_version_id)
+        INSERT INTO annotation_sources (source_db, current_source_version_id)
              VALUES (?, ?)
-        ON CONFLICT (source) DO UPDATE
+        ON CONFLICT (source_db) DO UPDATE
                 SET current_source_version_id = excluded.current_source_version_id
         """,
         [source, new_source_version_id],

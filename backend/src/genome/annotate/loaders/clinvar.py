@@ -72,7 +72,7 @@ from genome.annotate.downloads import download_to_cache
 from genome.annotate.registry import RefreshResult, register_loader
 from genome.annotate.source_versions import (
     get_current_version,
-    upsert_source_version,
+    insert_source_version,
 )
 from genome.annotate.supersession import (
     VersionFlipResult,
@@ -743,7 +743,7 @@ def _cleanup_orphan_version_row(
 
     Same shape as the PharmGKB / CPIC helpers -- called when the
     supersede + chunked-insert transaction rolls back so the version
-    row that :func:`upsert_source_version` committed in its own
+    row that :func:`insert_source_version` committed in its own
     transaction doesn't leave a dangling "version exists but zero rows
     referenced" state. The DELETE is FK-safe because no
     ``clinvar_annotations`` rows reference the new ``source_version_id``
@@ -784,29 +784,29 @@ def _summarize_active(conn: DuckDBPyConnection) -> dict[str, object]:
     total_row = conn.execute(
         f"SELECT COUNT(*) FROM {_TARGET_TABLE} c "  # noqa: S608
         "JOIN annotation_sources s "
-        "ON s.source = 'clinvar' AND s.current_source_version_id = c.source_version_id",
+        "ON s.source_db = 'clinvar' AND s.current_source_version_id = c.source_version_id",
     ).fetchone()
     distinct_variation_row = conn.execute(
         f"SELECT COUNT(DISTINCT c.variation_id) FROM {_TARGET_TABLE} c "  # noqa: S608
         "JOIN annotation_sources s "
-        "ON s.source = 'clinvar' AND s.current_source_version_id = c.source_version_id",
+        "ON s.source_db = 'clinvar' AND s.current_source_version_id = c.source_version_id",
     ).fetchone()
     distinct_rsid_row = conn.execute(
         f"SELECT COUNT(DISTINCT c.rsid) FROM {_TARGET_TABLE} c "  # noqa: S608
         "JOIN annotation_sources s "
-        "ON s.source = 'clinvar' AND s.current_source_version_id = c.source_version_id "
+        "ON s.source_db = 'clinvar' AND s.current_source_version_id = c.source_version_id "
         "WHERE c.rsid IS NOT NULL",
     ).fetchone()
     significance_rows = conn.execute(
         f"SELECT c.clinical_significance, COUNT(*) FROM {_TARGET_TABLE} c "  # noqa: S608
         "JOIN annotation_sources s "
-        "ON s.source = 'clinvar' AND s.current_source_version_id = c.source_version_id "
+        "ON s.source_db = 'clinvar' AND s.current_source_version_id = c.source_version_id "
         "GROUP BY 1 ORDER BY 2 DESC",
     ).fetchall()
     review_rows = conn.execute(
         f"SELECT c.review_status, COUNT(*) FROM {_TARGET_TABLE} c "  # noqa: S608
         "JOIN annotation_sources s "
-        "ON s.source = 'clinvar' AND s.current_source_version_id = c.source_version_id "
+        "ON s.source_db = 'clinvar' AND s.current_source_version_id = c.source_version_id "
         "GROUP BY 1 ORDER BY 2 DESC",
     ).fetchall()
     return {
@@ -921,22 +921,19 @@ def refresh(
         return skip
 
     # 4. Single-transaction load. The PharmGKB loader's "version row in
-    # its own transaction, INSERT + pointer flip in the wrapping
-    # transaction" shape applies verbatim here -- DuckDB does not
-    # support nested transactions and ``upsert_source_version`` manages
-    # its own due to the FK + index quirk documented in that module.
-    # The only difference for ClinVar is the bulk insert is *streamed*
-    # in chunks, all of which sit inside the same transaction so a
-    # mid-stream failure rolls every chunk back together. The pointer
-    # flip runs *after* the INSERT so ``flip_to_new_version`` can count
-    # the just-inserted rows for the event payload; INSERT + flip are
-    # atomic together (CLAUDE.md #7 preserved as "pointer flip IS the
-    # supersession event").
+    # autocommit, INSERT + pointer flip in the wrapping transaction"
+    # shape applies verbatim here. The only difference for ClinVar is
+    # the bulk insert is *streamed* in chunks, all of which sit inside
+    # the same transaction so a mid-stream failure rolls every chunk
+    # back together. The pointer flip runs *after* the INSERT so
+    # ``flip_to_new_version`` can count the just-inserted rows for the
+    # event payload; INSERT + flip are atomic together (CLAUDE.md #7
+    # preserved as "pointer flip IS the supersession event").
     started = time.monotonic()
     retrieval_date = datetime.now(UTC)
     flip: VersionFlipResult | None = None
     with duckdb_connection() as conn:
-        source_version_id = upsert_source_version(
+        source_version_id = insert_source_version(
             conn,
             source_db=SOURCE_DB,
             version=version,
@@ -960,8 +957,6 @@ def refresh(
                     retrieval_date=retrieval_date,
                 )
             # Backfill record_count now that we know the streaming total.
-            # The column isn't indexed, so this UPDATE is FK-safe and
-            # doesn't trigger the ``idx_asv_current`` quirk.
             conn.execute(
                 "UPDATE annotation_source_versions "
                 "SET record_count = ? "
