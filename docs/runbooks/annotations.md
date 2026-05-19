@@ -813,12 +813,25 @@ wall-clock. Expected ranges (refine after first real-data load):
 
 | Metric | Expected range |
 |---|---|
-| `active_total` | 600,000 – 750,000 |
-| `distinct_study_accession` | 5,000 – 8,000 |
-| `distinct_pmid` | 4,500 – 7,500 |
-| `distinct_rsid` | 350,000 – 500,000 |
-| `distinct_trait_name` | 4,000 – 6,500 |
+| `active_total` | 919,446 |
+| `distinct_study_accession` | 59,310 |
+| `distinct_pmid` | 6,627 |
+| `distinct_rsid` | 410,192 |
+| `distinct_trait_name` | 16,162 |
 | First-load wall-clock | < 5 minutes |
+
+**Notes.** The `2026_05_16` release lands ~8.95 distinct study
+accessions (GCSTs) per distinct publication (PMID): 59,310 / 6,627.
+This is consistent with the modern GWAS Catalog practice of
+splitting a single publication into multiple GCSTs by ancestry,
+sex, cohort, and meta-analysis stage. As of 1 July 2024 the
+catalog-level ratio was ~15.7 GCSTs per PMID (108,850 analyses /
+6,921 publications, per the 2024 NAR paper); the lower ratio here
+reflects that the loader reads `associations.tsv`, which carries
+only studies with curated lead associations passing significance —
+a subset of all GCSTs in the catalog. Drift detection: an upstream
+release that shifts this ratio by more than ~2× in either
+direction is worth investigating before re-locking numbers.
 
 Re-run with `--force` to exercise the same-version supersession
 path. Expected deltas: the same `active_total` lands under a fresh
@@ -1154,14 +1167,14 @@ first real-data load):
 
 | Metric | Expected range |
 |---|---|
-| `active_total` | 5,000 – 8,000 |
-| `distinct_pgs_id` | 5,000 – 8,000 |
-| `distinct_trait_efo` | 600 – 1,200 |
-| `distinct_publication_pmid` | 500 – 1,200 |
-| `distinct_trait_category` | 8 – 15 (~11 at verified date) |
-| `with_performance_auc` | 3,000 – 6,000 |
-| `with_performance_or_per_sd` | 2,500 – 5,000 |
-| `multi_cohort_performance` | 1,500 – 4,000 |
+| `active_total` | 5,337 |
+| `distinct_pgs_id` | 5,337 |
+| `distinct_trait_efo` | 696 |
+| `distinct_publication_pmid` | 590 |
+| `distinct_trait_category` | 10 |
+| `with_performance_auc` | 1,517 |
+| `with_performance_or_per_sd` | 1,413 |
+| `multi_cohort_performance` | 3,089 |
 | First-load wall-clock | < 30 seconds |
 
 Re-run with `--force` to exercise the same-version supersession
