@@ -2,6 +2,12 @@
 data/
 archive/
 
+# Tabix index files (cyvcf2 caches these in cwd when opening remote VCFs;
+# they're regenerable on demand and never part of source).
+*.tbi
+*.bgz
+*.bgz.tbi
+
 # Environment
 .env
 .env.local

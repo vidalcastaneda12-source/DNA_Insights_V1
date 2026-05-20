@@ -53,10 +53,14 @@ before the new version becomes user-visible.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
+import os
+import sys
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Self
 
 import httpx
 import pyarrow as pa
@@ -253,6 +257,174 @@ class GnomadLibcurlMissingError(RuntimeError):
     rather than swallowing the failure and falling back to a full
     download.
     """
+
+
+class GnomadRemoteIterationError(RuntimeError):
+    """Raised when a single tabix region exhausts its retry budget.
+
+    The loader detects htslib BGZF / libcurl transient errors by
+    capturing C-level stderr writes and reopening the VCF on the next
+    region. When the *same* region keeps tripping the corruption
+    detector across many reopens, something more durable than a
+    transient HTTP/2 framing blip is at play (e.g. gnomAD has rotated
+    the URL, or the local network is degraded enough that no region
+    completes). The chromosome is failed in that case so the operator
+    sees a real error rather than a silent low-row-count run.
+    """
+
+
+# ---------------------------------------------------------------------------
+# htslib transient-error recovery.
+# ---------------------------------------------------------------------------
+#
+# gnomAD's GCS bucket responds over HTTPS with HTTP/2 multiplexed
+# connections. htslib 1.19's hfile_libcurl plugin opens one libcurl
+# easy handle per cyvcf2.VCF. When the loader fires many small tabix
+# range requests in rapid succession on the same handle, libcurl
+# eventually returns CURLE_HTTP2 (16) on one of the BGZF block reads.
+# htslib's iterator can't recover from that — subsequent ``vcf(region)``
+# calls silently return zero records, and stderr fills with
+# "[E::hts_itr_next] Failed to seek to offset NNN: Illegal seek" lines
+# whose offsets are garbage memory. The connection-level state is
+# unsalvageable; the only recovery is to close + reopen the VCF.
+#
+# Detection: htslib writes those error lines directly to fd 2 via the
+# hts_log_* helpers, not as Python exceptions. The Python iterator
+# protocol returns ``StopIteration`` (an empty for-loop) regardless.
+# So the loader captures fd 2 into a pipe during iteration, scans the
+# captured bytes for known htslib error tokens after each region, and
+# forwards every captured byte through to the operator's real stderr
+# so structlog output and other warnings remain visible.
+
+_HTSLIB_ERROR_TOKENS: Final[tuple[bytes, ...]] = (
+    b"easy_errno",
+    b"bgzf_read_block",
+    b"hts_itr_next",
+)
+
+MAX_REMOTE_REGION_ATTEMPTS: Final[int] = 5
+"""Maximum VCF reopens per region before the chromosome is failed.
+
+Each attempt closes the corrupted handle, reopens against the same
+URL, and re-iterates the region. The seen-keys dedup already in
+:func:`_load_chromosome` makes record re-yields idempotent (same
+``(chrom, pos, ref, alt)`` key → skipped on retry), so a successful
+attempt produces no duplicates regardless of how many partial
+yields the prior attempts emitted before tripping the detector.
+
+5 is generous: in practice corruption recovers on the first reopen
+because the transient libcurl HTTP/2 framing error is a connection-
+level event, not a server-side condition. A region that fails 5
+times in a row signals something more durable (network outage, URL
+rotation), which is properly surfaced as a chromosome failure.
+"""
+
+
+class _StderrTap:
+    """Capture and forward htslib's C-level stderr writes.
+
+    Used to detect cyvcf2/htslib BGZF + libcurl errors that don't
+    surface as Python exceptions. On enter the tap replaces fd 2 with
+    a non-blocking pipe; :meth:`check` drains the pipe, forwards the
+    bytes through to the saved real-stderr fd (so structlog output
+    and other warnings remain visible to the operator), and returns
+    True when one of :data:`_HTSLIB_ERROR_TOKENS` appears in the
+    drained bytes. On exit the tap restores the original fd 2 after
+    a final drain.
+
+    The pipe is sized to 1 MiB on Linux (``F_SETPIPE_SZ``) so a few
+    seconds of unread output cannot back up htslib's writer thread.
+    The drain loop is bounded by the pipe contents, not by a timer,
+    so :meth:`check` returns promptly between regions.
+
+    The tap is a thin context manager; constructing one outside a
+    ``with`` block does nothing and consuming :meth:`check` outside
+    the block silently returns ``False``. This makes it safe to keep
+    a reference in test fixtures that mock the loader's iteration.
+    """
+
+    _PIPE_SIZE: Final[int] = 1024 * 1024
+    _READ_CHUNK: Final[int] = 65536
+
+    def __init__(self) -> None:
+        self._original_fd: int | None = None
+        self._pipe_read: int | None = None
+
+    def __enter__(self) -> Self:
+        sys.stderr.flush()
+        self._original_fd = os.dup(2)
+        read_fd, write_fd = os.pipe()
+        fcntl.fcntl(read_fd, fcntl.F_SETFL, os.O_NONBLOCK)
+        # Best-effort enlargement of the pipe buffer so a slow consumer
+        # doesn't block htslib. F_SETPIPE_SZ is Linux-only; absence is
+        # not fatal (the default 64 KiB still works, just with more
+        # frequent drain calls).
+        f_setpipe_sz = getattr(fcntl, "F_SETPIPE_SZ", None)
+        if f_setpipe_sz is not None:
+            with contextlib.suppress(OSError):
+                fcntl.fcntl(read_fd, f_setpipe_sz, self._PIPE_SIZE)
+        os.dup2(write_fd, 2)
+        os.close(write_fd)
+        self._pipe_read = read_fd
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        if self._original_fd is None or self._pipe_read is None:
+            return
+        # Final drain so anything written between the last check() and
+        # close reaches the operator's stderr.
+        self._drain_and_forward()
+        sys.stderr.flush()
+        os.dup2(self._original_fd, 2)
+        try:
+            os.close(self._pipe_read)
+        finally:
+            os.close(self._original_fd)
+            self._pipe_read = None
+            self._original_fd = None
+
+    def check(self) -> bool:
+        """Return True when an htslib error token appeared since the last call.
+
+        Drains the captured stderr buffer (forwarding every byte to
+        the operator's real stderr) and scans the drained bytes for
+        any of :data:`_HTSLIB_ERROR_TOKENS`. Subsequent calls only
+        see new output; the scan is monotonic per-call, not
+        cumulative.
+        """
+        return _scan_for_htslib_errors(self._drain_and_forward())
+
+    def _drain_and_forward(self) -> bytes:
+        if self._pipe_read is None or self._original_fd is None:
+            return b""
+        chunks: list[bytes] = []
+        while True:
+            try:
+                data = os.read(self._pipe_read, self._READ_CHUNK)
+            except BlockingIOError:
+                break
+            if not data:
+                break
+            chunks.append(data)
+        buf = b"".join(chunks)
+        if buf:
+            os.write(self._original_fd, buf)
+        return buf
+
+
+def _scan_for_htslib_errors(buf: bytes) -> bool:
+    """Return True when ``buf`` contains one of the htslib error tokens.
+
+    Module-level helper so tests can exercise the scan logic without
+    standing up an fd-redirecting tap. The token list intentionally
+    covers libcurl's ``easy_errno`` line (the original-cause signal),
+    BGZF's ``bgzf_read_block`` line (htslib's framing-layer signal),
+    and the iterator's ``hts_itr_next`` line (the post-corruption
+    seek-failure signal that the verification-2 run was flooded with).
+    Any one is sufficient evidence that the VCF handle is in a state
+    where subsequent region queries will silently return no records.
+    """
+    return any(token in buf for token in _HTSLIB_ERROR_TOKENS)
 
 
 # ---------------------------------------------------------------------------
@@ -722,7 +894,7 @@ def _audited_head(client: ExternalClient, url: str) -> None:
         logger.info("gnomad.audited_head_non_fatal", url=url, error=str(exc))
 
 
-def _load_chromosome(  # noqa: C901, PLR0913 — irreducible per-chrom configuration
+def _load_chromosome(  # noqa: C901, PLR0913, PLR0915 — irreducible per-chrom configuration + retry loop
     conn: DuckDBPyConnection,
     audited_client: ExternalClient,
     chrom: str,
@@ -737,15 +909,25 @@ def _load_chromosome(  # noqa: C901, PLR0913 — irreducible per-chrom configura
     Steps for each ``data_type`` in ``("exomes", "genomes")``:
 
     1. Issue an audited HEAD against the URL (paper trail).
-    2. Open the remote VCF via cyvcf2 ``VCF(url)``.
-    3. For each ``(start, end)`` tabix range, iterate records.
+    2. Open the remote VCF via cyvcf2 ``VCF(url)`` inside a stderr-tap
+       context that captures htslib's C-level error writes.
+    3. For each ``(start, end)`` tabix range, iterate records. After
+       the inner iterator exhausts, the tap's :meth:`_StderrTap.check`
+       reports whether libcurl tripped a transient HTTP/2 framing
+       error during the read (the gnomAD-on-GCS failure mode that
+       silently corrupts htslib's iterator state and turns every
+       subsequent ``vcf(region)`` call into an empty yield). When
+       detected, the VCF is closed + reopened and the region is
+       re-iterated. Bounded by :data:`MAX_REMOTE_REGION_ATTEMPTS`.
     4. Reject records whose position is not in ``filter_positions``
        (the coalesced ranges cover gaps between actual filter
        positions; the membership check is the precise filter).
     5. Build per-row dicts via :func:`_record_to_row`; dedup by
        ``(chrom, pos, ref, alt)`` with first-write-wins (exomes
-       iterates first → exomes-derived AF wins on overlapping
-       sites).
+       iterates first → exomes-derived AF wins on overlapping sites).
+       The dedup set is shared across retry attempts, so any records
+       yielded before a mid-region corruption event are simply re-
+       skipped on the retry pass — record re-yields are idempotent.
     6. Flush every ``batch_size`` rows via :func:`_insert_batch`.
 
     Returns the number of rows inserted for the chromosome.
@@ -772,38 +954,101 @@ def _load_chromosome(  # noqa: C901, PLR0913 — irreducible per-chrom configura
         )
         pending = []
 
+    def _consume_record(record: object) -> None:
+        row = _record_to_row(record, source_version_id, retrieval_datetime)
+        if row is None:
+            return
+        pos_obj = row["pos_grch38"]
+        if not isinstance(pos_obj, int):
+            return
+        pos = pos_obj
+        if pos not in filter_positions:
+            return
+        key = (
+            str(row["chrom"]),
+            pos,
+            str(row["ref_allele"]),
+            str(row["alt_allele"]),
+        )
+        if key in seen_keys:
+            return
+        seen_keys.add(key)
+        pending.append(row)
+        if len(pending) >= batch_size:
+            _flush()
+
     for data_type in ("exomes", "genomes"):
         url = GNOMAD_URL_TEMPLATE.format(data_type=data_type, chrom=chrom)
         _audited_head(audited_client, url)
         logger.info("gnomad.remote_open", chrom=chrom, data_type=data_type, url=url)
-        vcf = VCF(url)
-        try:
-            for start, end in regions:
-                region = f"chr{chrom}:{start}-{end}"
-                for record in vcf(region):
-                    row = _record_to_row(record, source_version_id, retrieval_datetime)
-                    if row is None:
-                        continue
-                    pos_obj = row["pos_grch38"]
-                    if not isinstance(pos_obj, int):
-                        continue
-                    pos = pos_obj
-                    if pos not in filter_positions:
-                        continue
-                    key = (
-                        str(row["chrom"]),
-                        pos,
-                        str(row["ref_allele"]),
-                        str(row["alt_allele"]),
-                    )
-                    if key in seen_keys:
-                        continue
-                    seen_keys.add(key)
-                    pending.append(row)
-                    if len(pending) >= batch_size:
-                        _flush()
-        finally:
-            vcf.close()
+        reopens = 0
+        with _StderrTap() as detector:
+            # Discard any stderr written during VCF construction; tests
+            # mock VCF and write nothing, the real cyvcf2 may emit
+            # benign warnings (e.g. about index recency) that should
+            # not look like a corruption event to the first region's
+            # post-iteration check.
+            vcf = VCF(url)
+            detector.check()
+            try:
+                for start, end in regions:
+                    region = f"chr{chrom}:{start}-{end}"
+                    recovered = False
+                    for attempt in range(MAX_REMOTE_REGION_ATTEMPTS):
+                        for record in vcf(region):
+                            _consume_record(record)
+                        if not detector.check():
+                            recovered = True
+                            break
+                        # Transient htslib error during read. Close the
+                        # corrupted handle and reopen against the same
+                        # URL only if there is another attempt left —
+                        # the final attempt's failure leads straight to
+                        # raise, no point spending a reopen on a handle
+                        # that will never be used. The seen_keys set
+                        # makes record re-yields on the next attempt
+                        # idempotent.
+                        if attempt + 1 == MAX_REMOTE_REGION_ATTEMPTS:
+                            break
+                        # Corrupt-handle close may raise; the open
+                        # call that follows discards the handle anyway,
+                        # so a close failure here is not actionable.
+                        with contextlib.suppress(Exception):
+                            vcf.close()
+                        vcf = VCF(url)
+                        # Drain stderr produced during reopen so the
+                        # next region's check starts clean.
+                        detector.check()
+                        reopens += 1
+                        logger.warning(
+                            "gnomad.chrom.htslib_recover",
+                            chrom=chrom,
+                            data_type=data_type,
+                            region=region,
+                            attempt=attempt + 1,
+                            reopens=reopens,
+                        )
+                    if not recovered:
+                        msg = (
+                            f"gnomAD region {region!r} for chrom {chrom} "
+                            f"({data_type}) failed after "
+                            f"{MAX_REMOTE_REGION_ATTEMPTS} attempts — "
+                            "persistent htslib transient errors"
+                        )
+                        raise GnomadRemoteIterationError(msg)
+            finally:
+                # Final close of whichever VCF handle is current. The
+                # last handle may be corrupt; suppress close errors so
+                # the outer summary log still runs.
+                with contextlib.suppress(Exception):
+                    vcf.close()
+        if reopens:
+            logger.info(
+                "gnomad.chrom.htslib_recover_summary",
+                chrom=chrom,
+                data_type=data_type,
+                reopens=reopens,
+            )
 
     _flush()
     return inserted
@@ -1368,11 +1613,13 @@ __all__ = [
     "GNOMAD_POPULATIONS",
     "GNOMAD_URL_TEMPLATE",
     "GNOMAD_VERSION",
+    "MAX_REMOTE_REGION_ATTEMPTS",
     "SOURCE_DB",
     "SUPPORTED_CHROMS",
     "URL_VERIFIED_DATE",
     "GnomadLibcurlMissingError",
     "GnomadLoadResult",
+    "GnomadRemoteIterationError",
     "load",
     "refresh",
 ]

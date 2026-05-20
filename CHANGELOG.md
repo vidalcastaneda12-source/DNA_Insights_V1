@@ -8,6 +8,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Sub-phase 5.5 — gnomAD loader htslib HTTP/2 framing recovery.**
+  Second real-data verification (post-sentinel-fix) still landed
+  only 3,733 rows at a match rate of ~0.0003 with the loader's
+  stderr flooded by `[E::hts_itr_next] Failed to seek to offset
+  NNN: Illegal seek` lines whose offsets were absurdly large
+  (`106658030152031` and similar). The previous fix's diagnosis
+  was wrong: the seek errors are **not** downstream of the
+  sentinel bug. They are an independent failure mode — libcurl
+  `CURLE_HTTP2` (error 16) framing errors during BGZF block reads
+  on the gnomAD GCS bucket. When htslib's BGZF reader fails, the
+  iterator's internal offset state corrupts to garbage memory,
+  and every subsequent `vcf(region)` call silently returns zero
+  records (with a new Illegal-seek line emitted to stderr per
+  call). The connection-level state is unsalvageable; the only
+  recovery is to close+reopen the VCF handle.
+  The fix wires a fd-2 stderr-capture detector around the
+  per-chromosome iteration loop, scans the captured bytes after
+  each region for one of three htslib error tokens (`easy_errno`,
+  `bgzf_read_block`, `hts_itr_next`), and on a hit closes +
+  reopens the VCF and retries the same region. Bounded by
+  `MAX_REMOTE_REGION_ATTEMPTS = 5`; persistent failure on the
+  same region across the budget raises `GnomadRemoteIterationError`
+  so the chromosome fails loudly rather than silently producing
+  a low-row-count run. The loader's existing per-chromosome
+  `seen_keys` set makes record re-yields across reopens
+  idempotent (a record yielded twice cannot land in the DB
+  twice). Captured stderr bytes are forwarded through to the
+  operator's real stderr so structlog and other warnings remain
+  visible. Reality-check against real gnomAD chr22 exomes (800
+  small regions, the corruption pattern that previously killed
+  the loader after ~25 successful regions): 87,691 records
+  collected with 58 reopens and 0 region failures in 171 s,
+  vs 863 records in the broken baseline. Four new regression
+  tests cover the scan token set, mid-region recovery on the
+  first attempt, dedup of records re-yielded after a mid-region
+  corruption + reopen, and the persistent-corruption →
+  `GnomadRemoteIterationError` path. (PR #B verification #2 follow-up)
 - **Sub-phase 5.5 — gnomAD loader real-data verification failure.**
   First real-data run against gnomAD v4.1.1 per-chromosome VCFs
   landed 4,066 rows under a broken `source_version_id` with every

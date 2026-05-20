@@ -32,12 +32,15 @@ from genome.annotate.loaders.gnomad import (
     GNOMAD_POPULATIONS,
     GNOMAD_URL_TEMPLATE,
     GNOMAD_VERSION,
+    MAX_REMOTE_REGION_ATTEMPTS,
     SOURCE_DB,
     SUPPORTED_CHROMS,
     GnomadLibcurlMissingError,
+    GnomadRemoteIterationError,
     _build_filter_set,
     _coalesce_positions,
     _record_to_row,
+    _scan_for_htslib_errors,
     load,
 )
 from genome.annotate.source_versions import insert_source_version
@@ -1588,3 +1591,344 @@ def test_load_does_not_query_negative_region_when_sources_have_sentinels(
         ).fetchone()
     assert af_global is not None
     assert af_global[0] == pytest.approx(1.84e-06, abs=1e-09)
+
+
+# ---------------------------------------------------------------------------
+# htslib transient-error recovery (HTTP/2 framing → BGZF illegal-seek)
+# ---------------------------------------------------------------------------
+
+
+def test_scan_for_htslib_errors_recognizes_runtime_error_tokens() -> None:
+    """``_scan_for_htslib_errors`` flags the three htslib runtime-error tokens.
+
+    The token set was chosen from real-data verification #2 stderr
+    samples; the loader treats any one of them as proof the VCF
+    handle's iterator state is corrupted and must be reopened. A
+    benign log line (no token) must not flag, so the scanner can be
+    called after every region's iteration without false positives.
+    """
+    assert _scan_for_htslib_errors(b"") is False
+    assert _scan_for_htslib_errors(b"benign stderr output, nothing alarming") is False
+    assert (
+        _scan_for_htslib_errors(
+            b"[E::easy_errno] Libcurl reported error 16 (Error in the HTTP2 framing layer)",
+        )
+        is True
+    )
+    assert (
+        _scan_for_htslib_errors(
+            b"[E::bgzf_read_block] Failed to read BGZF block data at offset 100",
+        )
+        is True
+    )
+    assert (
+        _scan_for_htslib_errors(
+            b"[E::hts_itr_next] Failed to seek to offset 12345: Illegal seek",
+        )
+        is True
+    )
+
+
+@dataclass
+class _CorruptingFakeVCF:
+    """FakeVCF that simulates htslib transient corruption on demand.
+
+    Parameters mirror :class:`_FakeVCF` plus ``corrupt_regions`` —
+    the set of region strings on which the VCF will (a) write the
+    htslib BGZF / libcurl error tokens to the live fd 2 and (b)
+    yield zero records, simulating htslib's silent-after-corruption
+    behavior. ``opened_regions`` records every region call so tests
+    can verify reopens and retries.
+    """
+
+    records: list[FakeVariant]
+    corrupt_regions: set[str] = field(default_factory=set)
+    opened_regions: list[str] = field(default_factory=list)
+
+    def __call__(self, region: str) -> Iterable[FakeVariant]:
+        self.opened_regions.append(region)
+        if region in self.corrupt_regions:
+            # Simulate htslib's stderr emissions during a libcurl
+            # HTTP/2 framing failure. The loader's _StderrTap captures
+            # these via fd 2 and flags the iterator as corrupted.
+            import os as _os  # noqa: PLC0415 — test-local
+
+            _os.write(
+                2,
+                b"[E::easy_errno] Libcurl reported error 16 "
+                b"(Error in the HTTP2 framing layer)\n"
+                b"[E::bgzf_read_block] Failed to read BGZF block "
+                b"data at offset 100 expected 1024 bytes; hread returned -1\n",
+            )
+            return iter(())
+        match = re.match(r"chr([^:]+):(\d+)-(\d+)", region)
+        if match is None:
+            return iter(())
+        chrom = match.group(1)
+        start = int(match.group(2))
+        end = int(match.group(3))
+        return (
+            r
+            for r in self.records
+            if (r.CHROM.removeprefix("chr") == chrom) and start <= r.POS <= end
+        )
+
+    def close(self) -> None:
+        return
+
+
+class _ReopenTrackingFactory:
+    """VCF factory that returns corrupting fakes for the first open per URL.
+
+    The first ``VCF(url)`` call for any URL returns a fake whose
+    ``corrupt_regions`` is configured to fail on the named region;
+    subsequent opens of the same URL return clean fakes. Tests use
+    this to assert that the loader detects corruption on the first
+    attempt, reopens the VCF, and recovers the data on the retry.
+    """
+
+    def __init__(
+        self,
+        by_url: dict[str, list[FakeVariant]],
+        *,
+        corrupt_first_on: dict[str, set[str]] | None = None,
+        always_corrupt_on: dict[str, set[str]] | None = None,
+    ) -> None:
+        self.by_url = by_url
+        self.corrupt_first_on = corrupt_first_on or {}
+        self.always_corrupt_on = always_corrupt_on or {}
+        self.openings: list[str] = []
+        self.fakes: list[_CorruptingFakeVCF] = []
+
+    def __call__(self, url: str) -> _CorruptingFakeVCF:
+        is_first_open = self.openings.count(url) == 0
+        self.openings.append(url)
+        always = self.always_corrupt_on.get(url, set())
+        first_only = self.corrupt_first_on.get(url, set()) if is_first_open else set()
+        fake = _CorruptingFakeVCF(
+            records=list(self.by_url.get(url, [])),
+            corrupt_regions=set(always) | set(first_only),
+        )
+        self.fakes.append(fake)
+        return fake
+
+
+def test_load_chromosome_recovers_from_htslib_transient_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient htslib BGZF/HTTP2 error on a region → reopen + retry → records land.
+
+    Mimics the verification-2 failure mode: a libcurl HTTP/2 framing
+    error mid-stream silently zeros the VCF iterator, htslib spews
+    seek-error lines to stderr, and the loader must detect that
+    corruption and reopen against the same URL before the affected
+    region can yield records again. The fake here corrupts the first
+    open's iteration on the merged exomes region; the loader's retry
+    path must reopen, re-iterate, and land both records.
+    """
+    init_databases()
+    _enable_external_calls()
+    _patch_check_libcurl(monkeypatch)
+
+    records = [
+        _make_record("chr22", 1000, "A", "C", {"AF": 0.05, "AC": 5, "AN": 100}),
+        _make_record("chr22", 2000, "G", "T", {"AF": 0.10, "AC": 10, "AN": 100}),
+    ]
+    exomes_url = GNOMAD_URL_TEMPLATE.format(data_type="exomes", chrom="22")
+    genomes_url = GNOMAD_URL_TEMPLATE.format(data_type="genomes", chrom="22")
+    by_url: dict[str, list[FakeVariant]] = {
+        exomes_url: records,
+        genomes_url: [],
+    }
+    # Default coalesce distance is 1 kb, so positions 1000 and 2000
+    # merge into a single tabix range "chr22:1000-2000".
+    fail_region = "chr22:1000-2000"
+    factory = _ReopenTrackingFactory(
+        by_url=by_url,
+        corrupt_first_on={exomes_url: {fail_region}},
+    )
+
+    import cyvcf2  # noqa: PLC0415 — test fixture local import
+
+    monkeypatch.setattr(cyvcf2, "VCF", factory)
+
+    with duckdb_connection() as conn:
+        _seed_user_variants(conn, [("22", 1000), ("22", 2000)])
+        audited, http = _mock_audited_client()
+        try:
+            result = load(conn, audited, force=True, chromosomes=["22"])
+        finally:
+            audited.close()
+            http.close()
+
+    # Both records landed despite the first attempt yielding none.
+    assert result.rows_loaded == 2
+    # The exomes URL was opened more than once: initial open + at least
+    # one reopen triggered by the corruption detector.
+    assert factory.openings.count(exomes_url) >= 2, factory.openings
+    # The genomes URL never tripped a reopen (no corruption configured).
+    assert factory.openings.count(genomes_url) == 1, factory.openings
+
+
+def test_load_chromosome_dedups_partial_yields_across_reopen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retry that re-yields the same records → seen-keys dedups → no duplicates.
+
+    Cyvcf2 partial yields before a corruption event are not retracted
+    by the retry; the loader's per-chromosome seen-keys set must catch
+    the re-yielded records on the second attempt so the same
+    ``(chrom, pos, ref, alt)`` cannot land twice. The fake here
+    yields one good record on the merged region, then corrupts (the
+    second record is "lost" to the corruption event); the retry on
+    the reopened handle yields both. The end-state DB must contain
+    each record exactly once.
+    """
+    init_databases()
+    _enable_external_calls()
+    _patch_check_libcurl(monkeypatch)
+
+    # Two records on chr22 in the same coalesced region. The fake's
+    # iterator yields the first, then "corrupts" before the second.
+    # On retry, the (clean) reopened iterator yields both.
+    records = [
+        _make_record("chr22", 1000, "A", "C", {"AF": 0.05, "AC": 5, "AN": 100}),
+        _make_record("chr22", 2000, "G", "T", {"AF": 0.10, "AC": 10, "AN": 100}),
+    ]
+    exomes_url = GNOMAD_URL_TEMPLATE.format(data_type="exomes", chrom="22")
+    genomes_url = GNOMAD_URL_TEMPLATE.format(data_type="genomes", chrom="22")
+    fail_region = "chr22:1000-2000"
+
+    @dataclass
+    class _PartialThenCorruptVCF:
+        records: list[FakeVariant]
+        corrupt_region: str
+        is_first_open: bool
+        opened_regions: list[str] = field(default_factory=list)
+
+        def __call__(self, region: str) -> Iterable[FakeVariant]:
+            self.opened_regions.append(region)
+            match = re.match(r"chr([^:]+):(\d+)-(\d+)", region)
+            if match is None:
+                return iter(())
+            chrom = match.group(1)
+            start = int(match.group(2))
+            end = int(match.group(3))
+            matching = [
+                r
+                for r in self.records
+                if (r.CHROM.removeprefix("chr") == chrom) and start <= r.POS <= end
+            ]
+            if region == self.corrupt_region and self.is_first_open:
+
+                def _gen() -> Iterator[FakeVariant]:
+                    # Yield first record successfully, then "corrupt"
+                    # the stream — write htslib stderr tokens and stop
+                    # yielding. The loader sees one record arrive,
+                    # then the iterator exhausts, then the post-region
+                    # check finds the error tokens.
+                    if matching:
+                        yield matching[0]
+                    import os as _os  # noqa: PLC0415 — test-local
+
+                    _os.write(
+                        2,
+                        b"[E::easy_errno] Libcurl reported error 16 "
+                        b"(Error in the HTTP2 framing layer)\n"
+                        b"[E::hts_itr_next] Failed to seek to offset "
+                        b"999999999999: Illegal seek\n",
+                    )
+
+                return _gen()
+            return iter(matching)
+
+        def close(self) -> None:
+            return
+
+    openings: list[str] = []
+
+    def _factory(url: str) -> _PartialThenCorruptVCF:
+        is_first = openings.count(url) == 0
+        openings.append(url)
+        return _PartialThenCorruptVCF(
+            records=list({exomes_url: records, genomes_url: []}.get(url, [])),
+            corrupt_region=fail_region,
+            is_first_open=is_first,
+        )
+
+    import cyvcf2  # noqa: PLC0415 — test fixture local import
+
+    monkeypatch.setattr(cyvcf2, "VCF", _factory)
+
+    with duckdb_connection() as conn:
+        _seed_user_variants(conn, [("22", 1000), ("22", 2000)])
+        audited, http = _mock_audited_client()
+        try:
+            result = load(conn, audited, force=True, chromosomes=["22"])
+        finally:
+            audited.close()
+            http.close()
+
+    assert result.rows_loaded == 2
+    # Exomes reopened at least once; record at pos 1000 was yielded on
+    # both attempts but only landed once thanks to seen_keys dedup.
+    assert openings.count(exomes_url) >= 2
+    with duckdb_connection() as conn:
+        rows = conn.execute(
+            "SELECT pos_grch38, COUNT(*) FROM gnomad_frequencies"
+            " WHERE source_version_id = ?"
+            " GROUP BY pos_grch38 ORDER BY pos_grch38",
+            [result.source_version_id],
+        ).fetchall()
+    assert rows == [(1000, 1), (2000, 1)]
+
+
+def test_load_chromosome_fails_after_max_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persistent corruption on the same region → GnomadRemoteIterationError.
+
+    When every reopen produces another error on the same region —
+    suggesting something more durable than a transient HTTP/2 blip
+    (network outage, server-side rotation) — the chromosome must
+    fail with an explicit error rather than silently producing a
+    low-row-count run that looks like success. The error is wrapped
+    in the loader's per-chromosome failure path: ``capture_failure``
+    re-raises it after the summary log, and the chromosome lands in
+    ``chromosomes_failed`` on the result.
+    """
+    init_databases()
+    _enable_external_calls()
+    _patch_check_libcurl(monkeypatch)
+
+    exomes_url = GNOMAD_URL_TEMPLATE.format(data_type="exomes", chrom="22")
+    genomes_url = GNOMAD_URL_TEMPLATE.format(data_type="genomes", chrom="22")
+    fail_region = "chr22:1000-1000"
+    by_url: dict[str, list[FakeVariant]] = {
+        exomes_url: [
+            _make_record("chr22", 1000, "A", "C", {"AF": 0.05, "AC": 5, "AN": 100}),
+        ],
+        genomes_url: [],
+    }
+    factory = _ReopenTrackingFactory(
+        by_url=by_url,
+        always_corrupt_on={exomes_url: {fail_region}},
+    )
+
+    import cyvcf2  # noqa: PLC0415 — test fixture local import
+
+    monkeypatch.setattr(cyvcf2, "VCF", factory)
+
+    with duckdb_connection() as conn:
+        _seed_user_variants(conn, [("22", 1000)])
+        audited, http = _mock_audited_client()
+        try:
+            with pytest.raises(GnomadRemoteIterationError, match="region"):
+                load(conn, audited, force=True, chromosomes=["22"])
+        finally:
+            audited.close()
+            http.close()
+
+    # Verifies the reopen budget was actually exhausted, not short-
+    # circuited: every attempt corresponds to one VCF open on the URL.
+    assert factory.openings.count(exomes_url) == MAX_REMOTE_REGION_ATTEMPTS
