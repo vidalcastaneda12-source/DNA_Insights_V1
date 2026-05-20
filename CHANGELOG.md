@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Sub-phase 5.5 — gnomAD loader real-data verification failure.**
+  First real-data run against gnomAD v4.1.1 per-chromosome VCFs
+  landed 4,066 rows under a broken `source_version_id` with every
+  `af_*` column NULL plus an htslib "Coordinates must be > 0"
+  failure cascade. Two root causes — independent code defects, one
+  cascading into the others:
+  - `_record_to_row` read `AF_joint` / `AC_joint` / `AN_joint` /
+    `AF_joint_<pop>` INFO keys, but the per-chrom v4.1 sites VCFs
+    (both exomes and genomes) carry the plain-suffix variants
+    (`AF`, `AC`, `AN`, `AF_<pop>`); the `_joint` family lives only
+    on a separate combined release. The fix updates the reads and
+    adds a population-suffix mapping that handles gnomAD v4's
+    rename of `oth` → `remaining` (schema column `af_oth` is
+    populated from `AF_remaining`).
+  - `_build_filter_set`'s `pos_grch38 IS NOT NULL` guard on the
+    ClinVar / GWAS subqueries admitted ClinVar's sentinel
+    `pos_grch38 = -1` rows (20,173 of them under the active
+    release), which `_coalesce_positions` then merged into
+    `(-1, -1)` and the per-chromosome loader passed to cyvcf2 as
+    `chr<N>:-1--1`. The bad regions corrupted htslib's read-offset
+    state — the source of the BGZF "Illegal seek" errors with
+    offsets in the 10^14 range and the libcurl error 16 HTTP/2
+    framing failures downstream. The fix tightens the guard to
+    `pos_grch38 > 0` uniformly across the user / ClinVar / GWAS
+    subqueries and the union, defending against any future
+    upstream sentinel-emitting loader.
+  Five new regression tests pin the v4.1 INFO key contract, the
+  legacy `_joint`-keys-must-not-populate behavior, the
+  `AF_remaining` → `af_oth` mapping, the filter-set sentinel
+  rejection, and an end-to-end assertion that the loader never
+  emits a non-positive tabix region even when upstream sources
+  carry `-1` sentinels. The version-pointer supersession pattern
+  is unchanged; no schema or DDL changes. (PR #B follow-up)
+
 ### Added
 - **Sub-phase 5.5 — gnomAD filtered allele frequencies loader.** Adds
   `backend/src/genome/annotate/loaders/gnomad.py`, registering a new

@@ -133,6 +133,24 @@ Mirrors the ``af_<pop>`` columns on ``gnomad_frequencies`` exactly
 construction in :func:`_insert_chunk`.
 """
 
+# gnomAD v4 renamed the "Other / unspecified" inferred-ancestry-group
+# from ``oth`` to ``remaining`` in the public VCF INFO keys but the
+# schema column ``af_oth`` (PR #46-era convention) is unchanged. The
+# loader keeps the schema label and reads the new VCF INFO key when
+# projecting a record. All other populations map identity.
+_POP_TO_VCF_INFO_SUFFIX: Final[dict[str, str]] = {
+    "afr": "afr",
+    "ami": "ami",
+    "amr": "amr",
+    "asj": "asj",
+    "eas": "eas",
+    "fin": "fin",
+    "mid": "mid",
+    "nfe": "nfe",
+    "sas": "sas",
+    "oth": "remaining",
+}
+
 DEFAULT_BATCH_SIZE: Final[int] = 50_000
 """Bulk-insert chunk size.
 
@@ -331,6 +349,17 @@ def _build_filter_set(conn: DuckDBPyConnection) -> _FilterSet:
     positions. ``composition`` carries the per-source distinct counts
     (``user``, ``clinvar``, ``gwas``) plus the ``union_total`` so the
     end-of-load summary can name the filter set's shape.
+
+    Every subquery guards ``pos_grch38 > 0``. Upstream annotation
+    loaders (notably ClinVar) emit a ``-1`` sentinel for variants
+    whose GRCh38 coordinate could not be resolved; an ``IS NOT NULL``
+    guard would still admit those rows, and any negative value
+    flowing through :func:`_coalesce_positions` would produce an
+    invalid ``chr<N>:-1--1`` tabix region that htslib rejects with
+    "Coordinates must be > 0" and may corrupt the BGZF read offset
+    state. ``variants_master`` enforces ``pos_grch38 BIGINT NOT
+    NULL`` at the schema level, but the same guard is applied
+    uniformly for defense in depth.
     """
     chrom_list = ",".join(f"'{c}'" for c in SUPPORTED_CHROMS)
 
@@ -340,6 +369,7 @@ def _build_filter_set(conn: DuckDBPyConnection) -> _FilterSet:
             SELECT DISTINCT chrom, pos_grch38
               FROM variants_master
              WHERE chrom::VARCHAR IN ({chrom_list})
+               AND pos_grch38 > 0
         )
         """,  # noqa: S608 — chrom_list is built from the module constant SUPPORTED_CHROMS
     ).fetchone()
@@ -354,7 +384,7 @@ def _build_filter_set(conn: DuckDBPyConnection) -> _FilterSet:
                 ON s.source_db = 'clinvar'
                AND s.current_source_version_id = c.source_version_id
              WHERE c.chrom::VARCHAR IN ({chrom_list})
-               AND c.pos_grch38 IS NOT NULL
+               AND c.pos_grch38 > 0
         )
         """,  # noqa: S608
     ).fetchone()
@@ -369,7 +399,7 @@ def _build_filter_set(conn: DuckDBPyConnection) -> _FilterSet:
                 ON s.source_db = 'gwas_catalog'
                AND s.current_source_version_id = g.source_version_id
              WHERE g.chrom::VARCHAR IN ({chrom_list})
-               AND g.pos_grch38 IS NOT NULL
+               AND g.pos_grch38 > 0
         )
         """,  # noqa: S608
     ).fetchone()
@@ -381,6 +411,7 @@ def _build_filter_set(conn: DuckDBPyConnection) -> _FilterSet:
             SELECT chrom::VARCHAR AS chrom, pos_grch38 AS pos
               FROM variants_master
              WHERE chrom::VARCHAR IN ({chrom_list})
+               AND pos_grch38 > 0
             UNION
             SELECT c.chrom::VARCHAR AS chrom, c.pos_grch38 AS pos
               FROM clinvar_annotations c
@@ -388,7 +419,7 @@ def _build_filter_set(conn: DuckDBPyConnection) -> _FilterSet:
                 ON s.source_db = 'clinvar'
                AND s.current_source_version_id = c.source_version_id
              WHERE c.chrom::VARCHAR IN ({chrom_list})
-               AND c.pos_grch38 IS NOT NULL
+               AND c.pos_grch38 > 0
             UNION
             SELECT g.chrom::VARCHAR AS chrom, g.pos_grch38 AS pos
               FROM gwas_catalog_associations g
@@ -396,7 +427,7 @@ def _build_filter_set(conn: DuckDBPyConnection) -> _FilterSet:
                 ON s.source_db = 'gwas_catalog'
                AND s.current_source_version_id = g.source_version_id
              WHERE g.chrom::VARCHAR IN ({chrom_list})
-               AND g.pos_grch38 IS NOT NULL
+               AND g.pos_grch38 > 0
         )
         SELECT chrom, pos
           FROM all_positions
@@ -513,12 +544,19 @@ def _record_to_row(
 ) -> dict[str, object] | None:
     """Project one cyvcf2 record into a row destined for ``gnomad_frequencies``.
 
-    Reads the global trio (``AF_joint`` / ``AC_joint`` / ``AN_joint``)
-    plus per-population AFs (``AF_joint_<pop>`` for each pop in
-    :data:`GNOMAD_POPULATIONS`) out of the record's INFO dict. Missing
-    INFO keys map to ``None``. The ``filter_status`` column carries
-    the FILTER token (``"PASS"`` when cyvcf2 reports ``None``); other
-    columns come from ``CHROM`` / ``POS`` / ``REF`` / ``ALT``.
+    Reads the global trio (``AF`` / ``AC`` / ``AN``) plus per-population
+    AFs (``AF_<pop>`` per :data:`_POP_TO_VCF_INFO_SUFFIX`) out of the
+    record's INFO dict. The per-chromosome v4.1 sites VCFs (both
+    ``exomes`` and ``genomes`` variants) expose these plain-suffix keys
+    directly — the ``_joint`` prefix exists only on a separate combined
+    release and is not present here. ``af_oth`` reads from the renamed
+    ``AF_remaining`` key (gnomAD v4 retired the ``oth`` label). The
+    Amish population (``ami``) is absent from the exomes VCF in v4.1
+    and so resolves to ``None`` on exomes records; genomes records
+    carry it. Missing INFO keys map to ``None``. The ``filter_status``
+    column carries the FILTER token (``"PASS"`` when cyvcf2 reports
+    ``None``); other columns come from ``CHROM`` / ``POS`` / ``REF`` /
+    ``ALT``.
 
     Returns ``None`` defensively for multi-allelic records — gnomAD's
     public per-chromosome VCFs are pre-split, so this is invariant
@@ -558,15 +596,15 @@ def _record_to_row(
         "pos_grch38": int(pos),
         "ref_allele": ref,
         "alt_allele": alt,
-        "af_global": _info_get_float(info, "AF_joint"),
-        "ac_global": _info_get_int(info, "AC_joint"),
-        "an_global": _info_get_int(info, "AN_joint"),
+        "af_global": _info_get_float(info, "AF"),
+        "ac_global": _info_get_int(info, "AC"),
+        "an_global": _info_get_int(info, "AN"),
         "filter_status": filter_status,
         "source_version_id": source_version_id,
         "retrieval_date": retrieval_datetime.astimezone(UTC).replace(tzinfo=None),
     }
     for pop in GNOMAD_POPULATIONS:
-        row[f"af_{pop}"] = _info_get_float(info, f"AF_joint_{pop}")
+        row[f"af_{pop}"] = _info_get_float(info, f"AF_{_POP_TO_VCF_INFO_SUFFIX[pop]}")
     return row
 
 

@@ -27,6 +27,7 @@ from typer.testing import CliRunner
 
 from genome.annotate.loaders import gnomad as gnomad_loader
 from genome.annotate.loaders.gnomad import (
+    _POP_TO_VCF_INFO_SUFFIX,
     DEFAULT_COALESCE_DISTANCE_BP,
     GNOMAD_POPULATIONS,
     GNOMAD_URL_TEMPLATE,
@@ -480,14 +481,19 @@ def _make_record(  # noqa: PLR0913 — wrapper over a structural constructor
 
 
 def test_record_to_row_full_pops() -> None:
-    """All 10 AF_joint_<pop> keys → all af_<pop> columns populated, af_mid included."""
-    info = {
-        "AF_joint": 0.05,
-        "AC_joint": 10,
-        "AN_joint": 200,
+    """All 10 AF_<pop> keys → all af_<pop> columns populated, af_mid included.
+
+    Mirrors the gnomAD v4.1 per-chrom VCF INFO contract: global AF/AC/AN
+    plus per-population ``AF_<vcf_suffix>`` where the "oth" schema
+    column reads from the renamed ``AF_remaining`` INFO key.
+    """
+    info: dict[str, object] = {
+        "AF": 0.05,
+        "AC": 10,
+        "AN": 200,
     }
     for pop in GNOMAD_POPULATIONS:
-        info[f"AF_joint_{pop}"] = 0.1
+        info[f"AF_{_POP_TO_VCF_INFO_SUFFIX[pop]}"] = 0.1
     record = _make_record("chr1", 100, "A", "C", info)
     retrieval = datetime(2026, 5, 19, tzinfo=UTC)
     row = _record_to_row(record, source_version_id=1, retrieval_datetime=retrieval)
@@ -506,13 +512,13 @@ def test_record_to_row_full_pops() -> None:
 
 
 def test_record_to_row_partial_pops() -> None:
-    """Missing AF_joint_<pop> keys → NULL in those columns; other cols populated."""
+    """Missing AF_<pop> keys → NULL in those columns; other cols populated."""
     info = {
-        "AF_joint": 0.02,
-        "AC_joint": 4,
-        "AN_joint": 200,
-        "AF_joint_nfe": 0.025,
-        "AF_joint_afr": 0.015,
+        "AF": 0.02,
+        "AC": 4,
+        "AN": 200,
+        "AF_nfe": 0.025,
+        "AF_afr": 0.015,
     }
     record = _make_record("chr2", 250, "G", "T", info)
     row = _record_to_row(record, source_version_id=1, retrieval_datetime=datetime.now(UTC))
@@ -525,7 +531,7 @@ def test_record_to_row_partial_pops() -> None:
 
 def test_record_to_row_uses_filter_status_from_record() -> None:
     """Non-None FILTER values are preserved verbatim; None → 'PASS'."""
-    info: dict[str, object] = {"AF_joint": 0.01}
+    info: dict[str, object] = {"AF": 0.01}
     record_pass = _make_record("chr1", 100, "A", "C", info)
     record_filter = _make_record("chr1", 200, "A", "C", info, filter_value="AC0")
     now = datetime.now(UTC)
@@ -552,10 +558,10 @@ def _build_overlap_factory() -> _VCFFactory:
     exomes_url = GNOMAD_URL_TEMPLATE.format(data_type="exomes", chrom="22")
     genomes_url = GNOMAD_URL_TEMPLATE.format(data_type="genomes", chrom="22")
     by_url[exomes_url] = [
-        _make_record("chr22", 1000, "A", "C", {"AF_joint": 0.10, "AC_joint": 5, "AN_joint": 50}),
+        _make_record("chr22", 1000, "A", "C", {"AF": 0.10, "AC": 5, "AN": 50}),
     ]
     by_url[genomes_url] = [
-        _make_record("chr22", 1000, "A", "C", {"AF_joint": 0.20, "AC_joint": 10, "AN_joint": 50}),
+        _make_record("chr22", 1000, "A", "C", {"AF": 0.20, "AC": 10, "AN": 50}),
     ]
     return _VCFFactory(by_url=by_url)
 
@@ -657,7 +663,7 @@ def test_force_allocates_new_source_version_id(monkeypatch: pytest.MonkeyPatch) 
                 1000,
                 "A",
                 "C",
-                {"AF_joint": 0.05, "AC_joint": 5, "AN_joint": 100},
+                {"AF": 0.05, "AC": 5, "AN": 100},
             ),
         ],
         GNOMAD_URL_TEMPLATE.format(data_type="genomes", chrom="22"): [],
@@ -715,7 +721,7 @@ def test_explicit_version_override_different_label(
                 100,
                 "A",
                 "C",
-                {"AF_joint": 0.5, "AC_joint": 50, "AN_joint": 100},
+                {"AF": 0.5, "AC": 50, "AN": 100},
             ),
         ],
         GNOMAD_URL_TEMPLATE.format(data_type="genomes", chrom="22"): [],
@@ -781,7 +787,7 @@ def test_partial_failure_leaves_pointer_unflipped(
                 100,
                 "A",
                 "C",
-                {"AF_joint": 0.1, "AC_joint": 1, "AN_joint": 10},
+                {"AF": 0.1, "AC": 1, "AN": 10},
             ),
         ]
         for c in SUPPORTED_CHROMS
@@ -842,7 +848,7 @@ def test_resume_picks_up_remaining_chroms(monkeypatch: pytest.MonkeyPatch) -> No
                 100,
                 "A",
                 "C",
-                {"AF_joint": 0.1, "AC_joint": 1, "AN_joint": 10},
+                {"AF": 0.1, "AC": 1, "AN": 10},
             ),
         ]
         by_url[GNOMAD_URL_TEMPLATE.format(data_type="genomes", chrom=c)] = []
@@ -912,7 +918,7 @@ def test_partial_chromosomes_filter_does_not_flip(
                 100,
                 "A",
                 "C",
-                {"AF_joint": 0.1, "AC_joint": 1, "AN_joint": 10},
+                {"AF": 0.1, "AC": 1, "AN": 10},
             ),
         ],
         GNOMAD_URL_TEMPLATE.format(data_type="genomes", chrom="22"): [],
@@ -1046,7 +1052,7 @@ def test_af_bucket_counters_boundaries(monkeypatch: pytest.MonkeyPatch) -> None:
                 pos,
                 "A",
                 "C",
-                {"AF_joint": af, "AC_joint": 1, "AN_joint": 100},
+                {"AF": af, "AC": 1, "AN": 100},
             )
             for pos, af in positions
         ],
@@ -1086,11 +1092,11 @@ def test_pop_af_presence_counters_mixed_zero_nonzero(
                 "A",
                 "C",
                 {
-                    "AF_joint": 0.05,
-                    "AC_joint": 1,
-                    "AN_joint": 100,
-                    "AF_joint_nfe": 0.06,
-                    "AF_joint_afr": 0.0,
+                    "AF": 0.05,
+                    "AC": 1,
+                    "AN": 100,
+                    "AF_nfe": 0.06,
+                    "AF_afr": 0.0,
                 },
             ),
             _make_record(
@@ -1099,10 +1105,10 @@ def test_pop_af_presence_counters_mixed_zero_nonzero(
                 "A",
                 "C",
                 {
-                    "AF_joint": 0.10,
-                    "AC_joint": 5,
-                    "AN_joint": 100,
-                    "AF_joint_nfe": 0.11,
+                    "AF": 0.10,
+                    "AC": 5,
+                    "AN": 100,
+                    "AF_nfe": 0.11,
                 },
             ),
         ],
@@ -1177,7 +1183,7 @@ def test_genome_annotate_refresh_gnomad_force(
                 100,
                 "A",
                 "C",
-                {"AF_joint": 0.05, "AC_joint": 1, "AN_joint": 100},
+                {"AF": 0.05, "AC": 1, "AN": 100},
             ),
         ],
         GNOMAD_URL_TEMPLATE.format(data_type="genomes", chrom="22"): [],
@@ -1224,7 +1230,7 @@ def test_genome_annotate_refresh_gnomad_chromosomes_filter(
                 100,
                 "A",
                 "C",
-                {"AF_joint": 0.05, "AC_joint": 1, "AN_joint": 100},
+                {"AF": 0.05, "AC": 1, "AN": 100},
             ),
         ],
         GNOMAD_URL_TEMPLATE.format(data_type="genomes", chrom="22"): [],
@@ -1271,7 +1277,7 @@ def test_genome_annotate_refresh_gnomad_resume(
                 100,
                 "A",
                 "C",
-                {"AF_joint": 0.1, "AC_joint": 1, "AN_joint": 10},
+                {"AF": 0.1, "AC": 1, "AN": 10},
             ),
         ]
         by_url[GNOMAD_URL_TEMPLATE.format(data_type="genomes", chrom=c)] = []
@@ -1323,3 +1329,262 @@ def test_genome_annotate_refresh_gnomad_resume(
         ).fetchone()
     assert pointer is not None
     assert pointer[0] == sv_id
+
+
+# ---------------------------------------------------------------------------
+# Regression tests — PR-B real-data verification failure
+#
+# Three concrete defects were caught against the real gnomAD v4.1 VCFs
+# in the first verification run; the unit tests at the time used a
+# synthetic INFO key set (``AF_joint`` / ``AF_joint_<pop>``) and a
+# filter-set with non-negative positions, so neither defect was
+# observable in CI. These tests pin down the real contracts.
+# ---------------------------------------------------------------------------
+
+
+def test_record_to_row_uses_v41_real_info_key_names() -> None:
+    """Per-chrom v4.1 INFO contract: AF, AC, AN, AF_<pop>; oth ← AF_remaining.
+
+    Inspecting the real gnomAD v4.1 chr22 exomes VCF header (verified
+    2026-05-20) confirms the INFO keys are the plain-suffix variants,
+    not the ``_joint`` family. The Amish ``ami`` population is absent
+    on the exomes side and must resolve to ``None``; the loader still
+    populates ``af_ami`` from genomes records via the
+    exomes-first-wins dedup. ``af_oth`` reads from the renamed
+    ``AF_remaining`` key (gnomAD v4 retired the ``oth`` label).
+    """
+    info: dict[str, object] = {
+        "AF": 1.8458999875292648e-06,
+        "AC": 1,
+        "AN": 541740,
+        "AF_afr": 0.0,
+        "AF_amr": 1.5e-05,
+        "AF_asj": 0.0,
+        "AF_eas": 0.0,
+        "AF_fin": 0.0,
+        "AF_mid": 0.0,
+        "AF_nfe": 2.8e-06,
+        "AF_sas": 0.0,
+        "AF_remaining": 0.0,
+        # AF_ami intentionally absent — matches v4.1 exomes layout.
+    }
+    record = _make_record("chr22", 17007792, "T", "A", info)
+    row = _record_to_row(record, source_version_id=1, retrieval_datetime=datetime.now(UTC))
+    assert row is not None
+    assert row["af_global"] == pytest.approx(1.8459e-06, abs=1e-09)
+    assert row["ac_global"] == 1
+    assert row["an_global"] == 541740
+    assert row["af_afr"] == 0.0
+    assert row["af_amr"] == pytest.approx(1.5e-05, abs=1e-09)
+    assert row["af_nfe"] == pytest.approx(2.8e-06, abs=1e-09)
+    assert row["af_oth"] == 0.0  # populated from AF_remaining
+    assert row["af_ami"] is None  # absent in exomes
+
+
+def test_record_to_row_does_not_read_legacy_joint_keys() -> None:
+    """Synthetic ``AF_joint``/``AF_joint_<pop>`` INFO is ignored.
+
+    This is the explicit regression for the PR-B failure: the original
+    loader read ``AF_joint`` etc., so against the real v4.1 per-chrom
+    VCFs (which lack any ``_joint`` keys) every AF value resolved to
+    ``None`` while rows still landed. The test asserts the inverse —
+    that legacy ``_joint`` keys do *not* populate the schema columns,
+    locking the contract in place against any future reversion.
+    """
+    info: dict[str, object] = {
+        "AF_joint": 0.05,
+        "AC_joint": 10,
+        "AN_joint": 200,
+        "AF_joint_afr": 0.1,
+        "AF_joint_nfe": 0.2,
+        "AF_joint_remaining": 0.3,
+    }
+    record = _make_record("chr22", 17007792, "T", "A", info)
+    row = _record_to_row(record, source_version_id=1, retrieval_datetime=datetime.now(UTC))
+    assert row is not None
+    assert row["af_global"] is None
+    assert row["ac_global"] is None
+    assert row["an_global"] is None
+    for pop in GNOMAD_POPULATIONS:
+        assert row[f"af_{pop}"] is None, f"af_{pop} should be None for legacy keys"
+
+
+def test_record_to_row_af_oth_reads_from_af_remaining_only() -> None:
+    """``af_oth`` must come from ``AF_remaining``, not from ``AF_oth``.
+
+    gnomAD v4 dropped the ``oth`` label entirely; an ``AF_oth`` INFO
+    key does not exist in the public VCFs. If a hypothetical record
+    carried ``AF_oth``, the loader should still ignore it and read
+    ``AF_remaining``.
+    """
+    # AF_oth present, AF_remaining absent → af_oth is None (we don't
+    # read AF_oth).
+    info_with_oth: dict[str, object] = {
+        "AF": 0.05,
+        "AC": 1,
+        "AN": 100,
+        "AF_oth": 0.42,
+    }
+    row = _record_to_row(
+        _make_record("chr22", 100, "A", "C", info_with_oth),
+        source_version_id=1,
+        retrieval_datetime=datetime.now(UTC),
+    )
+    assert row is not None
+    assert row["af_oth"] is None
+    # AF_remaining present → populates af_oth.
+    info_with_remaining: dict[str, object] = {
+        "AF": 0.05,
+        "AC": 1,
+        "AN": 100,
+        "AF_remaining": 0.42,
+    }
+    row = _record_to_row(
+        _make_record("chr22", 100, "A", "C", info_with_remaining),
+        source_version_id=1,
+        retrieval_datetime=datetime.now(UTC),
+    )
+    assert row is not None
+    assert row["af_oth"] == pytest.approx(0.42, abs=1e-09)
+
+
+def test_build_filter_set_excludes_sentinel_negative_positions() -> None:
+    """ClinVar emits ``pos_grch38 = -1`` for unresolved coordinates.
+
+    Real-data observation: the active ClinVar release in the
+    project DB contains 20,173 rows with ``pos_grch38 = -1`` under
+    the current source-version pointer. The original
+    ``IS NOT NULL`` guard in ``_build_filter_set`` admitted these,
+    which then flowed through ``_coalesce_positions`` and produced
+    ``chr<N>:-1--1`` tabix regions — the htslib "Coordinates must
+    be > 0" error in the first PR-B verification run. The
+    tightened guard (``pos_grch38 > 0``) must drop every negative
+    sentinel from each source-side subquery and from the union.
+    """
+    init_databases()
+    with duckdb_connection() as conn:
+        # ClinVar: real positions on chr22 plus the -1 sentinel.
+        _seed_clinvar_active(
+            conn,
+            rows=[("22", 17007792), ("22", -1), ("1", -1), ("1", 500)],
+        )
+        # GWAS: also seed a -1 row to verify the same guard fires
+        # against the GWAS subquery.
+        _seed_gwas_active(conn, rows=[("22", 17007800), ("22", -1)])
+        # variants_master forbids NULL but accepts any BIGINT; insert
+        # a positive position so the user-side subquery has content.
+        _seed_user_variants(conn, [("22", 17007792), ("1", 500)])
+        result = _build_filter_set(conn)
+    # No chromosome's position list may contain a negative value.
+    for chrom, positions in result.positions.items():
+        assert all(p > 0 for p in positions), (
+            f"chrom {chrom} retains non-positive positions: {[p for p in positions if p <= 0]}"
+        )
+    # Specifically chr22 keeps the real positions, drops the -1.
+    assert -1 not in result.positions["22"]
+    assert 17007792 in result.positions["22"]
+    assert 17007800 in result.positions["22"]
+    # And chr1 keeps 500 but not -1.
+    assert -1 not in result.positions["1"]
+    assert 500 in result.positions["1"]
+    # Composition counters reflect only positive rows: ClinVar 2 (22, 17007792) + (1, 500),
+    # GWAS 1 (22, 17007800), user 2 (22, 17007792) + (1, 500), union_total 3 distinct positions.
+    expected_clinvar = 2
+    expected_gwas = 1
+    expected_user = 2
+    expected_union = 3
+    assert result.composition["clinvar"] == expected_clinvar
+    assert result.composition["gwas"] == expected_gwas
+    assert result.composition["user"] == expected_user
+    assert result.composition["union_total"] == expected_union
+
+
+def test_load_does_not_query_negative_region_when_sources_have_sentinels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: a -1 sentinel in ClinVar must never reach cyvcf2 as a region.
+
+    Wires up a custom factory that captures every region string the
+    loader passes to ``cyvcf2.VCF(...)`` and asserts the loader never
+    builds a negative or non-positive range — even when the upstream
+    annotation sources carry the sentinel rows that caused the PR-B
+    "Coordinates must be > 0" failure.
+    """
+    init_databases()
+    _enable_external_calls()
+    _patch_check_libcurl(monkeypatch)
+
+    captured_regions: list[str] = []
+
+    @dataclass
+    class _TrackingFakeVCF:
+        records: list[FakeVariant]
+
+        def __call__(self, region: str) -> Iterable[FakeVariant]:
+            captured_regions.append(region)
+            match = re.match(r"chr([^:]+):(-?\d+)--?(-?\d+)", region)
+            if match is None:
+                return iter(())
+            chrom = match.group(1)
+            start = int(match.group(2))
+            end = int(match.group(3))
+            return (
+                r
+                for r in self.records
+                if (r.CHROM.removeprefix("chr") == chrom) and start <= r.POS <= end
+            )
+
+        def close(self) -> None:
+            pass
+
+    by_url = {
+        GNOMAD_URL_TEMPLATE.format(data_type="exomes", chrom="22"): [
+            _make_record(
+                "chr22",
+                17007792,
+                "T",
+                "A",
+                {"AF": 1.84e-06, "AC": 1, "AN": 541740, "AF_remaining": 0.0},
+            ),
+        ],
+        GNOMAD_URL_TEMPLATE.format(data_type="genomes", chrom="22"): [],
+    }
+
+    def _factory(url: str) -> _TrackingFakeVCF:
+        return _TrackingFakeVCF(records=list(by_url.get(url, [])))
+
+    import cyvcf2  # noqa: PLC0415 — test fixture local import
+
+    monkeypatch.setattr(cyvcf2, "VCF", _factory)
+
+    with duckdb_connection() as conn:
+        # Mix real positions on chr22 with a -1 ClinVar sentinel.
+        _seed_clinvar_active(conn, rows=[("22", 17007792), ("22", -1)])
+        _seed_user_variants(conn, [("22", 17007792)])
+        audited, http = _mock_audited_client()
+        try:
+            result = load(conn, audited, force=True, chromosomes=["22"])
+        finally:
+            audited.close()
+            http.close()
+
+    # The loader must produce only positive ranges.
+    for region in captured_regions:
+        match = re.match(r"chr[^:]+:(-?\d+)-(-?\d+)", region)
+        assert match is not None, f"malformed region: {region!r}"
+        start = int(match.group(1))
+        end = int(match.group(2))
+        assert start > 0, f"non-positive start in region {region!r}"
+        assert end > 0, f"non-positive end in region {region!r}"
+    # And the legitimate position landed under the new version with a
+    # populated af_global — proves the v4.1 INFO key fix is wired
+    # through the same flow.
+    assert result.source_version_id is not None
+    assert result.rows_loaded == 1
+    with duckdb_connection() as conn:
+        af_global = conn.execute(
+            "SELECT af_global FROM gnomad_frequencies WHERE source_version_id = ?",
+            [result.source_version_id],
+        ).fetchone()
+    assert af_global is not None
+    assert af_global[0] == pytest.approx(1.84e-06, abs=1e-09)
