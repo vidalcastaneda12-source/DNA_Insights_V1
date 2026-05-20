@@ -593,7 +593,7 @@ CHANGELOG entry.
 **What's loaded.** EBI's GWAS Catalog "all associations" release —
 distributed as a ZIP archive (~60 MB) carrying one TSV
 (`gwas-catalog-download-associations-alt-full.tsv`, ~300 MB
-uncompressed, ~600-700K active associations at the current
+uncompressed, ~919K active associations at the current
 release). The loader streams the TSV out of the ZIP without
 unpacking to disk and chunk-loads into `gwas_catalog_associations`.
 GWAS Catalog ships one row per curated SNP-trait association; the
@@ -669,7 +669,7 @@ multi-SNP fan-outs / coordinate-less drops shift it).
 `~/.cache/genome/annotations/gwas_catalog/` — the downloaded ZIP
 is ~60 MB on disk (decompresses to a ~300 MB TSV the loader
 streams in memory); the supersession transaction's MVCC working
-set holds the new ~600-700K rowset (being inserted under a fresh
+set holds the new ~919K rowset (being inserted under a fresh
 `source_version_id`) alongside the prior rowset (still resident
 under its older `source_version_id`) in the same WAL window.
 End-to-end on a laptop is **under five minutes wall-clock** for a
@@ -751,7 +751,7 @@ from the same first URI via a trailing `<PREFIX>_<digits>` match
   GWAS Catalog ancestry file that this loader does not consume.
 
 **Chunked bulk insert.** Locked at 250,000 rows per chunk to
-match the ClinVar loader. GWAS Catalog at ~600-700K rows fits in
+match the ClinVar loader. GWAS Catalog at ~919K rows fits in
 2-3 chunks; the chunked-insert code path is exercised identically
 across loaders. All chunks run inside one DuckDB transaction; the
 closing `commit_and_checkpoint` and the `flip_to_new_version`
@@ -809,9 +809,9 @@ genome annotate refresh --source gwas_catalog
 Capture from the `gwas_catalog.refresh.complete` structlog line:
 `active_total`, `distinct_study_accession`, `distinct_pmid`,
 `distinct_rsid`, `distinct_trait_name`, plus parser stats and
-wall-clock. Expected ranges (refine after first real-data load):
+wall-clock. Locked stable numbers:
 
-| Metric | Expected range |
+| Metric | Locked value |
 |---|---|
 | `active_total` | 919,446 |
 | `distinct_study_accession` | 59,310 |
@@ -906,7 +906,7 @@ EFO traits (one row per ontology term), and performance metrics
 (multiple rows per PGS, one per evaluation cohort / sample set) --
 joins them client-side on the natural keys, and chunk-loads one
 joined row per PGS into `pgs_catalog_scores`. PGS Catalog ships
-~5-7K scores at the current release, so a full refresh fits in a
+~5K scores at the current release, so a full refresh fits in a
 single chunk; the chunked-insert code path is exercised
 identically to the larger loaders. This sub-phase loads the
 score-level metadata only; the per-score variant weights table
@@ -937,7 +937,7 @@ score-level metadata only; the per-score variant weights table
    "efotraits": [{"id": "EFO_xxx", ...}, ...]}, ...]}`. The bundle's
    EFO traits CSV does not carry a category column, so this third
    audited download supplies the dictionary that populates
-   `pgs_catalog_scores.trait_category`. The endpoint returns ~11
+   `pgs_catalog_scores.trait_category`. The endpoint returns 10
    categories totaling ~700 EFO traits at the verification date,
    well inside the REST default page size; the loader raises a
    loud-fail error if the response carries a `next` URL so a
@@ -986,7 +986,7 @@ per PGS in the bundle).
 compressed (decompresses to ~15 MB; the loader holds it in
 memory rather than unpacking to disk); the supersession
 transaction's MVCC working set on a re-run holds both the prior
-~5-7K active rows (flipped to inactive) and the new ~5-7K active
+~5K active rows (flipped to inactive) and the new ~5K active
 rows in the same WAL window. End-to-end on a laptop is **under
 30 seconds wall-clock** (the project-wide routine-refresh target
 documented in CLAUDE.md). The bundle is small enough that the
@@ -1029,7 +1029,7 @@ the trait_category column:
    -- the REST payload providing the `efo_id` → `category_label`
    dict. The bundle's EFO traits CSV does not carry a category
    column at the verified date, so this REST endpoint is the
-   sole source of `trait_category`. ~11 categories totaling
+   sole source of `trait_category`. 10 categories totaling
    ~700 EFO traits at the verified date. A score whose
    `trait_efo` is in this dict gets the category; otherwise
    `trait_category = NULL`. The lookup is independent of the
@@ -1133,7 +1133,7 @@ s.current_source_version_id = ps.source_version_id` read pattern:
 * `distinct_trait_efo`
 * `distinct_publication_pmid`
 * `distinct_trait_category` -- populated from the
-  `/rest/trait_category/all` REST payload (~11 categories at
+  `/rest/trait_category/all` REST payload (10 categories at
   the verified date). A value of 0 means the trait_category
   download or parse failed (or returned an empty results list)
   -- treat as a regression signal.
@@ -1162,10 +1162,9 @@ Capture from the `pgs_catalog.refresh.complete` structlog line:
 `active_total`, `distinct_pgs_id`, `distinct_trait_efo`,
 `distinct_publication_pmid`, `distinct_trait_category`,
 `with_performance_auc`, `with_performance_or_per_sd`, plus
-parser stats and wall-clock. Expected ranges (refine after the
-first real-data load):
+parser stats and wall-clock. Locked stable numbers:
 
-| Metric | Expected range |
+| Metric | Locked value |
 |---|---|
 | `active_total` | 5,337 |
 | `distinct_pgs_id` | 5,337 |
@@ -1240,7 +1239,7 @@ path.
   older `source_version_id`) and the new rowset (being inserted
   under the freshly-allocated `source_version_id`) in the same
   WAL window, so the on-disk DuckDB file grows during a re-run.
-  PGS Catalog at ~5-7K rows is much smaller than the ClinVar
+  PGS Catalog at ~5K rows is much smaller than the ClinVar
   case but free ~100 MB before running a refresh against the
   prior corpus. Prior versions remain in the table after the
   transaction commits — see finding-010 follow-up #14 for the
