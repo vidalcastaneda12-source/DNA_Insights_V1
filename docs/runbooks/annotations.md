@@ -752,7 +752,7 @@ from the same first URI via a trailing `<PREFIX>_<digits>` match
 
 **Chunked bulk insert.** Locked at 250,000 rows per chunk to
 match the ClinVar loader. GWAS Catalog at ~919K rows fits in
-2-3 chunks; the chunked-insert code path is exercised identically
+~4 chunks; the chunked-insert code path is exercised identically
 across loaders. All chunks run inside one DuckDB transaction; the
 closing `commit_and_checkpoint` and the `flip_to_new_version`
 pointer UPSERT against `annotation_sources` run inside the same
@@ -1013,7 +1013,7 @@ the trait_category column:
    the four-digit year out of the publication's
    `Publication Date` ISO string).
 3. `pgs_all_metadata_efo_traits.csv` -- one row per EFO/MONDO/HP
-   term (~670 rows). Joins to the scores via the (possibly-
+   term (~696 rows). Joins to the scores via the (possibly-
    truncated) trait EFO ID. The upstream EFO traits CSV does
    **not** ship a category column; this file is parsed only to
    drive the `orphan_trait_refs` counter (a score whose EFO ID

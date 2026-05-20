@@ -68,6 +68,7 @@ _SUPERSESSION_TABLES: Final[frozenset[str]] = frozenset(
         "pharmgkb_annotations",
         "cpic_guidelines",
         "pgs_catalog_scores",
+        "gnomad_frequencies",
     },
 )
 """Per-source tables whose "current" rows are identified via the version pointer.

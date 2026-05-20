@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Sub-phase 5.5 — gnomAD filtered allele frequencies loader.** Adds
+  `backend/src/genome/annotate/loaders/gnomad.py`, registering a new
+  per-source loader under `genome annotate refresh --source gnomad`.
+  The loader streams gnomAD v4.1.1's per-chromosome sites-only VCFs
+  (exomes + genomes, GRCh38, GCS-hosted) via cyvcf2 remote tabix
+  queries, filtered to the three-way intersection of distinct
+  `(chrom, pos_grch38)` across `variants_master` ∪ the active
+  ClinVar release ∪ the active GWAS Catalog release. CLAUDE.md
+  "Things never to do" #3 mandates the broader
+  `(user ∪ ClinVar ∪ GWAS ∪ PGS)` intersection, but PGS per-variant
+  weights do not yet exist in the DB at PR-B time (they land in
+  Phase 6); the deferred extension to PGS coverage is captured in
+  new [`docs/findings/finding-011-gnomad-three-way-intersection.md`](docs/findings/finding-011-gnomad-three-way-intersection.md)
+  and as a new ROADMAP entry "5.5b — gnomAD PGS extension" if not
+  already present. Tabix ranges are formed by coalescing adjacent
+  filter positions within `--coalesce-distance` (default 1000 bp).
+  Per-chromosome content lands under a freshly-allocated new
+  `source_version_id`; the `annotation_sources` pointer flips to
+  the new id only when every supported chromosome (1–22 + X)
+  completes successfully. A `--chromosomes LIST` restricted run
+  defers the flip; `--resume` continues an interrupted run.
+  Bulk-load uses PyArrow Table registration + `INSERT ... SELECT`
+  at `DEFAULT_BATCH_SIZE = 50,000` rows per chunk. New CLI flags
+  (gnomad-specific; rejected for other sources): `--chromosomes`,
+  `--resume`, `--coalesce-distance`, `--version`. Three micro-
+  touchups carried in the same PR: PR #47's CHANGELOG `(PR #XX)`
+  placeholder filled to `(PR #47)`; the runbook's GWAS Catalog
+  chunk-count descriptor updated from "2-3 chunks" to "~4 chunks"
+  (919,446 / 250,000 ≈ 3.68); the runbook's EFO traits CSV row
+  descriptor updated from "~670 rows" to "~696 rows" (matching
+  PGS Catalog 2026_05_07's `distinct_trait_efo=696`). No schema
+  changes; existing DuckDB files remain valid. (PR #B)
+
 ### Documentation
 - **Pre-5.5 — annotations runbook prose alignment with locked
   GWAS Catalog and PGS Catalog stable numbers.** Documentation-
@@ -56,7 +90,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   PharmGKB, CPIC, and gnomAD runbook sections are untouched —
   those numbers were already locked in prior PRs. No code,
   schema, DDL, or test changes; no schema rebuild required.
-  (PR #XX)
+  (PR #47)
 
 ### Schema
 - Added `gnomad_frequencies.af_mid` (`DOUBLE`, nullable) so the upcoming

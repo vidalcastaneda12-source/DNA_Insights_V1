@@ -9,6 +9,12 @@
   helpful stub message that points the user at 5.1+. The implementation
   goes through :func:`genome.annotate.registry.get_loader` so once
   loaders ship, the command's CLI surface does not change.
+
+Sub-phase 5.5 adds three gnomad-specific flags
+(``--chromosomes``, ``--resume``, ``--coalesce-distance``) plus a
+``--version`` override. These are only honoured for ``--source gnomad``;
+passing them on another source raises ``BadParameter`` so a misroute is
+loud rather than silent.
 """
 
 from __future__ import annotations
@@ -80,8 +86,29 @@ def _stub_message(source: str) -> str:
     return f"no loader registered for source {source!r}.\nAvailable sources: {listing}"
 
 
+def _parse_chromosomes(value: str | None) -> tuple[str, ...] | None:
+    """Parse the ``--chromosomes`` flag into a tuple of chrom labels.
+
+    Accepts comma- or whitespace-separated values; trims whitespace.
+    ``None`` returns ``None`` (the "no filter" sentinel). Empty string
+    or a list of only-empty tokens also returns ``None``.
+    """
+    if value is None:
+        return None
+    parts = [p.strip() for p in value.replace(",", " ").split() if p.strip()]
+    if not parts:
+        return None
+    return tuple(parts)
+
+
+def _reject_gnomad_only_flag(name: str, source: str) -> None:
+    """Raise BadParameter when a gnomad-only flag is passed for another source."""
+    msg = f"--{name} is gnomad-specific and not applicable to source {source!r}"
+    raise typer.BadParameter(msg)
+
+
 @annotate_app.command("refresh")
-def annotate_refresh(
+def annotate_refresh(  # noqa: PLR0913 — irreducible CLI surface; gnomad-specific flags are isolated
     source: Annotated[
         str,
         typer.Option(
@@ -118,6 +145,54 @@ def annotate_refresh(
             ),
         ),
     ] = False,
+    version: Annotated[
+        str | None,
+        typer.Option(
+            "--version",
+            help=(
+                "[gnomad-only] Override the locked GNOMAD_VERSION ('4.1.1'). "
+                "Used to test a future release label or to re-load against an "
+                "explicit prior gnomAD release. Ignored by other loaders."
+            ),
+        ),
+    ] = None,
+    chromosomes: Annotated[
+        str | None,
+        typer.Option(
+            "--chromosomes",
+            help=(
+                "[gnomad-only] Comma- or whitespace-separated list of "
+                "chromosomes to refresh (e.g. '22' or '1,2,3,X'). When "
+                "restricted, the version-pointer flip is deferred — run "
+                "--resume against the full chrom set to finalize."
+            ),
+        ),
+    ] = None,
+    resume: Annotated[  # noqa: FBT002 — typer boolean flag, opt-in
+        bool,
+        typer.Option(
+            "--resume",
+            help=(
+                "[gnomad-only] Continue a previously-interrupted load. "
+                "Locates the in-flight (un-flipped) source_version_id for the "
+                "resolved version and runs only the chromosomes that haven't "
+                "yet been populated under it. Flips the pointer at the end "
+                "when every supported chrom is present."
+            ),
+        ),
+    ] = False,
+    coalesce_distance: Annotated[
+        int | None,
+        typer.Option(
+            "--coalesce-distance",
+            help=(
+                "[gnomad-only] Maximum gap (bp) between adjacent filter "
+                "positions before they're split into separate tabix ranges. "
+                "Defaults to 1000. Larger values fetch more contiguous data; "
+                "smaller values issue more tabix queries."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Refresh one annotation source.
 
@@ -129,7 +204,40 @@ def annotate_refresh(
     if loader is None:
         typer.echo(_stub_message(source), err=True)
         raise typer.Exit(code=2)
-    result: RefreshResult = loader(force, skip_if_same_version)
+
+    chrom_filter = _parse_chromosomes(chromosomes)
+
+    if source == "gnomad":
+        from genome.annotate.loaders.gnomad import (  # noqa: PLC0415 — local import keeps the module side-effect-free
+            DEFAULT_COALESCE_DISTANCE_BP,
+            GNOMAD_VERSION,
+        )
+        from genome.annotate.loaders.gnomad import (  # noqa: PLC0415 — local import keeps the module side-effect-free
+            refresh as gnomad_refresh,
+        )
+
+        result: RefreshResult = gnomad_refresh(
+            force,
+            skip_if_same_version,
+            version=version or GNOMAD_VERSION,
+            chromosomes=chrom_filter,
+            resume=resume,
+            coalesce_distance=(
+                coalesce_distance if coalesce_distance is not None else DEFAULT_COALESCE_DISTANCE_BP
+            ),
+        )
+    else:
+        # Reject gnomad-only flags on other sources — passing them is a
+        # misroute, and silent acceptance would mask the bug.
+        if version is not None:
+            _reject_gnomad_only_flag("version", source)
+        if chrom_filter is not None:
+            _reject_gnomad_only_flag("chromosomes", source)
+        if resume:
+            _reject_gnomad_only_flag("resume", source)
+        if coalesce_distance is not None:
+            _reject_gnomad_only_flag("coalesce-distance", source)
+        result = loader(force, skip_if_same_version)
     typer.echo(
         f"source_db={result.source_db} "
         f"source_version_id={result.source_version_id} "
