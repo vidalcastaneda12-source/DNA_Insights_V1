@@ -857,6 +857,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   No DDL changes. (PR #33)
 
 ### Fixed
+- **Pre-5.5 — force cyvcf2 to build from source so remote tabix works.**
+  The prebuilt manylinux wheel of `cyvcf2` (0.32.1 and 0.33.0 both) ships a
+  libcurl 7.29.0 statically built against **NSS**, not OpenSSL. NSS-libcurl
+  ignores `CURL_CA_BUNDLE` and expects an NSS database under `/etc/pki/nssdb`
+  (CentOS layout), which doesn't exist on Ubuntu — opening the gnomAD GCS
+  URL through `cyvcf2.VCF(...)` therefore failed at module-import time on
+  the dev machine with `Libcurl reported error 77 (Problem with the SSL CA
+  cert (path? access rights?))`. `pyproject.toml` now carries a
+  `[tool.uv] no-binary-package = ["cyvcf2"]` pin so `uv sync` always
+  rebuilds cyvcf2 from sdist; the bundled htslib then links against the
+  system `libcurl4-openssl-dev` (OpenSSL 3.x backend) and remote tabix
+  reads work with zero env-var setup. README's Prerequisites section
+  documents the required apt packages and a no-env-var smoke test against
+  gnomAD chr22. No loader source-code changes; no schema changes.
 - `platform_coverage_v.in_imputed`, `call_comparison_v.gt_imputed`, and
   `call_comparison_v.imputed_r2` filter on `'beagle_imputed'` instead of
   `'topmed_imputed'`. The three filter expressions in

@@ -64,6 +64,68 @@ the SQLCipher build the Python extension is linked against does not have FTS5.
 **Do not "fix" this by removing the `notes_fts` virtual table from the schema** —
 rebuild SQLCipher with `--enable-fts5` per the steps above instead.
 
+### cyvcf2 must be built from source
+
+`cyvcf2`'s prebuilt manylinux wheel bundles libcurl 7.29.0 built against
+**NSS**, not OpenSSL. NSS-libcurl ignores `CURL_CA_BUNDLE` and looks for an
+NSS database at `/etc/pki/nssdb` (CentOS layout), which doesn't exist on
+Ubuntu. Opening a remote tabix URL (e.g. the gnomAD GCS bucket used by the
+Phase 5.5 filtered-AF loader) fails with `Libcurl reported error 77 (Problem
+with the SSL CA cert (path? access rights?))` no matter what env vars are
+exported.
+
+The fix is a source build of cyvcf2 so its bundled htslib links against the
+system libcurl (OpenSSL backend). `pyproject.toml` pins this via
+`[tool.uv] no-binary-package = ["cyvcf2"]`, so any `uv sync` rebuilds cyvcf2
+from source automatically — but the system must have the build deps:
+
+```bash
+sudo apt-get install -y \
+  build-essential autoconf \
+  libcurl4-openssl-dev libssl-dev \
+  libbz2-dev liblzma-dev libdeflate-dev zlib1g-dev
+```
+
+After `uv sync`, confirm the resulting `.so` links to the system OpenSSL stack
+(no `cyvcf2.libs/` directory should exist):
+
+```bash
+ls .venv/lib/python3.12/site-packages/cyvcf2.libs 2>&1
+# expected: No such file or directory
+
+ldd .venv/lib/python3.12/site-packages/cyvcf2/cyvcf2.cpython-*.so \
+  | grep -E 'libcurl|libssl|libcrypto'
+# expected: paths under /usr/lib/x86_64-linux-gnu, NOT under cyvcf2.libs/
+```
+
+Then run the remote-tabix smoke test, with **no env vars set**, to confirm
+TLS works against Google Cloud Storage:
+
+```bash
+env -u SSL_CERT_FILE -u CURL_CA_BUNDLE -u CERTIFI_BUNDLE \
+  .venv/bin/python -c "
+from cyvcf2 import VCF
+url = 'https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr22.vcf.bgz'
+v = VCF(url)
+print('header sample count:', len(v.samples))
+for rec in v('chr22:10500000-12000000'):
+    print('first record:', rec.CHROM, rec.POS, rec.REF, rec.ALT)
+    break
+print('OK')
+"
+# expected last line: OK
+```
+
+Symptoms of the broken-wheel state, for future debugging:
+- `uv pip show cyvcf2` reports a wheel install (the source build produces an
+  unsuffixed local wheel filename in the install log, e.g.
+  `cyvcf2-0.32.1-cp312-cp312-linux_x86_64.whl`, not a `manylinux*` filename).
+- `.venv/lib/python3.12/site-packages/cyvcf2.libs/` exists and contains
+  `libnss3-*.so`, `libssl3-*.so`, `libcurl-*.so.4.3.0`. Those are NSS, not
+  OpenSSL; their presence means the source-only pin in `pyproject.toml` was
+  not honored (check the `[tool.uv]` block) or the build deps were missing
+  and uv silently fell back to the wheel.
+
 ### Lift-over engine
 
 GRCh37 inputs (Ancestry, older 23andMe chips) are lifted to GRCh38 using the
