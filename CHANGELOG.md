@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Documentation
+- **Pre-5.5 — annotations runbook prose alignment with locked
+  GWAS Catalog and PGS Catalog stable numbers.** Documentation-
+  only follow-up to PR #47, which locked the real-data stable
+  numbers but per its values-only-substitution constraint left
+  surrounding prose and table headers referencing the old
+  placeholder framing. This PR brings the prose into alignment:
+  replaces the two "Expected ranges (refine after first real-
+  data load)" section headers above the GWAS Catalog and PGS
+  Catalog verification tables with "Locked stable numbers";
+  renames the "Expected range" column header to "Locked value"
+  in both tables; updates three GWAS Catalog "~600-700K"
+  descriptors (active associations / rowset / rows) to "~919K"
+  (aligned with `active_total = 919,446`); updates three PGS
+  Catalog "~11 categories" descriptors to "10 categories"
+  (aligned with `distinct_trait_category = 10`); and updates
+  three PGS Catalog "~5-7K" score-count descriptors to "~5K"
+  (aligned with `active_total = 5,337`). ClinVar, PharmGKB,
+  CPIC, and gnomAD runbook sections are untouched. No code,
+  schema, DDL, or test changes; no schema rebuild required.
+  (PR #XX)
 - **Pre-5.5 — `annotations.md` locks real-data numbers for GWAS
   Catalog `2026_05_16` and PGS Catalog `2026_05_07`.**
   Documentation-only follow-up to PR #46 (gnomAD `af_mid` schema
