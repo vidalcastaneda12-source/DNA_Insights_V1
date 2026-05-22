@@ -107,3 +107,12 @@ dev = [
     "ruff>=0.7.0",
     "mypy>=1.13.0",
 ]
+
+[tool.uv]
+# Force cyvcf2 to build from source so its bundled htslib links against the
+# system libcurl (OpenSSL backend). The prebuilt manylinux wheel ships an
+# old libcurl built against NSS, which ignores CURL_CA_BUNDLE and has no
+# usable CA-trust path on modern Ubuntu (looks for /etc/pki/tls/...).
+# Building from source needs: gcc, make, autoconf, libcurl4-openssl-dev,
+# libssl-dev, libbz2-dev, liblzma-dev, libdeflate-dev, zlib1g-dev.
+no-binary-package = ["cyvcf2"]

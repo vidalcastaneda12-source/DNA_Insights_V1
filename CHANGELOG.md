@@ -7,6 +7,152 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Sub-phase 5.5 — gnomAD loader real-data verification numbers
+  locked + `--coalesce-distance` default bumped.** PR B's
+  full-genome real-data verification (gnomAD v4.1.1, three-way
+  `(user ∪ ClinVar ∪ GWAS)` filter set against `variants_master` +
+  the active ClinVar `2026_05_10` + GWAS Catalog `2026_05_16`
+  releases) completed in 14.6 h wall-clock at
+  `--coalesce-distance 50000` and landed 7,275,664 rows at a
+  user-overlap `match_rate` of 0.988. `docs/runbooks/annotations.md`
+  gains a new `### gnomAD (sub-phase 5.5)` section locking the
+  drift identifiers (`rows_loaded`, `match_rate`,
+  `mean_af_user_overlap`, `filter_set_composition` per-source
+  counts, per-chromosome row counts across chr1-chr22+chrX, AF
+  buckets on the user-variant overlap, per-population AF
+  presence) plus the HTTP/2 retry behavior, the `ami` sparsity
+  note, and a troubleshooting section. The loader's
+  `DEFAULT_COALESCE_DISTANCE_BP` is bumped from 1000 to 50000;
+  the planning-session-guessed 1 kb default triggered 630+
+  HTTP/2 framing reopens on chromosome 1 alone within one hour
+  (projecting > 24 h wall-clock), while 50 kb produced ~2
+  reopens per chromosome across the full run for a roughly
+  300× reduction in reopen events. Two new findings capture the
+  lessons:
+  [`finding-012`](docs/findings/finding-012-coalesce-distance-and-http2-reliability.md)
+  documents the coalesce-distance → HTTP/2-reliability
+  relationship and sets the design default for future
+  remote-tabix loaders (sub-phase 5.6 dbSNP, etc.) at ≥50 kb;
+  [`finding-013`](docs/findings/finding-013-synthetic-fixture-realism.md)
+  documents the "synthetic fixtures built from planning-session
+  assumptions encode the assumptions, not the source" failure
+  mode that produced PR B's two prior verification failures
+  (ClinVar sentinel-position regions and the wrong gnomAD v4
+  INFO key family) and lays out the "verify field names from
+  the real source" step for future external-loader planning.
+  One existing unit-test inline comment (`test_loaders_gnomad.py`'s
+  `test_load_chromosome_recovers_from_htslib_transient_error`)
+  updated from "Default coalesce distance is 1 kb" to "50 kb".
+  No schema changes; no test additions beyond the inline-comment
+  update; no `rm -rf data/` rebuild required. (PR #XX)
+
+### Fixed
+- **Sub-phase 5.5 — gnomAD loader htslib HTTP/2 framing recovery.**
+  Second real-data verification (post-sentinel-fix) still landed
+  only 3,733 rows at a match rate of ~0.0003 with the loader's
+  stderr flooded by `[E::hts_itr_next] Failed to seek to offset
+  NNN: Illegal seek` lines whose offsets were absurdly large
+  (`106658030152031` and similar). The previous fix's diagnosis
+  was wrong: the seek errors are **not** downstream of the
+  sentinel bug. They are an independent failure mode — libcurl
+  `CURLE_HTTP2` (error 16) framing errors during BGZF block reads
+  on the gnomAD GCS bucket. When htslib's BGZF reader fails, the
+  iterator's internal offset state corrupts to garbage memory,
+  and every subsequent `vcf(region)` call silently returns zero
+  records (with a new Illegal-seek line emitted to stderr per
+  call). The connection-level state is unsalvageable; the only
+  recovery is to close+reopen the VCF handle.
+  The fix wires a fd-2 stderr-capture detector around the
+  per-chromosome iteration loop, scans the captured bytes after
+  each region for one of three htslib error tokens (`easy_errno`,
+  `bgzf_read_block`, `hts_itr_next`), and on a hit closes +
+  reopens the VCF and retries the same region. Bounded by
+  `MAX_REMOTE_REGION_ATTEMPTS = 5`; persistent failure on the
+  same region across the budget raises `GnomadRemoteIterationError`
+  so the chromosome fails loudly rather than silently producing
+  a low-row-count run. The loader's existing per-chromosome
+  `seen_keys` set makes record re-yields across reopens
+  idempotent (a record yielded twice cannot land in the DB
+  twice). Captured stderr bytes are forwarded through to the
+  operator's real stderr so structlog and other warnings remain
+  visible. Reality-check against real gnomAD chr22 exomes (800
+  small regions, the corruption pattern that previously killed
+  the loader after ~25 successful regions): 87,691 records
+  collected with 58 reopens and 0 region failures in 171 s,
+  vs 863 records in the broken baseline. Four new regression
+  tests cover the scan token set, mid-region recovery on the
+  first attempt, dedup of records re-yielded after a mid-region
+  corruption + reopen, and the persistent-corruption →
+  `GnomadRemoteIterationError` path. (PR #B verification #2 follow-up)
+- **Sub-phase 5.5 — gnomAD loader real-data verification failure.**
+  First real-data run against gnomAD v4.1.1 per-chromosome VCFs
+  landed 4,066 rows under a broken `source_version_id` with every
+  `af_*` column NULL plus an htslib "Coordinates must be > 0"
+  failure cascade. Two root causes — independent code defects, one
+  cascading into the others:
+  - `_record_to_row` read `AF_joint` / `AC_joint` / `AN_joint` /
+    `AF_joint_<pop>` INFO keys, but the per-chrom v4.1 sites VCFs
+    (both exomes and genomes) carry the plain-suffix variants
+    (`AF`, `AC`, `AN`, `AF_<pop>`); the `_joint` family lives only
+    on a separate combined release. The fix updates the reads and
+    adds a population-suffix mapping that handles gnomAD v4's
+    rename of `oth` → `remaining` (schema column `af_oth` is
+    populated from `AF_remaining`).
+  - `_build_filter_set`'s `pos_grch38 IS NOT NULL` guard on the
+    ClinVar / GWAS subqueries admitted ClinVar's sentinel
+    `pos_grch38 = -1` rows (20,173 of them under the active
+    release), which `_coalesce_positions` then merged into
+    `(-1, -1)` and the per-chromosome loader passed to cyvcf2 as
+    `chr<N>:-1--1`. The bad regions corrupted htslib's read-offset
+    state — the source of the BGZF "Illegal seek" errors with
+    offsets in the 10^14 range and the libcurl error 16 HTTP/2
+    framing failures downstream. The fix tightens the guard to
+    `pos_grch38 > 0` uniformly across the user / ClinVar / GWAS
+    subqueries and the union, defending against any future
+    upstream sentinel-emitting loader.
+  Five new regression tests pin the v4.1 INFO key contract, the
+  legacy `_joint`-keys-must-not-populate behavior, the
+  `AF_remaining` → `af_oth` mapping, the filter-set sentinel
+  rejection, and an end-to-end assertion that the loader never
+  emits a non-positive tabix region even when upstream sources
+  carry `-1` sentinels. The version-pointer supersession pattern
+  is unchanged; no schema or DDL changes. (PR #B follow-up)
+
+### Added
+- **Sub-phase 5.5 — gnomAD filtered allele frequencies loader.** Adds
+  `backend/src/genome/annotate/loaders/gnomad.py`, registering a new
+  per-source loader under `genome annotate refresh --source gnomad`.
+  The loader streams gnomAD v4.1.1's per-chromosome sites-only VCFs
+  (exomes + genomes, GRCh38, GCS-hosted) via cyvcf2 remote tabix
+  queries, filtered to the three-way intersection of distinct
+  `(chrom, pos_grch38)` across `variants_master` ∪ the active
+  ClinVar release ∪ the active GWAS Catalog release. CLAUDE.md
+  "Things never to do" #3 mandates the broader
+  `(user ∪ ClinVar ∪ GWAS ∪ PGS)` intersection, but PGS per-variant
+  weights do not yet exist in the DB at PR-B time (they land in
+  Phase 6); the deferred extension to PGS coverage is captured in
+  new [`docs/findings/finding-011-gnomad-three-way-intersection.md`](docs/findings/finding-011-gnomad-three-way-intersection.md)
+  and as a new ROADMAP entry "5.5b — gnomAD PGS extension" if not
+  already present. Tabix ranges are formed by coalescing adjacent
+  filter positions within `--coalesce-distance` (default 1000 bp).
+  Per-chromosome content lands under a freshly-allocated new
+  `source_version_id`; the `annotation_sources` pointer flips to
+  the new id only when every supported chromosome (1–22 + X)
+  completes successfully. A `--chromosomes LIST` restricted run
+  defers the flip; `--resume` continues an interrupted run.
+  Bulk-load uses PyArrow Table registration + `INSERT ... SELECT`
+  at `DEFAULT_BATCH_SIZE = 50,000` rows per chunk. New CLI flags
+  (gnomad-specific; rejected for other sources): `--chromosomes`,
+  `--resume`, `--coalesce-distance`, `--version`. Three micro-
+  touchups carried in the same PR: PR #47's CHANGELOG `(PR #XX)`
+  placeholder filled to `(PR #47)`; the runbook's GWAS Catalog
+  chunk-count descriptor updated from "2-3 chunks" to "~4 chunks"
+  (919,446 / 250,000 ≈ 3.68); the runbook's EFO traits CSV row
+  descriptor updated from "~670 rows" to "~696 rows" (matching
+  PGS Catalog 2026_05_07's `distinct_trait_efo=696`). No schema
+  changes; existing DuckDB files remain valid. (PR #B)
+
 ### Documentation
 - **Pre-5.5 — annotations runbook prose alignment with locked
   GWAS Catalog and PGS Catalog stable numbers.** Documentation-
@@ -56,7 +202,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   PharmGKB, CPIC, and gnomAD runbook sections are untouched —
   those numbers were already locked in prior PRs. No code,
   schema, DDL, or test changes; no schema rebuild required.
-  (PR #XX)
+  (PR #47)
 
 ### Schema
 - Added `gnomad_frequencies.af_mid` (`DOUBLE`, nullable) so the upcoming
@@ -823,6 +969,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   No DDL changes. (PR #33)
 
 ### Fixed
+- **Pre-5.5 — force cyvcf2 to build from source so remote tabix works.**
+  The prebuilt manylinux wheel of `cyvcf2` (0.32.1 and 0.33.0 both) ships a
+  libcurl 7.29.0 statically built against **NSS**, not OpenSSL. NSS-libcurl
+  ignores `CURL_CA_BUNDLE` and expects an NSS database under `/etc/pki/nssdb`
+  (CentOS layout), which doesn't exist on Ubuntu — opening the gnomAD GCS
+  URL through `cyvcf2.VCF(...)` therefore failed at module-import time on
+  the dev machine with `Libcurl reported error 77 (Problem with the SSL CA
+  cert (path? access rights?))`. `pyproject.toml` now carries a
+  `[tool.uv] no-binary-package = ["cyvcf2"]` pin so `uv sync` always
+  rebuilds cyvcf2 from sdist; the bundled htslib then links against the
+  system `libcurl4-openssl-dev` (OpenSSL 3.x backend) and remote tabix
+  reads work with zero env-var setup. README's Prerequisites section
+  documents the required apt packages and a no-env-var smoke test against
+  gnomAD chr22. No loader source-code changes; no schema changes.
 - `platform_coverage_v.in_imputed`, `call_comparison_v.gt_imputed`, and
   `call_comparison_v.imputed_r2` filter on `'beagle_imputed'` instead of
   `'topmed_imputed'`. The three filter expressions in
