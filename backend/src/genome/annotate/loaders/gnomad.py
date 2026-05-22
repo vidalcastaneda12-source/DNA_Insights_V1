@@ -163,13 +163,19 @@ across the 20-column schema) and large enough to amortize the
 per-INSERT overhead across many millions of variants.
 """
 
-DEFAULT_COALESCE_DISTANCE_BP: Final[int] = 1000
+DEFAULT_COALESCE_DISTANCE_BP: Final[int] = 50000
 """Default tabix-range coalescing gap in base pairs.
 
-Adjacent filter positions within 1 kb merge into one tabix range so
+Adjacent filter positions within 50 kb merge into one tabix range so
 the remote VCF is queried in larger contiguous spans rather than a
 flood of single-position queries. Tunable per refresh via the CLI
 ``--coalesce-distance N`` flag.
+
+50000 was selected after real-data verification at 1000 bp produced
+630+ HTTP/2 framing reopens on chromosome 1 alone within one hour;
+50 kb dropped that to ~2 reopens per chromosome across the full
+genome and completed the full run in 14.6 h. See
+``docs/findings/finding-012-coalesce-distance-and-http2-reliability.md``.
 """
 
 SUPPORTED_CHROMS: Final[tuple[str, ...]] = (*(str(n) for n in range(1, 23)), "X")

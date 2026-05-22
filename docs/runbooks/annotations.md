@@ -1258,6 +1258,207 @@ path.
   source_db = 'pgs_catalog' AND source_version_id = <the
   affected id>` before retrying.
 
+### gnomAD (sub-phase 5.5)
+
+**What's loaded.** gnomAD v4.1.1 per-chromosome sites-only VCFs
+(exomes + genomes, GRCh38, GCS-hosted), filtered to the three-way
+union of distinct `(chrom, pos_grch38)` across `variants_master` ∪
+the active ClinVar release ∪ the active GWAS Catalog release.
+Autosomes 1-22 + X. Y and MT are intentionally skipped — gnomAD v4
+does not ship high-confidence allele frequencies for those
+chromosomes in the public per-chromosome VCFs. The loader streams
+the remote VCFs via cyvcf2 remote tabix queries and chunk-loads the
+matching rows into `gnomad_frequencies` via PyArrow Table
+registration + `INSERT ... SELECT` at `DEFAULT_BATCH_SIZE = 50,000`
+rows per chunk. Supersession follows the version-pointer pattern
+(finding-010): per-chromosome content lands under a freshly-
+allocated `source_version_id` and the `annotation_sources` pointer
+flips to the new id only when every supported chromosome completes
+successfully. See `backend/src/genome/annotate/loaders/gnomad.py`
+for the full per-source narrative; the loader's docstring carries
+the URL constants, the cyvcf2 streaming contract, the per-record
+projection, the htslib HTTP/2 retry mechanism, and the resume /
+partial-run semantics.
+
+**Filter shape.** CLAUDE.md "Things never to do" #3 mandates the
+broader `(user ∪ ClinVar ∪ GWAS ∪ PGS)` intersection, but PGS
+per-variant weights do not yet exist in the DB at PR-B time (they
+land in Phase 6 as `pgs_score_weights`). Sub-phase 5.5b will
+extend the active gnomAD source-version's coverage to PGS-component
+variants without a version bump. See
+[finding-011](../findings/finding-011-gnomad-three-way-intersection.md).
+
+**HTTP/2 retry behavior.** Remote-tabix iteration against gnomAD's
+GCS bucket trips libcurl `CURLE_HTTP2` (error 16) framing errors
+during BGZF block reads on roughly one in 200,000 range requests at
+default settings. The corruption silently zeros the cyvcf2 iterator
+and corrupts htslib's read-offset state; the only recovery is to
+close + reopen the VCF handle. The loader detects the corruption by
+capturing fd-2 stderr writes, scans for htslib error tokens after
+each region, and on a hit closes + reopens the VCF and retries.
+Bounded by `MAX_REMOTE_REGION_ATTEMPTS = 5` with per-chromosome
+`seen_keys` dedup making record re-yields idempotent. At the locked
+`--coalesce-distance 50000` default, ~2 reopens per chromosome is
+typical (4 on chromosome 1, ~0 on chr2-X). See
+[finding-012](../findings/finding-012-coalesce-distance-and-http2-reliability.md)
+for the coalesce-distance choice rationale and the 1000 bp →
+50,000 bp default bump that took the loader from > 24 h projected
+wall-clock to 14.6 h real wall-clock.
+
+**Real-data verification commands.**
+
+```
+genome config set external_calls_enabled true
+genome annotate refresh --source gnomad
+```
+
+Capture from the `gnomad.refresh.complete` structlog line:
+`rows_loaded`, `filter_set_composition`,
+`distinct_variants_per_chrom`, `match_rate`,
+`af_buckets_user_overlap`, `mean_af_user_overlap`,
+`pop_af_presence`, plus `chromosomes_succeeded` /
+`chromosomes_failed` and wall-clock. Locked stable numbers
+(gnomAD v4.1.1, locked 2026-05-22):
+
+| Metric | Locked value |
+|---|---|
+| `rows_loaded` | 7,275,664 |
+| `match_rate` (vs `variants_master`) | 0.988 |
+| `mean_af_user_overlap` | 0.1766 |
+| First-load wall-clock | ~14.6 h (`--coalesce-distance 50000`) |
+
+Filter set composition (`(user ∪ clinvar ∪ gwas)`, distinct
+`(chrom, pos_grch38)`):
+
+| Component | Distinct positions |
+|---|---|
+| `user` (`variants_master`) | 936,912 |
+| `clinvar` | 3,910,450 |
+| `gwas` | 409,213 |
+| `union_total` | 5,129,731 |
+
+AF buckets on the user-variant overlap (1,272,116 variants in
+`gnomad_frequencies` that share a `(chrom, pos_grch38)` with
+`variants_master`):
+
+| Bucket | Count |
+|---|---|
+| `lt_0.001` | 399,321 |
+| `0.001_to_0.01` | 64,175 |
+| `0.01_to_0.05` | 192,134 |
+| `0.05_to_0.5` | 447,860 |
+| `gt_0.5` | 168,626 |
+
+Per-population AF presence (rows where `af_<pop> IS NOT NULL`):
+
+| Population | Rows with non-null AF |
+|---|---|
+| `afr` | 7,209,296 |
+| `ami` | 1,876,597 |
+| `amr` | 7,194,799 |
+| `asj` | 7,194,554 |
+| `eas` | 7,205,605 |
+| `fin` | 7,230,706 |
+| `mid` | 7,188,509 |
+| `nfe` | 7,257,386 |
+| `sas` | 7,199,524 |
+| `oth` | 7,234,074 |
+
+The `ami` (Amish) population is sparser than the other nine by
+design: gnomAD v4's Amish subset is small (the public exomes VCF
+does not carry `AF_ami` at most sites; `ami` is populated mostly
+from the genomes VCF). The expected per-pop count is ~1.9 M vs
+~7.2 M for the other populations; a future release that drifts
+`ami` outside the 1.5 M-2.3 M envelope is the drift-detection
+signal to investigate before re-locking.
+
+Distinct variants per chromosome (also the per-chrom row count by
+construction — one row per `(chrom, pos, ref, alt)`):
+
+| Chromosome | Distinct variants |
+|---|---|
+| `chr1` | 649,575 |
+| `chr2` | 588,464 |
+| `chr3` | 412,190 |
+| `chr4` | 309,152 |
+| `chr5` | 356,249 |
+| `chr6` | 383,622 |
+| `chr7` | 364,034 |
+| `chr8` | 290,439 |
+| `chr9` | 334,343 |
+| `chr10` | 291,269 |
+| `chr11` | 415,439 |
+| `chr12` | 336,981 |
+| `chr13` | 148,493 |
+| `chr14` | 230,197 |
+| `chr15` | 246,876 |
+| `chr16` | 362,352 |
+| `chr17` | 373,695 |
+| `chr18` | 138,574 |
+| `chr19` | 414,036 |
+| `chr20` | 177,301 |
+| `chr21` | 89,053 |
+| `chr22` | 154,080 |
+| `chrX` | 209,250 |
+
+A drift in any of the locked counts on a re-run against the same
+gnomAD release is a regression signal; verify against this table
+before re-locking. The match-rate at 0.988 (~99% of user variants
+have a gnomAD AF row) is the headline value-add — a `variants_master`
+position without a gnomAD AF after a clean refresh is almost
+always a chip-only ancestry-informative marker that gnomAD has not
+yet observed.
+
+**Troubleshooting.**
+
+* **`ExternalCallsDisabledError`** —
+  `user_preferences.external_calls_enabled` is `false`. Run
+  `genome config set external_calls_enabled true`. The blocked
+  attempt is still recorded in `audit_log` for review; the
+  pre-flight HEAD is the loader's first audited call, so a
+  disabled switch surfaces before any cyvcf2 remote-VCF open is
+  attempted.
+* **`GnomadLibcurlMissingError`** — cyvcf2's bundled htslib was
+  built without libcurl support, or the gnomAD GCS bucket is
+  unreachable from this host. Rebuild htslib (and cyvcf2 against
+  it) with libcurl enabled; the README's "Prerequisites" section
+  carries the exact build commands. The pre-flight probe opens a
+  known-tiny tabix range against the chr22 exomes VCF, so a
+  failure here points at the toolchain rather than at upstream
+  data.
+* **`GnomadRemoteIterationError`** — the same tabix region tripped
+  the htslib HTTP/2 framing detector
+  `MAX_REMOTE_REGION_ATTEMPTS = 5` times in a row. Something more
+  durable than a transient HTTP/2 blip is at play (URL rotation,
+  network outage, server-side range rejection). Inspect the
+  loader's structlog `gnomad.chrom.htslib_recover` events for the
+  failing region, then verify the URL with `curl -I -L
+  https://storage.googleapis.com/gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr<N>.vcf.bgz`.
+* **`match_rate` drops below ~0.95** — either upstream gnomAD has
+  retired positions the prior release carried (uncommon but
+  documented at gnomAD release time) or the filter set is
+  contaminated with sentinel rows. The PR-B fix tightened the
+  `pos_grch38 > 0` guard on the user / ClinVar / GWAS subqueries
+  uniformly to defend against any future sentinel-emitting
+  upstream source (see [finding-013](../findings/finding-013-synthetic-fixture-realism.md));
+  a drop on a new run warrants an inspection of `_build_filter_set`'s
+  composition counts in the structlog summary first.
+* **Resume after a partial-failure run.** Re-invoke with
+  `genome annotate refresh --source gnomad --resume`. The loader
+  reads the in-flight `source_version_id` (an
+  `annotation_source_versions` row exists but the
+  `annotation_sources` pointer doesn't yet name it), skips the
+  chromosomes already populated under that id, and runs the
+  remainder. The pointer flips when the full
+  `SUPPORTED_CHROMS` set is covered.
+* **Recovery after a fully-failed first run.** The
+  `source_version_id` row stays in `annotation_source_versions`
+  with `record_count` reflecting whatever landed. A subsequent
+  `--resume` continues against the same id;
+  `--force` allocates a fresh id and starts over (use this if
+  the in-flight row's coverage is so partial that resume's
+  per-chromosome overhead outweighs starting fresh).
+
 ## Audit log review
 
 The full audit trail for a refresh is in `app.db.audit_log`. Group by

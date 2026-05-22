@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Sub-phase 5.5 — gnomAD loader real-data verification numbers
+  locked + `--coalesce-distance` default bumped.** PR B's
+  full-genome real-data verification (gnomAD v4.1.1, three-way
+  `(user ∪ ClinVar ∪ GWAS)` filter set against `variants_master` +
+  the active ClinVar `2026_05_10` + GWAS Catalog `2026_05_16`
+  releases) completed in 14.6 h wall-clock at
+  `--coalesce-distance 50000` and landed 7,275,664 rows at a
+  user-overlap `match_rate` of 0.988. `docs/runbooks/annotations.md`
+  gains a new `### gnomAD (sub-phase 5.5)` section locking the
+  drift identifiers (`rows_loaded`, `match_rate`,
+  `mean_af_user_overlap`, `filter_set_composition` per-source
+  counts, per-chromosome row counts across chr1-chr22+chrX, AF
+  buckets on the user-variant overlap, per-population AF
+  presence) plus the HTTP/2 retry behavior, the `ami` sparsity
+  note, and a troubleshooting section. The loader's
+  `DEFAULT_COALESCE_DISTANCE_BP` is bumped from 1000 to 50000;
+  the planning-session-guessed 1 kb default triggered 630+
+  HTTP/2 framing reopens on chromosome 1 alone within one hour
+  (projecting > 24 h wall-clock), while 50 kb produced ~2
+  reopens per chromosome across the full run for a roughly
+  300× reduction in reopen events. Two new findings capture the
+  lessons:
+  [`finding-012`](docs/findings/finding-012-coalesce-distance-and-http2-reliability.md)
+  documents the coalesce-distance → HTTP/2-reliability
+  relationship and sets the design default for future
+  remote-tabix loaders (sub-phase 5.6 dbSNP, etc.) at ≥50 kb;
+  [`finding-013`](docs/findings/finding-013-synthetic-fixture-realism.md)
+  documents the "synthetic fixtures built from planning-session
+  assumptions encode the assumptions, not the source" failure
+  mode that produced PR B's two prior verification failures
+  (ClinVar sentinel-position regions and the wrong gnomAD v4
+  INFO key family) and lays out the "verify field names from
+  the real source" step for future external-loader planning.
+  One existing unit-test inline comment (`test_loaders_gnomad.py`'s
+  `test_load_chromosome_recovers_from_htslib_transient_error`)
+  updated from "Default coalesce distance is 1 kb" to "50 kb".
+  No schema changes; no test additions beyond the inline-comment
+  update; no `rm -rf data/` rebuild required. (PR #XX)
+
 ### Fixed
 - **Sub-phase 5.5 — gnomAD loader htslib HTTP/2 framing recovery.**
   Second real-data verification (post-sentinel-fix) still landed

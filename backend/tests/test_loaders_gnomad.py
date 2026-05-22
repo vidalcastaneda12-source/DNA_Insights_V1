@@ -1740,7 +1740,7 @@ def test_load_chromosome_recovers_from_htslib_transient_error(
         exomes_url: records,
         genomes_url: [],
     }
-    # Default coalesce distance is 1 kb, so positions 1000 and 2000
+    # Default coalesce distance is 50 kb, so positions 1000 and 2000
     # merge into a single tabix range "chr22:1000-2000".
     fail_region = "chr22:1000-2000"
     factory = _ReopenTrackingFactory(
