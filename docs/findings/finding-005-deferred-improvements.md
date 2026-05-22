@@ -73,6 +73,19 @@ manageable. This document tracks them so they aren't forgotten.
    be resolved before sub-phase 5.5 (gnomAD filtered) begins, since 5.5
    will exercise the same path at a larger row count.
 
+8. **Generalize the gwas_catalog hash-based fallback short-circuit.**
+   `finding-014` documents an upstream label drift in EBI's GWAS Catalog
+   stats endpoint that produced two different `version` labels
+   (`2026_05_16` → `2026_04_27`) for byte-identical release content. The
+   gwas_catalog loader gained a post-download hash-match fallback that
+   short-circuits when the file SHA-256 matches the active row's recorded
+   hash but the resolved label differs. The fallback is gwas_catalog-only
+   for now; if a second Phase-5/6 loader exhibits the same drift,
+   extract the comparison into a shared
+   `maybe_skip_on_hash_match(source_db, version, hash, force)` helper in
+   `genome.annotate.supersession` and adopt it across the affected loaders.
+   *Recommended fix point:* the second time the pattern shows up.
+
 ## Implication
 
 Each item is a known limitation with an identified fix point. They are not
