@@ -957,20 +957,38 @@ def test_refresh_supersedes_prior_rows_same_version_force(
 
 
 def test_refresh_supersedes_prior_rows_on_new_version(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two refreshes under different version labels.
+    """Two refreshes under different version labels AND different bytes.
+
+    A genuine new release ships both a new label and a new ZIP body.
+    The second refresh substitutes a one-byte-tweaked copy of the base
+    fixture so the SHA-256 differs from the first refresh; that defeats
+    the hash-based fallback (finding-014) and forces the loader through
+    the full supersession path.
 
     Asserts: 2 source_version rows, the ``annotation_sources`` pointer
     moved from v1 to v2, and both row sets coexist in the table under
     their respective ``source_version_id`` values.
     """
     init_databases()
-    _patch_download_to_cache(monkeypatch, _FIXTURE_PATH)
 
     _patch_resolve_version(monkeypatch, "2026_05_10")
+    _patch_download_to_cache(monkeypatch, _FIXTURE_PATH)
     first = gwas_loader.refresh(force=False)
+
+    # Substitute a one-byte-different fixture for the second refresh.
+    # The change is in a column the loader ignores (FIRST AUTHOR), so
+    # row count and parser stats are unchanged but the ZIP hash is
+    # different.
+    second_fixture = tmp_path / "gwas_catalog_sample_alt.tsv"
+    second_fixture.write_text(
+        _FIXTURE_PATH.read_text().replace("Smith J", "Smith K", 1),
+        encoding="utf-8",
+    )
     _patch_resolve_version(monkeypatch, "2026_05_17")
+    _patch_download_to_cache(monkeypatch, second_fixture, tmp_path=tmp_path)
     second = gwas_loader.refresh(force=False)
 
     assert first.version == "2026_05_10"
@@ -1009,18 +1027,44 @@ def test_refresh_supersedes_prior_rows_on_new_version(
 def test_refresh_idempotent_short_circuit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Same version on second call (no force) → was_already_current=True."""
+    """Same version on second call (no force) → was_already_current=True.
+
+    Explicit assertions on the short-circuit's user-visible contract:
+    the ``gwas_catalog.skip_already_current`` event fires, no download
+    is re-attempted, no new ``source_version_id`` is allocated, no
+    bulk-insert chunk runs, and no version-pointer flip is emitted.
+    """
+    from structlog.testing import capture_logs  # noqa: PLC0415 — test-local
+
     init_databases()
-    _patch_download_to_cache(monkeypatch, _FIXTURE_PATH)
-    _patch_resolve_version(monkeypatch, "2026_05_12")
+    download_counter = _patch_download_to_cache(monkeypatch, _FIXTURE_PATH)
+    resolve_counter = _patch_resolve_version(monkeypatch, "2026_05_12")
 
     first = gwas_loader.refresh(force=False)
-    second = gwas_loader.refresh(force=False)
+    with capture_logs() as captured:
+        second = gwas_loader.refresh(force=False)
 
     assert first.was_already_current is False
     assert second.was_already_current is True
     assert second.source_version_id == first.source_version_id
     assert second.record_count == _EXPECTED_EMITTED
+
+    # User-visible events on the short-circuit path: the skip event
+    # fires; the downstream events that would indicate a full reload
+    # do NOT fire.
+    events = [c["event"] for c in captured]
+    assert "gwas_catalog.skip_already_current" in events
+    assert "gwas_catalog.download.audited" not in events
+    assert "annotate.source_version.inserted" not in events
+    assert "gwas_catalog.bulk_insert.chunk" not in events
+    assert "supersession_version_flip" not in events
+
+    # Stub counters: the first refresh downloaded once; the second
+    # short-circuited before the download. Version resolution still
+    # runs on the second call because the label-based short-circuit
+    # is keyed on the resolved label.
+    assert download_counter["calls"] == 1
+    assert resolve_counter["calls"] == 2
 
     with duckdb_connection() as conn:
         active = conn.execute(
@@ -1035,6 +1079,81 @@ def test_refresh_idempotent_short_circuit(
     assert active[0] == _EXPECTED_EMITTED
     assert n_versions is not None
     assert n_versions[0] == 1
+
+
+def test_skip_when_content_unchanged_despite_label_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hash-based fallback fires when the upstream label drifts but content is byte-identical.
+
+    Regression cover for finding-014: EBI's GWAS Catalog stats endpoint
+    has been observed to ship a different ``date`` field for the same
+    release ZIP (label ``2026_05_16`` → ``2026_04_27`` on the same
+    4717ff06… bytes). The loader's hash-based fallback short-circuit
+    treats the refresh as a no-op when the downloaded ZIP's SHA-256
+    matches the active row's recorded hash. No new ``source_version_id``,
+    no bulk_insert, no version-pointer flip — the download still
+    happens because the fallback is post-download by necessity (the
+    hash isn't available until the bytes are local).
+    """
+    from structlog.testing import capture_logs  # noqa: PLC0415 — test-local
+
+    init_databases()
+    # One ZIP stub means one byte sequence and so one SHA-256 across
+    # both refresh calls — the precise condition the fallback fires on.
+    download_counter = _patch_download_to_cache(monkeypatch, _FIXTURE_PATH)
+
+    _patch_resolve_version(monkeypatch, "2026_05_16")
+    first = gwas_loader.refresh(force=False)
+    assert first.was_already_current is False
+
+    _patch_resolve_version(monkeypatch, "2026_04_27")
+    downloads_before = download_counter["calls"]
+    with capture_logs() as captured:
+        second = gwas_loader.refresh(force=False)
+
+    # Returned shape: refresh resolved against the ACTIVE row's
+    # version label, not the drifted one. ``was_already_current=True``
+    # signals "no change landed."
+    assert second.was_already_current is True
+    assert second.source_version_id == first.source_version_id
+    assert second.version == "2026_05_16"
+    assert second.record_count == _EXPECTED_EMITTED
+
+    # Events: the new fallback fires; neither the label-based
+    # short-circuit (versions differ) nor any of the downstream
+    # full-reload events runs.
+    events = [c["event"] for c in captured]
+    assert "gwas_catalog.skip_content_unchanged" in events
+    assert "gwas_catalog.skip_already_current" not in events
+    assert "annotate.source_version.inserted" not in events
+    assert "gwas_catalog.bulk_insert.chunk" not in events
+    assert "supersession_version_flip" not in events
+
+    skip = next(c for c in captured if c["event"] == "gwas_catalog.skip_content_unchanged")
+    assert skip["resolved_version"] == "2026_04_27"
+    assert skip["active_source_version_id"] == first.source_version_id
+    assert skip["active_version"] == "2026_05_16"
+    assert skip["new_source_file_hash"] == skip["active_source_file_hash"]
+    assert "label drifted" in skip["reason"].lower()
+
+    # The fallback is post-download by necessity: the second refresh
+    # had to fetch the ZIP to compute the SHA-256.
+    assert download_counter["calls"] == downloads_before + 1
+
+    # DB state: still only the first version row, still pointing at it.
+    with duckdb_connection() as conn:
+        n_versions = conn.execute(
+            "SELECT COUNT(*) FROM annotation_source_versions WHERE source_db = 'gwas_catalog'",
+        ).fetchone()
+        current_pointer = conn.execute(
+            "SELECT current_source_version_id FROM annotation_sources "
+            "WHERE source_db = 'gwas_catalog'",
+        ).fetchone()
+    assert n_versions is not None
+    assert n_versions[0] == 1
+    assert current_pointer is not None
+    assert int(current_pointer[0]) == first.source_version_id
 
 
 def test_refresh_transaction_rolls_back_on_bulk_insert_failure(

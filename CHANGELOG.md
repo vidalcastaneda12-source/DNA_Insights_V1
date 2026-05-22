@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **gwas_catalog: hash-based post-download short-circuit for upstream
+  label drift.** EBI's GWAS Catalog stats endpoint was observed to
+  return a different `date` field (`2026_05_16` → `2026_04_27`) for a
+  byte-identical release ZIP (same `4717ff06…` SHA-256, same 919,446
+  rows, same drift identifiers) between the 2026-05-19 and 2026-05-22
+  refreshes, which made label-only identity insufficient. The loader
+  now runs a second short-circuit after download: when `force=False`,
+  the resolved upstream label differs from the active version's
+  label, and the downloaded ZIP's SHA-256 matches the active version's
+  recorded hash, it emits `gwas_catalog.skip_content_unchanged` and
+  returns `was_already_current=True` against the active row — no new
+  `source_version_id`, no bulk_insert, no version-pointer flip. The
+  existing label-based pre-download short-circuit is unchanged; the
+  hash fallback is gwas_catalog-only for now (generalization tracked
+  in `finding-005-deferred-improvements.md`). `--force` continues to
+  bypass both short-circuits. See
+  [`finding-014`](docs/findings/finding-014-gwas-catalog-upstream-label-drift.md)
+  for the full mechanism and the operator action (none required — the
+  v4/v11 audit trail honestly records the drift event). (PR #XX)
+
 - **Sub-phase 5.5 — gnomAD loader real-data verification numbers
   locked + `--coalesce-distance` default bumped.** PR B's
   full-genome real-data verification (gnomAD v4.1.1, three-way

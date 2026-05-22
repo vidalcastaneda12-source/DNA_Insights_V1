@@ -1148,10 +1148,26 @@ def refresh(
        ``latest/`` directory via the audited
        :func:`genome.annotate.downloads.download_to_cache`
        (skip-if-exists by default; ``force=True`` re-downloads).
-    3a. If ``skip_if_same_version`` is ``True`` and the downloaded
+    3a. **Hash-based fallback short-circuit (finding-014).** If
+        ``force`` is ``False`` and the downloaded ZIP's SHA-256 matches
+        the currently-active version row's recorded hash but the
+        resolved upstream label differs, fire
+        ``gwas_catalog.skip_content_unchanged`` and return
+        ``was_already_current=True`` against the active row. The EBI
+        stats endpoint has been observed to ship a different ``date``
+        field for byte-identical content (a backwards drift from
+        ``2026_05_16`` to ``2026_04_27`` on the same 4717ff06… ZIP),
+        which made label-only identity unstable for this source. Hash
+        is the stable identity; the fallback prevents an upstream
+        label change from minting a no-op supersession. ``--force``
+        bypasses this fallback the same way it bypasses the Step-2
+        label-based short-circuit.
+    3b. If ``skip_if_same_version`` is ``True`` and the downloaded
         ZIP's (version, sha256) match the currently-active row,
         short-circuit via :func:`maybe_skip_same_version` (finding-009
-        #14). Off by default.
+        #14). Off by default. Distinct from 3a because 3a fires on
+        hash-match-with-label-drift; 3b fires on both-match and is
+        gated on the opt-in flag.
     4. Inside one DuckDB transaction: upsert
        ``annotation_source_versions``, open the ZIP and stream-parse
        the contained TSV, chunk-insert at :data:`_CHUNK_SIZE` rows per
@@ -1207,7 +1223,42 @@ def refresh(
         size_bytes=download_result.size_bytes,
     )
 
-    # 3a. --skip-if-same-version short-circuit (finding-009 #14). Off by
+    # 3a. Hash-based fallback short-circuit (finding-014). EBI's stats
+    # endpoint has been observed to return a different `date` field for
+    # byte-identical release ZIPs (label `2026_05_16` → `2026_04_27` on
+    # the same 4717ff06... hash). When force=False and the downloaded
+    # ZIP's SHA-256 matches the active version's recorded hash, treat
+    # the refresh as a no-op even though the resolved label differs.
+    # `--force` bypasses this fallback so the operator retains an
+    # escape hatch when EBI ships genuinely new content under a
+    # repeated hash (vanishingly unlikely, but the flag is still
+    # respected).
+    if not force:
+        with duckdb_connection() as conn:
+            current_pointer = get_current_version(conn, SOURCE_DB)
+        if (
+            current_pointer is not None
+            and current_pointer.source_file_hash == download_result.sha256
+            and current_pointer.version != version
+        ):
+            log.info(
+                "gwas_catalog.skip_content_unchanged",
+                resolved_version=version,
+                active_source_version_id=current_pointer.source_version_id,
+                active_version=current_pointer.version,
+                active_source_file_hash=current_pointer.source_file_hash,
+                new_source_file_hash=download_result.sha256,
+                reason="upstream label drifted, content identical",
+            )
+            return RefreshResult(
+                source_db=SOURCE_DB,
+                source_version_id=current_pointer.source_version_id,
+                version=current_pointer.version,
+                record_count=current_pointer.record_count or 0,
+                was_already_current=True,
+            )
+
+    # 3b. --skip-if-same-version short-circuit (finding-009 #14). Off by
     # default; when on, an active matching (version, hash) row makes the
     # refresh a no-op even under --force.
     skip = maybe_skip_same_version(
