@@ -238,38 +238,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changes; existing DuckDB files remain valid. (PR #49)
 
 ### Documentation
-- **finding-015 — gnomad v10 audit-trail anomaly investigation
-  (orphan version rows).** Investigation-only docs follow-up
-  to finding-014 #1: what produced gnomad
-  `source_version_id = 10` (`record_count = 154,080`) during
-  the 2026-05-22 post-PR-#49 sweep, and is it a problem.
-  Conclusion: v10 — and v6 / v7 / v8, which prior sessions had
-  assumed were stable historical versions — are all orphan
-  `annotation_source_versions` rows from chrom-grain partial-run
-  attempts. Only v9 holds any `gnomad_frequencies` content
-  (7,275,664 rows, contiguous `freq_id 1..7,275,664`, full
-  23-chrom coverage), and the active pointer is correctly on
-  v9 — readers join through `annotation_sources` and never see
-  the orphan ids. The gnomad loader (unlike its five Phase-5
-  siblings — `clinvar`, `pharmgkb`, `cpic`, `gwas_catalog`,
-  `pgs_catalog`) had no `_cleanup_orphan_version_row` helper at
-  the time, so the version row allocated at loop-start outlived
-  any subsequent per-chrom failure or zero-row partial run.
-  Audit-log evidence pinpoints v10 to two
-  `gnomad_remote_vcf_open` HEAD pairs on 2026-05-22 (chr22
-  exomes + chr22 genomes), matching a `--chromosomes 22`
-  partial-run shape (full-genome would be 46 HEAD pairs).
-  Existing tests
-  (`test_partial_chromosomes_filter_does_not_flip`,
-  `test_partial_failure_leaves_pointer_unflipped`) already
-  pinned the correct pointer behavior; v10 matches both. The
-  finding documents three remediation options (A: doc-only;
-  B: loader hardening mirroring the five siblings; C: cleanup
-  SQL + Option B). Option B landed as PR #53; the cleanup SQL
-  was deferred. No code, schema, DDL, or CHANGELOG changes in
-  this PR. See
-  [`finding-015`](docs/findings/finding-015-gnomad-v10-audit-trail-anomaly.md).
-  (PR #52)
 - **Pre-5.5 — annotations runbook prose alignment with locked
   GWAS Catalog and PGS Catalog stable numbers.** Documentation-
   only follow-up to PR #47, which locked the real-data stable
