@@ -68,6 +68,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   update; no `rm -rf data/` rebuild required. (PR #XX)
 
 ### Fixed
+- **gnomad: cleanup orphan `annotation_source_versions` rows on
+  partial / failed runs.** The gnomad loader allocates a fresh
+  `source_version_id` before the per-chromosome loop runs; previously,
+  a failure before the first per-chrom commit (or a `--chromosomes`
+  partial run whose requested chrom yielded zero rows) left the
+  version row behind with nothing referencing it. Five sibling
+  Phase-5 loaders (clinvar, gwas_catalog, pgs_catalog, pharmgkb, cpic)
+  already ship a `_cleanup_orphan_version_row` helper for the same
+  case; gnomad now adopts the same pattern, fired from the post-loop
+  guard when (a) the version row was freshly allocated this invocation,
+  (b) zero `gnomad_frequencies` rows landed under it, and (c) the
+  pointer did not flip. `--resume` reuses pre-existing in-flight rows
+  and is exempt from cleanup so the resume contract is preserved.
+  Existing v6/v7/v8/v10 rows in `data/genome.duckdb` are untouched —
+  the change affects future runs only. See
+  [`finding-015`](docs/findings/finding-015-gnomad-v10-audit-trail-anomaly.md)
+  for the investigation and `finding-015` #11 for the Option B contract
+  this PR implements. (PR #XX)
+
 - **Sub-phase 5.5 — gnomAD loader htslib HTTP/2 framing recovery.**
   Second real-data verification (post-sentinel-fix) still landed
   only 3,733 rows at a match rate of ~0.0003 with the loader's

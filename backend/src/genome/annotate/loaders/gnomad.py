@@ -1113,6 +1113,50 @@ def _populated_chroms(conn: DuckDBPyConnection, source_version_id: int) -> set[s
 
 
 # ---------------------------------------------------------------------------
+# Rollback / cleanup helper.
+# ---------------------------------------------------------------------------
+
+
+def _cleanup_orphan_version_row(
+    conn: DuckDBPyConnection,
+    source_version_id: int,
+) -> None:
+    """Best-effort delete of an orphan ``annotation_source_versions`` row.
+
+    Same shape as the PharmGKB / CPIC / ClinVar / GWAS Catalog / PGS
+    Catalog helpers — called when a freshly-allocated gnomad version
+    row has nothing referencing it after the per-chromosome load loop
+    exits (a chrom-grain partial run that landed zero rows, or a
+    failure path that never reached a successful per-chrom commit).
+    The row was inserted by :func:`insert_source_version` in its own
+    (already-committed) transaction, so the loop's per-chromosome
+    ``conn.rollback()`` cannot undo it; finding-015 documents the
+    v6/v7/v8/v10 audit-trail anomaly this helper prevents going
+    forward.
+
+    The DELETE is FK-safe because the trigger condition is "zero
+    ``gnomad_frequencies`` rows under this ``source_version_id``" —
+    a freshly-allocated id whose per-chrom loop never reached a
+    successful commit. The caller also guards on ``not
+    pointer_flipped`` so the active version is never removed.
+    Failures during cleanup are swallowed and logged; the caller is
+    already raising or returning, and the orphan can be cleaned up
+    manually in the worst case.
+    """
+    try:
+        conn.execute(
+            "DELETE FROM annotation_source_versions WHERE source_version_id = ?",
+            [source_version_id],
+        )
+    except Exception:  # noqa: BLE001 — best-effort cleanup; caller has already raised/returned
+        logger.warning(
+            "gnomad.cleanup.orphan_version_row_delete_failed",
+            source_version_id=source_version_id,
+            exc_info=True,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Post-load summary helpers.
 # ---------------------------------------------------------------------------
 
@@ -1348,6 +1392,7 @@ def load(  # noqa: C901, PLR0912, PLR0913, PLR0915 — single entry point; the p
 
     # 3. Source-version id (fresh or in-flight resume).
     source_version_id: int | None = None
+    version_row_freshly_allocated = False
     if resume:
         source_version_id = _find_in_flight_source_version_id(conn, version)
         if source_version_id is not None:
@@ -1365,6 +1410,7 @@ def load(  # noqa: C901, PLR0912, PLR0913, PLR0915 — single entry point; the p
             source_file_size=0,
             record_count=None,
         )
+        version_row_freshly_allocated = True
         log.info("gnomad.allocated_new_version", source_version_id=source_version_id)
 
     # 4. Filter set.
@@ -1480,27 +1526,56 @@ def load(  # noqa: C901, PLR0912, PLR0913, PLR0915 — single entry point; the p
         )
 
     # Backfill record_count on the version row using the cumulative
-    # post-flush total.
+    # post-flush total. If the version row was freshly allocated in
+    # this invocation and nothing landed under it (failure path before
+    # any chrom committed, or a --chromosomes partial run whose
+    # requested chrom yielded zero rows), delete the orphan row so a
+    # future run gets a clean sv_id allocation. Per finding-015 #11
+    # this is the post-loop guard wired to "no chrom committed any
+    # rows"; the resume path is excluded so in-flight state is
+    # preserved for the next resume invocation.
     rows_count_row = conn.execute(
         f"SELECT COUNT(*) FROM {_TARGET_TABLE} WHERE source_version_id = ?",  # noqa: S608
         [source_version_id],
     ).fetchone()
     rows_count = int(rows_count_row[0]) if rows_count_row is not None else 0
-    conn.execute(
-        "UPDATE annotation_source_versions SET record_count = ? WHERE source_version_id = ?",
-        [rows_count, source_version_id],
-    )
-    conn.commit()
 
-    # 8. Summary.
-    (
-        rows_loaded,
-        distinct_per_chrom,
-        match_rate,
-        af_buckets,
-        mean_af,
-        pop_presence,
-    ) = _summarize_run(conn, source_version_id)
+    if version_row_freshly_allocated and rows_count == 0 and not pointer_flipped:
+        _cleanup_orphan_version_row(conn, source_version_id)
+        conn.commit()
+        log.info(
+            "gnomad.orphan_version_row_cleaned_up",
+            source_version_id=source_version_id,
+        )
+        source_version_id = None
+        rows_loaded = 0
+        distinct_per_chrom: dict[str, int] = {}
+        match_rate = 0.0
+        af_buckets: dict[str, int] = {
+            "lt_0.001": 0,
+            "0.001_to_0.01": 0,
+            "0.01_to_0.05": 0,
+            "0.05_to_0.5": 0,
+            "gt_0.5": 0,
+        }
+        mean_af = 0.0
+        pop_presence: dict[str, int] = dict.fromkeys(GNOMAD_POPULATIONS, 0)
+    else:
+        conn.execute(
+            "UPDATE annotation_source_versions SET record_count = ? WHERE source_version_id = ?",
+            [rows_count, source_version_id],
+        )
+        conn.commit()
+
+        # 8. Summary.
+        (
+            rows_loaded,
+            distinct_per_chrom,
+            match_rate,
+            af_buckets,
+            mean_af,
+            pop_presence,
+        ) = _summarize_run(conn, source_version_id)
 
     wall = time.monotonic() - started
     log.info(

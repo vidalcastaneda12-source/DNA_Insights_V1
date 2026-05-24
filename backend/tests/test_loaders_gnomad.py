@@ -830,11 +830,19 @@ def test_partial_failure_leaves_pointer_unflipped(
         rows_landed = conn.execute(
             f"SELECT COUNT(*) FROM {gnomad_loader._TARGET_TABLE}",  # noqa: SLF001 S608
         ).fetchone()
+        # The version row is preserved -- chr1-6 rows reference it, so the
+        # orphan-cleanup helper (finding-015) must NOT delete it. The row
+        # is "orphan-of-pointer" (not active) but not "orphan-of-data".
+        version_rows = conn.execute(
+            "SELECT COUNT(*) FROM annotation_source_versions WHERE source_db='gnomad'",
+        ).fetchone()
     assert pointer is None
     assert rows_landed is not None
     # chr1..6 each landed at least one row.
     expected_min = 6
     assert rows_landed[0] >= expected_min
+    assert version_rows is not None
+    assert version_rows[0] == 1
 
 
 def test_resume_picks_up_remaining_chroms(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -954,11 +962,246 @@ def test_partial_chromosomes_filter_does_not_flip(
         pointer = conn.execute(
             "SELECT current_source_version_id FROM annotation_sources WHERE source_db='gnomad'",
         ).fetchone()
+        # Both version rows are preserved: the prior (active) v4.0.0 row and
+        # the new (in-flight) chr22-only row. The chr22 row is "orphan-of-
+        # pointer" (not active) but data references it, so the cleanup
+        # helper (finding-015) must NOT delete it.
+        version_ids = conn.execute(
+            "SELECT source_version_id FROM annotation_source_versions"
+            " WHERE source_db='gnomad' ORDER BY source_version_id",
+        ).fetchall()
+    assert result.source_version_id is not None
     assert result.source_version_id != prior_sv_id
     assert result.pointer_flipped is False
     # Pointer remains on the prior version.
     assert pointer is not None
     assert pointer[0] == prior_sv_id
+    assert version_ids == [(prior_sv_id,), (result.source_version_id,)]
+
+
+# ---------------------------------------------------------------------------
+# Orphan version-row cleanup (finding-015)
+#
+# Sibling Phase-5 loaders (clinvar, gwas_catalog, pgs_catalog, pharmgkb,
+# cpic) each ship a ``_cleanup_orphan_version_row`` helper that deletes
+# the ``annotation_source_versions`` row when the load transaction
+# rolls back without inserting any data rows. gnomad allocates its
+# version row before the per-chromosome loop runs, so a failure mid-
+# chromosome or a ``--chromosomes`` partial run whose requested chrom
+# yields zero rows can leave the version row dangling. The cleanup
+# helper, wired into the post-loop guard, deletes such orphan rows so a
+# future run gets a clean sv_id allocation. The four tests below pin
+# down the contract: cleanup fires only when (1) the version row was
+# freshly allocated in this invocation (not via ``--resume``), and (2)
+# zero data rows landed under it, and (3) the pointer was not flipped.
+# ---------------------------------------------------------------------------
+
+
+def test_cleanup_orphan_when_chromosomes_run_yields_zero_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A --chromosomes partial run that lands zero rows triggers cleanup.
+
+    The loader allocates a fresh source_version_id before iterating
+    chromosomes. When the requested chromosome completes without
+    inserting any rows -- e.g. the upstream factory returned no
+    records under the configured filter positions -- the version
+    row is an orphan: it exists in ``annotation_source_versions``
+    but no ``gnomad_frequencies`` row references it. Per
+    finding-015 #11 the loader's post-loop cleanup deletes the
+    orphan so a future run gets a clean sv_id allocation.
+    """
+    init_databases()
+    _enable_external_calls()
+    _patch_check_libcurl(monkeypatch)
+
+    # chr22 has a filter position but the factory returns zero
+    # records on both data_types. The loop "succeeds" (chr22 lands
+    # in chromosomes_succeeded) but rows_count stays at 0.
+    by_url: dict[str, list[FakeVariant]] = {
+        GNOMAD_URL_TEMPLATE.format(data_type="exomes", chrom="22"): [],
+        GNOMAD_URL_TEMPLATE.format(data_type="genomes", chrom="22"): [],
+    }
+    _patch_cyvcf2(monkeypatch, _VCFFactory(by_url=by_url))
+
+    with duckdb_connection() as conn:
+        _seed_user_variants(conn, [("22", 100)])
+        audited, http = _mock_audited_client()
+        try:
+            result = load(conn, audited, force=True, chromosomes=["22"])
+        finally:
+            audited.close()
+            http.close()
+        version_count_row = conn.execute(
+            "SELECT COUNT(*) FROM annotation_source_versions WHERE source_db='gnomad'",
+        ).fetchone()
+        freq_rows = conn.execute(
+            f"SELECT COUNT(*) FROM {gnomad_loader._TARGET_TABLE}",  # noqa: SLF001 S608
+        ).fetchone()
+    # Cleanup ran: no annotation_source_versions row for gnomad remains.
+    assert version_count_row is not None
+    assert version_count_row[0] == 0
+    assert freq_rows is not None
+    assert freq_rows[0] == 0
+    # Result honestly reports no version was retained.
+    assert result.source_version_id is None
+    assert result.rows_loaded == 0
+    assert result.pointer_flipped is False
+
+
+def test_cleanup_orphan_when_first_chrom_fails_before_any_insert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure on the first chrom open (zero rows landed) triggers cleanup.
+
+    Mirrors the per-chrom-loop failure path. ``chr1`` is the first
+    URL the loader opens (with ``--chromosomes 1``); the factory
+    raises on every open so the loader never commits a single row
+    under the freshly-allocated source_version_id. Per
+    finding-015 #11 the orphan version row is deleted post-loop
+    before the captured exception re-raises.
+    """
+    init_databases()
+    _enable_external_calls()
+    _patch_check_libcurl(monkeypatch)
+
+    class _BoomOnFirstOpen:
+        def __call__(self, _url: str) -> _FakeVCF:
+            msg = "boom on first open"
+            raise RuntimeError(msg)
+
+    import cyvcf2  # noqa: PLC0415 — test-local import keeps module surface narrow
+
+    monkeypatch.setattr(cyvcf2, "VCF", _BoomOnFirstOpen())
+
+    with duckdb_connection() as conn:
+        _seed_user_variants(conn, [("1", 100)])
+        audited, http = _mock_audited_client()
+        try:
+            with pytest.raises(RuntimeError, match="boom on first open"):
+                load(conn, audited, force=True, chromosomes=["1"])
+        finally:
+            audited.close()
+            http.close()
+        version_count_row = conn.execute(
+            "SELECT COUNT(*) FROM annotation_source_versions WHERE source_db='gnomad'",
+        ).fetchone()
+        freq_rows = conn.execute(
+            f"SELECT COUNT(*) FROM {gnomad_loader._TARGET_TABLE}",  # noqa: SLF001 S608
+        ).fetchone()
+    # Cleanup ran: no orphan annotation_source_versions row remains.
+    assert version_count_row is not None
+    assert version_count_row[0] == 0
+    # And no data rows landed.
+    assert freq_rows is not None
+    assert freq_rows[0] == 0
+
+
+def test_resume_does_not_cleanup_preexisting_in_flight_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--resume against a pre-existing in-flight sv_id never cleans it up.
+
+    The cleanup helper only fires when the version row was
+    allocated in the *current* invocation. ``--resume`` reuses a
+    pre-existing sv_id (e.g. the v10 orphan from finding-015);
+    cleaning it up would contradict the operator's explicit "resume
+    against this" intent and would also remove the row a future
+    ``--resume`` would look for. Here the resumed run fails on
+    every chrom, lands zero new rows, and the preexisting orphan
+    sv_id survives.
+    """
+    init_databases()
+    _enable_external_calls()
+    _patch_check_libcurl(monkeypatch)
+
+    class _BoomOnResume:
+        def __call__(self, _url: str) -> _FakeVCF:
+            msg = "boom on resume"
+            raise RuntimeError(msg)
+
+    import cyvcf2  # noqa: PLC0415 — test-local import keeps module surface narrow
+
+    monkeypatch.setattr(cyvcf2, "VCF", _BoomOnResume())
+
+    with duckdb_connection() as conn:
+        _seed_user_variants(conn, [("1", 100)])
+        # Pre-seed an orphan-of-data in-flight version row, mirroring the
+        # v10 case from finding-015: no gnomad_frequencies row references it.
+        preexisting_sv_id = insert_source_version(
+            conn,
+            source_db=SOURCE_DB,
+            version=GNOMAD_VERSION,
+            source_url=GNOMAD_URL_TEMPLATE,
+            source_file_hash="orphan",
+            source_file_size=0,
+            record_count=None,
+        )
+        conn.commit()
+        audited, http = _mock_audited_client()
+        try:
+            with pytest.raises(RuntimeError, match="boom on resume"):
+                load(conn, audited, resume=True, chromosomes=["1"])
+        finally:
+            audited.close()
+            http.close()
+        # The preexisting sv_id is preserved -- cleanup did NOT delete it.
+        version_ids = conn.execute(
+            "SELECT source_version_id FROM annotation_source_versions WHERE source_db='gnomad'",
+        ).fetchall()
+    assert version_ids == [(preexisting_sv_id,)]
+
+
+def test_successful_full_run_does_not_trigger_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A complete, successful run keeps the version row and flips the pointer.
+
+    Positive control for the cleanup contract: cleanup fires only
+    on orphan rows (freshly allocated, zero data, no pointer flip).
+    A run where every chrom lands at least one row produces a real
+    active version that the helper must NOT delete.
+    """
+    init_databases()
+    _enable_external_calls()
+    _patch_check_libcurl(monkeypatch)
+
+    by_url: dict[str, list[FakeVariant]] = {}
+    for c in SUPPORTED_CHROMS:
+        by_url[GNOMAD_URL_TEMPLATE.format(data_type="exomes", chrom=c)] = [
+            _make_record(
+                f"chr{c}",
+                100,
+                "A",
+                "C",
+                {"AF": 0.1, "AC": 1, "AN": 10},
+            ),
+        ]
+        by_url[GNOMAD_URL_TEMPLATE.format(data_type="genomes", chrom=c)] = []
+    _patch_cyvcf2(monkeypatch, _VCFFactory(by_url=by_url))
+
+    with duckdb_connection() as conn:
+        for c in SUPPORTED_CHROMS:
+            _seed_user_variants(conn, [(c, 100)])
+        audited, http = _mock_audited_client()
+        try:
+            result = load(conn, audited, force=True)
+        finally:
+            audited.close()
+            http.close()
+        version_ids = conn.execute(
+            "SELECT source_version_id FROM annotation_source_versions WHERE source_db='gnomad'",
+        ).fetchall()
+        pointer = conn.execute(
+            "SELECT current_source_version_id FROM annotation_sources WHERE source_db='gnomad'",
+        ).fetchone()
+    assert result.source_version_id is not None
+    assert result.pointer_flipped is True
+    assert result.rows_loaded == len(SUPPORTED_CHROMS)
+    # The freshly-allocated version row is preserved and named by the pointer.
+    assert version_ids == [(result.source_version_id,)]
+    assert pointer is not None
+    assert pointer[0] == result.source_version_id
 
 
 # ---------------------------------------------------------------------------
