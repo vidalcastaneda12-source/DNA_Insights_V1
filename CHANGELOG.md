@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Workflow tooling — `scripts/verify.sh` + `/handoff` slash command.**
+  Two tooling additions ahead of Phase 5.6. `scripts/verify.sh` is a thin
+  convenience executor for the merge-gate verification protocol
+  documented in `docs/runbooks/verification.md`: it runs `uv sync`, `uv
+  run pytest`, `uv run ruff check`, `uv run ruff format --check`, and
+  `uv run mypy --strict backend/src` in order with section headers and a
+  clear FAILED-at-step / All-checks-passed terminal line, so VSC-User
+  runs one command per verification instead of four and the chance of
+  missing a failure mid-sequence drops. The runbook gains a short
+  paragraph pointing readers at the script while preserving the explicit
+  command list as authoritative. `.claude/commands/handoff.md` is a new
+  slash command file that instructs VSC-Claude to produce a
+  standard-format end-of-session handoff: branch name, commit SHA(s),
+  files changed (sourced from `git log` / `git diff --name-only`, not
+  reproduced from memory), the `./scripts/verify.sh` verification step,
+  PR URL (from `gh pr view`), conditional schema-rebuild reminders when
+  the diff touches `docs/schemas/` or `ddl/`, and pytest baseline/post
+  counts. No automation (no CI, no git hooks, no pre-commit); both
+  additions are manual-execution tooling intended to make the existing
+  VSC-Claude / VSC-User workflow sharper, not to replace it. (PR #XX)
+
 ### Changed
 - **gwas_catalog: hash-based post-download short-circuit for upstream
   label drift.** EBI's GWAS Catalog stats endpoint was observed to
