@@ -52,4 +52,6 @@ out/
 Thumbs.db
 
 # Claude Code (per-user local config and runtime state)
-.claude/
+.claude/*
+# Slash commands are shared project infrastructure — track them in the repo.
+!.claude/commands/

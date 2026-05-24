@@ -26,6 +26,12 @@ covered by the core commands alone, that is the full protocol.
 
 ## Core commands
 
+For convenience, `scripts/verify.sh` runs all five checks in order with
+section headers and clear pass/fail output. The commands below remain
+the canonical protocol; the script is a thin wrapper for the
+always-run portion, and the schema-rebuild and pipeline-verification
+sections below still apply on top of either invocation.
+
 Run from the repository root, in the order listed:
 
 ```
