@@ -27,7 +27,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the diff touches `docs/schemas/` or `ddl/`, and pytest baseline/post
   counts. No automation (no CI, no git hooks, no pre-commit); both
   additions are manual-execution tooling intended to make the existing
-  VSC-Claude / VSC-User workflow sharper, not to replace it. (PR #XX)
+  VSC-Claude / VSC-User workflow sharper, not to replace it. (PR #54)
+- **Pre-5.6 — verification runbook + cpic test format-drift fix.**
+  Two pre-Phase-5.6 cleanups bundled into one PR. First, adds
+  `docs/runbooks/verification.md` as the canonical merge-gate
+  protocol VSC-User runs independently of any tests the
+  implementation session executed: `uv sync`, `uv run pytest`,
+  `uv run ruff check`, `uv run ruff format --check`, `uv run
+  mypy --strict backend/src`. Schema PRs add the `rm -rf data/`
+  + `uv run genome init` rebuild plus re-ingest; pipeline PRs
+  add real-data verification against the stable identifiers
+  documented in CLAUDE.md "Real-data observations." On failure,
+  report verbatim — no local fix before consulting. CLAUDE.md
+  "How to run" gains a pointer to the new runbook while keeping
+  the existing dev-loop command list in place as the quick
+  reference; the runbook is the canonical gate. Second, repairs
+  `ruff format --check` drift in
+  `backend/tests/test_annotate_loaders_cpic.py` (one SQL string
+  the formatter wanted joined onto a single line); a tree-wide
+  `ruff format --check` now reports 81 files already formatted
+  (was: 1 file would be reformatted on `main`). No loader,
+  schema, or DDL changes; baseline 693 pytests pre-change, 693
+  pytests post-change. Sets the stage for the `scripts/verify.sh`
+  thin executor over the same protocol that lands in PR #54.
+  (PR #51)
 
 ### Changed
 - **gwas_catalog: hash-based post-download short-circuit for upstream
@@ -48,7 +71,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bypass both short-circuits. See
   [`finding-014`](docs/findings/finding-014-gwas-catalog-upstream-label-drift.md)
   for the full mechanism and the operator action (none required — the
-  v4/v11 audit trail honestly records the drift event). (PR #XX)
+  v4/v11 audit trail honestly records the drift event). (PR #50)
 
 - **Sub-phase 5.5 — gnomAD loader real-data verification numbers
   locked + `--coalesce-distance` default bumped.** PR B's
@@ -87,7 +110,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test_load_chromosome_recovers_from_htslib_transient_error`)
   updated from "Default coalesce distance is 1 kb" to "50 kb".
   No schema changes; no test additions beyond the inline-comment
-  update; no `rm -rf data/` rebuild required. (PR #XX)
+  update; no `rm -rf data/` rebuild required. (PR #49)
 
 ### Fixed
 - **gnomad: cleanup orphan `annotation_source_versions` rows on
@@ -107,7 +130,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the change affects future runs only. See
   [`finding-015`](docs/findings/finding-015-gnomad-v10-audit-trail-anomaly.md)
   for the investigation and `finding-015` #11 for the Option B contract
-  this PR implements. (PR #XX)
+  this PR implements. (PR #53)
 
 - **Sub-phase 5.5 — gnomAD loader htslib HTTP/2 framing recovery.**
   Second real-data verification (post-sentinel-fix) still landed
@@ -145,7 +168,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tests cover the scan token set, mid-region recovery on the
   first attempt, dedup of records re-yielded after a mid-region
   corruption + reopen, and the persistent-corruption →
-  `GnomadRemoteIterationError` path. (PR #B verification #2 follow-up)
+  `GnomadRemoteIterationError` path. (PR #49 verification #2 follow-up)
 - **Sub-phase 5.5 — gnomAD loader real-data verification failure.**
   First real-data run against gnomAD v4.1.1 per-chromosome VCFs
   landed 4,066 rows under a broken `source_version_id` with every
@@ -178,7 +201,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rejection, and an end-to-end assertion that the loader never
   emits a non-positive tabix region even when upstream sources
   carry `-1` sentinels. The version-pointer supersession pattern
-  is unchanged; no schema or DDL changes. (PR #B follow-up)
+  is unchanged; no schema or DDL changes. (PR #49 follow-up)
 
 ### Added
 - **Sub-phase 5.5 — gnomAD filtered allele frequencies loader.** Adds
@@ -212,9 +235,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (919,446 / 250,000 ≈ 3.68); the runbook's EFO traits CSV row
   descriptor updated from "~670 rows" to "~696 rows" (matching
   PGS Catalog 2026_05_07's `distinct_trait_efo=696`). No schema
-  changes; existing DuckDB files remain valid. (PR #B)
+  changes; existing DuckDB files remain valid. (PR #49)
 
 ### Documentation
+- **finding-015 — gnomad v10 audit-trail anomaly investigation
+  (orphan version rows).** Investigation-only docs follow-up
+  to finding-014 #1: what produced gnomad
+  `source_version_id = 10` (`record_count = 154,080`) during
+  the 2026-05-22 post-PR-#49 sweep, and is it a problem.
+  Conclusion: v10 — and v6 / v7 / v8, which prior sessions had
+  assumed were stable historical versions — are all orphan
+  `annotation_source_versions` rows from chrom-grain partial-run
+  attempts. Only v9 holds any `gnomad_frequencies` content
+  (7,275,664 rows, contiguous `freq_id 1..7,275,664`, full
+  23-chrom coverage), and the active pointer is correctly on
+  v9 — readers join through `annotation_sources` and never see
+  the orphan ids. The gnomad loader (unlike its five Phase-5
+  siblings — `clinvar`, `pharmgkb`, `cpic`, `gwas_catalog`,
+  `pgs_catalog`) had no `_cleanup_orphan_version_row` helper at
+  the time, so the version row allocated at loop-start outlived
+  any subsequent per-chrom failure or zero-row partial run.
+  Audit-log evidence pinpoints v10 to two
+  `gnomad_remote_vcf_open` HEAD pairs on 2026-05-22 (chr22
+  exomes + chr22 genomes), matching a `--chromosomes 22`
+  partial-run shape (full-genome would be 46 HEAD pairs).
+  Existing tests
+  (`test_partial_chromosomes_filter_does_not_flip`,
+  `test_partial_failure_leaves_pointer_unflipped`) already
+  pinned the correct pointer behavior; v10 matches both. The
+  finding documents three remediation options (A: doc-only;
+  B: loader hardening mirroring the five siblings; C: cleanup
+  SQL + Option B). Option B landed as PR #53; the cleanup SQL
+  was deferred. No code, schema, DDL, or CHANGELOG changes in
+  this PR. See
+  [`finding-015`](docs/findings/finding-015-gnomad-v10-audit-trail-anomaly.md).
+  (PR #52)
 - **Pre-5.5 — annotations runbook prose alignment with locked
   GWAS Catalog and PGS Catalog stable numbers.** Documentation-
   only follow-up to PR #47, which locked the real-data stable
@@ -234,7 +289,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (aligned with `active_total = 5,337`). ClinVar, PharmGKB,
   CPIC, and gnomAD runbook sections are untouched. No code,
   schema, DDL, or test changes; no schema rebuild required.
-  (PR #XX)
+  (PR #48)
 - **Pre-5.5 — `annotations.md` locks real-data numbers for GWAS
   Catalog `2026_05_16` and PGS Catalog `2026_05_07`.**
   Documentation-only follow-up to PR #46 (gnomAD `af_mid` schema
@@ -309,6 +364,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   down from 1,699 s / ~28 min on the per-row path); items #1-#16
   are preserved as the historical audit trail. No code changes; no
   schema rebuild; no re-ingest. (PR #43 follow-up)
+- **Pre-5.5 — version-pointer supersession refactor (annotation
+  tables).** Replaces per-row `is_active` / `superseded_by`
+  supersession on the five Phase-5 annotation tables (ClinVar,
+  GWAS Catalog, PharmGKB, CPIC, PGS Catalog) with a single-row
+  pointer in a new `annotation_sources` table. A refresh INSERTs
+  the new active set under a fresh `source_version_id` and UPSERTs
+  `annotation_sources` to flip the per-source pointer in one
+  statement; readers join through `annotation_sources` and see
+  either the old set or the new set, never a mix. The atomicity
+  guarantee is now a one-row pointer flip, not a mass UPDATE
+  wrapped in one transaction — CLAUDE.md #7 is preserved by
+  construction. Eliminates the 19-minute UPDATE phase that
+  dominated ClinVar's same-version `--force` refresh (finding-009
+  #15): measured `--force` end-to-end at 4 m 56 s, down from
+  1,699 s / ~28 min on the per-row path; same-version
+  short-circuit unaffected. All five Phase-5 loaders (`clinvar`,
+  `gwas_catalog`, `pharmgkb`, `cpic`, `pgs_catalog`) and their
+  tests are updated. The two views that filtered on the
+  now-removed `is_active` columns (`user_pgx_variants_v`,
+  `pgx_phenotype_drugs_v`) are rewritten to filter through
+  `annotation_sources`. Coupled follow-up commit landed in the
+  same PR fixes the same-upstream-version `--force` self-flip
+  bug (the version-pointer was pointing at the same id and the
+  chunked INSERT wrote duplicates under it) and removes the now-
+  redundant `UNIQUE(source_db, version)` constraint and
+  `is_current` column from `annotation_source_versions`, both
+  superseded by the pointer model. Schema changes (removal of
+  `is_active` / `superseded_by` from the five tables; addition
+  of `annotation_sources`; drop of `UNIQUE(source_db, version)`
+  + `is_current` from `annotation_source_versions`); requires
+  `rm -rf data/ && uv run genome init` plus a re-run of every
+  shipped Phase 5 loader per the CLAUDE.md schema-change
+  convention. See
+  [`finding-010`](docs/findings/finding-010-version-pointer-supersession-pattern.md)
+  for the design rationale; PR #44 ships the documentation
+  reconcile. (PR #43)
 - **Pre-5.5 — unified supersession deactivate path + finding-009
   cost-model correction.** Real-data verification of PR #41 against
   the existing ClinVar `2026_05_10` release showed the
@@ -339,7 +430,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     and the coverage-gap discovery. The supersession atomicity
     contract (CLAUDE.md #7) is unchanged: the UPDATE remains one
     statement in one transaction with the chunked INSERT. No schema
-    changes; no `rm -rf data/` rebuild required.
+    changes; no `rm -rf data/` rebuild required. (PR #42)
 
 ### Added
 - **Pre-5.5 — supersession observability + `--skip-if-same-version`.**
@@ -584,7 +675,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   finding-009 #13 (chunked UPDATE), the `MAPPED_TRAIT_URI`
   truncation note in `finding-005-deferred-improvements.md`
   (separate one-line doc edit on a future PR that touches
-  `gwas_catalog.py`). (PR #XX)
+  `gwas_catalog.py`). (PR #39)
 
 ### Changed
 - **Schema correction — `pgs_catalog_scores` surrogate PK.**
@@ -619,7 +710,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rm -rf data/ && uv run genome init` and a re-ingest of any
   data the user had loaded (23andMe + Ancestry exports,
   PharmGKB, CPIC, ClinVar, GWAS Catalog) before running the
-  new PGS Catalog loader. (PR #XX)
+  new PGS Catalog loader. (PR #39)
 
 ### Fixed
 - **Sub-phase 5.3 follow-up — GWAS Catalog download flow and
@@ -781,7 +872,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicit `CHECKPOINT` change in `supersession.py` from
   finding-009 #11, the chunked-UPDATE design question in
   finding-009 #13, and tier-2 rsid-based matching across
-  positions. (PR #XX)
+  positions. (PR #38)
 - **Sub-phase 5.2 — ClinVar clinical-significance annotations loader.**
   New `genome.annotate.loaders.clinvar` registers a `refresh` function
   at module-import time that downloads ClinVar's
@@ -1113,6 +1204,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no schema rebuild; no re-ingest; `docs/schemas/` is untouched,
   `finding-005` / `finding-010` are referenced but not edited.
   (PR #45)
+- **Pre-5.3 — docs cleanup: PR refs, Phase 5 status, perf target,
+  finding-009.** Docs-only cleanup landed between sub-phase 5.2
+  (ClinVar) and 5.3 (GWAS Catalog) to align the on-`main` docs
+  with merged state and capture the ClinVar same-version
+  `--force` UPDATE + checkpoint cost surfaced during 5.2
+  verification before 5.3 began. `CHANGELOG.md`: four
+  `(PR #XX)` placeholders filled with #34, #35, and #36 (and
+  #34 for the scaffold-fix bullet that shipped alongside
+  PharmGKB). `ROADMAP.md`: the current-phase line and Phase 5
+  status flip from "next" / "not yet started" to "in progress";
+  a 5.0-5.8 sub-phase checklist is added matching merged state.
+  `README.md`: the two-sentence status block is rewritten to
+  reflect 5.0 through 5.2 shipped and 5.3 next. `CLAUDE.md`:
+  a new performance-target bullet under Conventions documents
+  the ~30s ceiling on routine refresh / ingest / CLI
+  operations, carving out long-running named subcommands (e.g.
+  Beagle full-genome imputation at ~30 min via
+  `genome imputation run`) and requiring per-step structlog
+  progress.
+  [`finding-009`](docs/findings/finding-009-clinvar-supersession-checkpoint-cost.md)
+  is new — it captures the ~28-min same-version `--force`
+  ClinVar re-run, the UPDATE + checkpoint mechanism, rejected
+  alternatives, and the open questions that gated sub-phase
+  5.5 (gnomAD) start; subsequent PRs (#41, #42, #43) resolved
+  the open questions. `finding-005-deferred-improvements.md`
+  gains entry #7 cross-referencing finding-009 and flagging
+  finding-009 #14 action items as a 5.5 gate. No code, schema,
+  DDL, CLI, or test changes. (PR #37)
 - Added `docs/findings/finding-008-phase4-rebuild-and-chrx-observations.md`
   capturing two durable Phase 4 real-data observations surfaced by the
   PR #31 schema-change rebuild: (1) the rebuild-from-preserved-archive
