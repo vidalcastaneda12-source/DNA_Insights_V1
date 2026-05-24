@@ -69,16 +69,54 @@ _SUPERSESSION_TABLES: Final[frozenset[str]] = frozenset(
         "cpic_guidelines",
         "pgs_catalog_scores",
         "gnomad_frequencies",
+        "dbsnp_annotations",
+        "variant_aliases",
     },
 )
 """Per-source tables whose "current" rows are identified via the version pointer.
 
-Mirrors the "Soft-delete for evolving sources" set in
-``docs/schemas/schema_group_2_reference_annotations.md``. ``table`` is
-interpolated into the COUNT(*) SQL :func:`flip_to_new_version` issues for
-the event payload, so this whitelist is what makes that interpolation
-safe.
+Mirrors the supersedable-table set enumerated under the version-pointer
+application invariant in
+``docs/schemas/schema_group_2_reference_annotations.md``. ``dbsnp``
+contributes two tables — ``dbsnp_annotations`` and ``variant_aliases`` —
+under a single ``annotation_sources`` pointer. ``table`` is interpolated
+into the COUNT(*) SQL :func:`flip_to_new_version` issues for the event
+payload, so this whitelist is what makes that interpolation safe.
 """
+
+
+def _next_dbsnp_id(conn: DuckDBPyConnection) -> int:
+    """``COALESCE(MAX(dbsnp_id), 0) + 1`` over ``dbsnp_annotations``.
+
+    Surrogate-PK allocator for the dbSNP loader (sub-phase 5.6). It lives
+    here, beside :data:`_SUPERSESSION_TABLES`, rather than in a per-source
+    ``dbsnp.py`` loader module the way sibling allocators do (e.g.
+    ``pgs_catalog._next_score_record_id``): sub-phase 5.6 PR A lands the
+    schema correction only — the loader is PR B — so this shared module is
+    the surrogate-allocation home until then. ``MAX(...) + 1`` is
+    app-allocated and race-free under the single-writer assumption. The SQL
+    is a static literal (the table name is hard-coded, not interpolated),
+    so unlike the sibling f-string allocators it needs no S608 suppression.
+    """
+    row = conn.execute(
+        "SELECT COALESCE(MAX(dbsnp_id), 0) FROM dbsnp_annotations",
+    ).fetchone()
+    return int(row[0]) + 1 if row is not None else 1
+
+
+def _next_alias_id(conn: DuckDBPyConnection) -> int:
+    """``COALESCE(MAX(alias_id), 0) + 1`` over ``variant_aliases``.
+
+    Companion to :func:`_next_dbsnp_id`; see that docstring for why both
+    allocators live in this module. ``variant_aliases`` population is
+    deferred past PR B (it pairs with the tier-2 matching backfill,
+    finding-005 #4), but the allocator ships now so the surrogate-PK
+    contract is proven alongside the schema correction.
+    """
+    row = conn.execute(
+        "SELECT COALESCE(MAX(alias_id), 0) FROM variant_aliases",
+    ).fetchone()
+    return int(row[0]) + 1 if row is not None else 1
 
 
 @dataclass(frozen=True, slots=True)

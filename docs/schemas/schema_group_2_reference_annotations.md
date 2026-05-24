@@ -16,7 +16,7 @@ The bulk-loaded knowledge layer: dbSNP, ClinVar, GWAS Catalog, PharmGKB, CPIC, P
 
 4. **Denormalized rollup table.** `variant_annotations_index` is a precomputed per-variant summary across all sources — powers fast SNP-detail page loads. Refreshed by job whenever source data changes.
 
-5. **Version-pointer supersession for evolving sources.** ClinVar, GWAS Catalog, PharmGKB, CPIC, and PGS Catalog all evolve. Each refresh INSERTs the new rowset under a fresh `source_version_id`, then UPSERTs `annotation_sources.current_source_version_id` for that `source_db`. The pointer flip is the supersession event — atomically promotes the new rowset and demotes the prior one without touching a single annotation row. Readers join through `annotation_sources` to scope a query to the current version. Refresh `variant_annotations_index` after the flip lands. See [finding-010](../findings/finding-010-version-pointer-supersession-pattern.md) for the rationale and trade-offs vs the prior per-row `is_active` model.
+5. **Version-pointer supersession for evolving sources.** ClinVar, GWAS Catalog, PharmGKB, CPIC, PGS Catalog, gnomAD, and dbSNP all evolve. Each refresh INSERTs the new rowset under a fresh `source_version_id`, then UPSERTs `annotation_sources.current_source_version_id` for that `source_db`. The pointer flip is the supersession event — atomically promotes the new rowset and demotes the prior one without touching a single annotation row. A single `source_db` may govern more than one table this way: `dbsnp` covers both `dbsnp_annotations` and `variant_aliases` under one pointer. Readers join through `annotation_sources` to scope a query to the current version. Refresh `variant_annotations_index` after the flip lands. See [finding-010](../findings/finding-010-version-pointer-supersession-pattern.md) for the rationale and trade-offs vs the prior per-row `is_active` model.
 
 ---
 
@@ -70,7 +70,7 @@ CREATE TABLE annotation_sources (
 );
 ```
 
-> **Application invariant:** exactly one row per supersedable `source_db` once the first refresh lands. The pointer flip is atomic by virtue of being a single-row UPSERT — readers either see the prior version's id or the new one's, never a torn state. Per-row `is_active` flags on the annotation tables are not needed and are not present on the five supersedable tables (ClinVar, GWAS Catalog, PharmGKB, CPIC, PGS Catalog).
+> **Application invariant:** exactly one row per supersedable `source_db` once the first refresh lands. The pointer flip is atomic by virtue of being a single-row UPSERT — readers either see the prior version's id or the new one's, never a torn state. Per-row `is_active` flags on the annotation tables are not needed and are not present on any supersedable table: `clinvar_annotations`, `gwas_catalog_associations`, `pharmgkb_annotations`, `cpic_guidelines`, `pgs_catalog_scores`, `gnomad_frequencies`, `dbsnp_annotations`, and `variant_aliases` (the last two both keyed to `source_db = 'dbsnp'`). This set mirrors `_SUPERSESSION_TABLES` in `backend/src/genome/annotate/supersession.py`.
 
 ## Canonical read pattern
 
@@ -94,7 +94,8 @@ To select a *specific* historical version, filter on `source_version_id` directl
 
 ```sql
 CREATE TABLE dbsnp_annotations (
-  rsid                  VARCHAR PRIMARY KEY,
+  dbsnp_id              BIGINT PRIMARY KEY,      -- surrogate PK, app-allocated
+  rsid                  VARCHAR NOT NULL,
   chrom                 chromosome_enum,
   pos_grch38            BIGINT,
   pos_grch37            BIGINT,
@@ -108,6 +109,7 @@ CREATE TABLE dbsnp_annotations (
   retrieval_date        TIMESTAMP NOT NULL
 );
 
+CREATE INDEX idx_dbsnp_rsid  ON dbsnp_annotations(rsid);
 CREATE INDEX idx_dbsnp_pos38 ON dbsnp_annotations(chrom, pos_grch38);
 ```
 
@@ -115,13 +117,15 @@ CREATE INDEX idx_dbsnp_pos38 ON dbsnp_annotations(chrom, pos_grch38);
 
 ```sql
 CREATE TABLE variant_aliases (
-  alias_rsid            VARCHAR PRIMARY KEY,
+  alias_id              BIGINT PRIMARY KEY,      -- surrogate PK, app-allocated
+  alias_rsid            VARCHAR NOT NULL,
   current_rsid          VARCHAR NOT NULL,        -- the canonical rsID after merge
   alias_type            VARCHAR,                 -- 'merged', 'withdrawn', 'split'
   source_version_id     BIGINT NOT NULL REFERENCES annotation_source_versions(source_version_id),
   retrieval_date        TIMESTAMP NOT NULL
 );
 
+CREATE INDEX idx_va_alias   ON variant_aliases(alias_rsid);
 CREATE INDEX idx_va_current ON variant_aliases(current_rsid);
 ```
 
@@ -661,7 +665,7 @@ GROUP BY vm.variant_id, vm.rsid, vm.chrom, vm.pos_grch38,
 
 2. **rsID resolution at lookup.** All annotation joins should canonicalize via `variant_aliases` first — given an input rsID, look up `current_rsid`, then join.
 
-3. **Current-version filtering via `annotation_sources` join.** Queries against the five supersedable annotation tables should join through `annotation_sources` on `source_db = '<source>' AND current_source_version_id = <table>.source_version_id`. The `user_pgx_variants_v` view above is the canonical example. Convenience views or wrapper functions help avoid forgetting; historical-version queries filter on `source_version_id` directly (no join). See [finding-010](../findings/finding-010-version-pointer-supersession-pattern.md) for the rationale.
+3. **Current-version filtering via `annotation_sources` join.** Queries against a supersedable annotation table should join through `annotation_sources` on `source_db = '<source>' AND current_source_version_id = <table>.source_version_id`. The `user_pgx_variants_v` view above is the canonical example. Convenience views or wrapper functions help avoid forgetting; historical-version queries filter on `source_version_id` directly (no join). See [finding-010](../findings/finding-010-version-pointer-supersession-pattern.md) for the rationale.
 
 4. **gnomAD filtering set.** Before bulk-loading gnomAD, build the filter set: `(user variants) ∪ (ClinVar variants) ∪ (GWAS Catalog variants) ∪ (PGS Catalog variants)`. Drop everything else.
 

@@ -53,6 +53,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (PR #51)
 
 ### Changed
+- **Sub-phase 5.6 PR A — surrogate BIGINT PKs for `dbsnp_annotations`
+  and `variant_aliases`.** Replaces the `VARCHAR PRIMARY KEY` on `rsid` /
+  `alias_rsid` with app-allocated `dbsnp_id` / `alias_id` BIGINT surrogate
+  keys (mirroring the 5.4 `pgs_catalog_scores.score_record_id` fix),
+  because both tables participate in version-pointer supersession under
+  `source_db = 'dbsnp'` and a `VARCHAR` PK collides the moment a second
+  load re-inserts the same rsID under a fresh `source_version_id`; the
+  demoted columns become `VARCHAR NOT NULL` and gain `idx_dbsnp_rsid` /
+  `idx_va_alias` so they stay fast to look up. Both tables join
+  `_SUPERSESSION_TABLES` and gain `_next_dbsnp_id` / `_next_alias_id`
+  allocators in `genome.annotate.supersession` (the dbSNP loader itself is
+  deferred to PR B — no loader code in this PR). The defect was latent
+  (neither table has ever been loaded, so no data migration is needed), but
+  per the CLAUDE.md schema-change convention the merge still requires
+  `rm -rf data/ && uv run genome init` followed by a re-ingest of 23andMe +
+  Ancestry and a re-run of every shipped Phase-5 loader. (PR #XX)
 - **gwas_catalog: hash-based post-download short-circuit for upstream
   label drift.** EBI's GWAS Catalog stats endpoint was observed to
   return a different `date` field (`2026_05_16` → `2026_04_27`) for a

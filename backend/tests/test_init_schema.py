@@ -129,6 +129,26 @@ def _duckdb_indexes(path: Path) -> set[str]:
     return {r[0] for r in rows}
 
 
+def _duckdb_pk_columns(path: Path, table: str) -> list[str]:
+    with duckdb_connection(path, read_only=True) as conn:
+        row = conn.execute(
+            "SELECT constraint_column_names FROM duckdb_constraints()"
+            " WHERE table_name = ? AND constraint_type = 'PRIMARY KEY'",
+            [table],
+        ).fetchone()
+    return list(row[0]) if row is not None else []
+
+
+def _duckdb_not_null_columns(path: Path, table: str) -> set[str]:
+    with duckdb_connection(path, read_only=True) as conn:
+        rows = conn.execute(
+            "SELECT column_name FROM information_schema.columns"
+            " WHERE table_name = ? AND is_nullable = 'NO'",
+            [table],
+        ).fetchall()
+    return {r[0] for r in rows}
+
+
 def _sqlite_tables(path: Path) -> set[str]:
     with sqlcipher_connection(path) as conn:
         rows = conn.execute(
@@ -171,6 +191,35 @@ def test_previously_partial_indexes_present(isolated_settings: dict[str, str]) -
     indexes = _duckdb_indexes(Path(isolated_settings["GENOME_DUCKDB_PATH"]))
     missing = _EXPECTED_DUCKDB_INDEXES - indexes
     assert not missing, f"missing DuckDB indexes: {sorted(missing)}"
+
+
+def test_dbsnp_annotations_surrogate_pk(isolated_settings: dict[str, str]) -> None:
+    """5.6 PR A: dbsnp_annotations is keyed by a surrogate ``dbsnp_id`` BIGINT PK.
+
+    ``rsid`` was demoted from PRIMARY KEY to NOT NULL so a second dbSNP load
+    can re-insert the same rsID under a new ``source_version_id`` without a
+    PK collision (the version-pointer supersession contract). Both the new
+    rsID index and the pre-existing position index must be present.
+    """
+    init_databases()
+    path = Path(isolated_settings["GENOME_DUCKDB_PATH"])
+    assert _duckdb_pk_columns(path, "dbsnp_annotations") == ["dbsnp_id"]
+    assert "rsid" in _duckdb_not_null_columns(path, "dbsnp_annotations")
+    assert {"idx_dbsnp_rsid", "idx_dbsnp_pos38"} <= _duckdb_indexes(path)
+
+
+def test_variant_aliases_surrogate_pk(isolated_settings: dict[str, str]) -> None:
+    """5.6 PR A: variant_aliases is keyed by a surrogate ``alias_id`` BIGINT PK.
+
+    ``alias_rsid`` was demoted from PRIMARY KEY to NOT NULL for the same
+    supersession reason as ``dbsnp_annotations.rsid``. Both the new
+    alias-rsID index and the pre-existing current-rsID index must be present.
+    """
+    init_databases()
+    path = Path(isolated_settings["GENOME_DUCKDB_PATH"])
+    assert _duckdb_pk_columns(path, "variant_aliases") == ["alias_id"]
+    assert "alias_rsid" in _duckdb_not_null_columns(path, "variant_aliases")
+    assert {"idx_va_alias", "idx_va_current"} <= _duckdb_indexes(path)
 
 
 def test_apply_duckdb_ddl_raises_on_failure(tmp_path: Path) -> None:

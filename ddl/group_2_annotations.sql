@@ -40,7 +40,8 @@ CREATE TABLE annotation_sources (
 -- dbsnp_annotations
 
 CREATE TABLE dbsnp_annotations (
-  rsid                  VARCHAR PRIMARY KEY,
+  dbsnp_id              BIGINT PRIMARY KEY,      -- surrogate PK, app-allocated
+  rsid                  VARCHAR NOT NULL,
   chrom                 chromosome_enum,
   pos_grch38            BIGINT,
   pos_grch37            BIGINT,
@@ -54,18 +55,21 @@ CREATE TABLE dbsnp_annotations (
   retrieval_date        TIMESTAMP NOT NULL
 );
 
+CREATE INDEX idx_dbsnp_rsid  ON dbsnp_annotations(rsid);
 CREATE INDEX idx_dbsnp_pos38 ON dbsnp_annotations(chrom, pos_grch38);
 
 -- variant_aliases — rsID merges and withdrawals
 
 CREATE TABLE variant_aliases (
-  alias_rsid            VARCHAR PRIMARY KEY,
+  alias_id              BIGINT PRIMARY KEY,      -- surrogate PK, app-allocated
+  alias_rsid            VARCHAR NOT NULL,
   current_rsid          VARCHAR NOT NULL,        -- the canonical rsID after merge
   alias_type            VARCHAR,                 -- 'merged', 'withdrawn', 'split'
   source_version_id     BIGINT NOT NULL REFERENCES annotation_source_versions(source_version_id),
   retrieval_date        TIMESTAMP NOT NULL
 );
 
+CREATE INDEX idx_va_alias   ON variant_aliases(alias_rsid);
 CREATE INDEX idx_va_current ON variant_aliases(current_rsid);
 
 -- clinvar_annotations
