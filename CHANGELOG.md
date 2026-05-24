@@ -68,7 +68,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (neither table has ever been loaded, so no data migration is needed), but
   per the CLAUDE.md schema-change convention the merge still requires
   `rm -rf data/ && uv run genome init` followed by a re-ingest of 23andMe +
-  Ancestry and a re-run of every shipped Phase-5 loader. (PR #XX)
+  Ancestry and a re-run of every shipped Phase-5 loader. (PR #57)
 - **gwas_catalog: hash-based post-download short-circuit for upstream
   label drift.** EBI's GWAS Catalog stats endpoint was observed to
   return a different `date` field (`2026_05_16` → `2026_04_27`) for a
