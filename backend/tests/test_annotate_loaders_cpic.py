@@ -880,8 +880,7 @@ def test_refresh_inserts_rows_and_records_source_version(
             ")",
         ).fetchone()
         version_rows = conn.execute(
-            "SELECT version, record_count FROM annotation_source_versions"
-            " WHERE source_db = 'cpic'",
+            "SELECT version, record_count FROM annotation_source_versions WHERE source_db = 'cpic'",
         ).fetchall()
     assert active is not None
     assert active[0] == _EXPECTED_DB_ROW_COUNT

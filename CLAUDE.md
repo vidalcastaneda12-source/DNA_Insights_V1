@@ -105,6 +105,12 @@ A local-first personal DNA insights application that ingests 23andMe + Ancestry 
 - Dev API (later phases): `uvicorn genome.api.main:app --reload`
 - Frontend (later phases): `cd frontend && pnpm dev`
 
+The merge-gate verification protocol — what VSC-User runs independently
+of the dev-loop commands above before merging a branch — lives in
+[`docs/runbooks/verification.md`](docs/runbooks/verification.md). The
+commands above remain the quick reference during implementation; the
+runbook is the canonical gate.
+
 ## Things never to do
 
 - Never modify the schema markdown files in `docs/schemas/` or the DDL files extracted from them, except via a deliberate, documented schema change followed by a re-extraction.
