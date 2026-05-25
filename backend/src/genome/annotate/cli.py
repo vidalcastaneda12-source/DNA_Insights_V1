@@ -10,22 +10,27 @@
   goes through :func:`genome.annotate.registry.get_loader` so once
   loaders ship, the command's CLI surface does not change.
 
-Sub-phase 5.5 adds three gnomad-specific flags
-(``--chromosomes``, ``--resume``, ``--coalesce-distance``) plus a
-``--version`` override. These are only honoured for ``--source gnomad``;
-passing them on another source raises ``BadParameter`` so a misroute is
-loud rather than silent.
+Sub-phase 5.5 added the remote-tabix flags (``--chromosomes``, ``--resume``,
+``--coalesce-distance``) plus a ``--version`` override; 5.6 generalised them to
+every remote-tabix source (:data:`_REMOTE_TABIX_SOURCES` — gnomad, dbsnp).
+Passing them on a non-remote-tabix source raises ``BadParameter`` so a
+misroute is loud rather than silent.
 """
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Final
 
 import typer
 
 from genome.annotate.registry import RefreshResult, get_loader, known_loaders
 from genome.annotate.source_versions import KNOWN_SOURCE_DBS, get_current_version
 from genome.db.duckdb_conn import duckdb_connection
+
+_REMOTE_TABIX_SOURCES: Final = frozenset({"gnomad", "dbsnp"})
+"""Sources whose loaders stream a remote bgzipped+tabix VCF and accept the rich
+``--version`` / ``--chromosomes`` / ``--resume`` / ``--coalesce-distance`` flags.
+"""
 
 annotate_app = typer.Typer(
     no_args_is_help=True,
@@ -101,10 +106,60 @@ def _parse_chromosomes(value: str | None) -> tuple[str, ...] | None:
     return tuple(parts)
 
 
-def _reject_gnomad_only_flag(name: str, source: str) -> None:
-    """Raise BadParameter when a gnomad-only flag is passed for another source."""
-    msg = f"--{name} is gnomad-specific and not applicable to source {source!r}"
+def _reject_remote_tabix_only_flag(name: str, source: str) -> None:
+    """Raise BadParameter when a remote-tabix-only flag is passed for another source."""
+    sources = ", ".join(sorted(_REMOTE_TABIX_SOURCES))
+    msg = f"--{name} is only valid for remote-tabix sources ({sources}), not source {source!r}"
     raise typer.BadParameter(msg)
+
+
+def _refresh_remote_tabix(  # noqa: PLR0913 — CLI flag passthrough
+    source: str,
+    *,
+    force: bool,
+    skip_if_same_version: bool,
+    version: str | None,
+    chrom_filter: tuple[str, ...] | None,
+    resume: bool,
+    coalesce_distance: int | None,
+) -> RefreshResult:
+    """Dispatch ``annotate refresh`` to a remote-tabix loader (gnomad / dbsnp).
+
+    Each loader's ``refresh`` shares the same signature; the only per-source
+    differences are the locked default version and default coalesce distance,
+    which the loader module exposes as constants. The user's ``--version`` /
+    ``--coalesce-distance`` (when given) override those defaults.
+    """
+    if source == "gnomad":
+        from genome.annotate.loaders import gnomad  # noqa: PLC0415
+
+        return gnomad.refresh(
+            force,
+            skip_if_same_version,
+            version=version or gnomad.GNOMAD_VERSION,
+            chromosomes=chrom_filter,
+            resume=resume,
+            coalesce_distance=(
+                coalesce_distance
+                if coalesce_distance is not None
+                else gnomad.DEFAULT_COALESCE_DISTANCE_BP
+            ),
+        )
+
+    from genome.annotate.loaders import dbsnp  # noqa: PLC0415
+
+    return dbsnp.refresh(
+        force,
+        skip_if_same_version,
+        version=version or dbsnp.DBSNP_VERSION,
+        chromosomes=chrom_filter,
+        resume=resume,
+        coalesce_distance=(
+            coalesce_distance
+            if coalesce_distance is not None
+            else dbsnp.DEFAULT_COALESCE_DISTANCE_BP
+        ),
+    )
 
 
 @annotate_app.command("refresh")
@@ -150,9 +205,10 @@ def annotate_refresh(  # noqa: PLR0913 — irreducible CLI surface; gnomad-speci
         typer.Option(
             "--version",
             help=(
-                "[gnomad-only] Override the locked GNOMAD_VERSION ('4.1.1'). "
-                "Used to test a future release label or to re-load against an "
-                "explicit prior gnomAD release. Ignored by other loaders."
+                "[gnomad/dbsnp only] Override the loader's locked source version "
+                "(gnomad '4.1.1', dbsnp '157'). Used to test a future release "
+                "label or re-load against an explicit prior release. Ignored by "
+                "non-remote-tabix sources."
             ),
         ),
     ] = None,
@@ -161,7 +217,7 @@ def annotate_refresh(  # noqa: PLR0913 — irreducible CLI surface; gnomad-speci
         typer.Option(
             "--chromosomes",
             help=(
-                "[gnomad-only] Comma- or whitespace-separated list of "
+                "[gnomad/dbsnp only] Comma- or whitespace-separated list of "
                 "chromosomes to refresh (e.g. '22' or '1,2,3,X'). When "
                 "restricted, the version-pointer flip is deferred — run "
                 "--resume against the full chrom set to finalize."
@@ -173,7 +229,7 @@ def annotate_refresh(  # noqa: PLR0913 — irreducible CLI surface; gnomad-speci
         typer.Option(
             "--resume",
             help=(
-                "[gnomad-only] Continue a previously-interrupted load. "
+                "[gnomad/dbsnp only] Continue a previously-interrupted load. "
                 "Locates the in-flight (un-flipped) source_version_id for the "
                 "resolved version and runs only the chromosomes that haven't "
                 "yet been populated under it. Flips the pointer at the end "
@@ -186,9 +242,9 @@ def annotate_refresh(  # noqa: PLR0913 — irreducible CLI surface; gnomad-speci
         typer.Option(
             "--coalesce-distance",
             help=(
-                "[gnomad-only] Maximum gap (bp) between adjacent filter "
+                "[gnomad/dbsnp only] Maximum gap (bp) between adjacent filter "
                 "positions before they're split into separate tabix ranges. "
-                "Defaults to 1000. Larger values fetch more contiguous data; "
+                "Defaults to 50000. Larger values fetch more contiguous data; "
                 "smaller values issue more tabix queries."
             ),
         ),
@@ -207,36 +263,27 @@ def annotate_refresh(  # noqa: PLR0913 — irreducible CLI surface; gnomad-speci
 
     chrom_filter = _parse_chromosomes(chromosomes)
 
-    if source == "gnomad":
-        from genome.annotate.loaders.gnomad import (  # noqa: PLC0415 — local import keeps the module side-effect-free
-            DEFAULT_COALESCE_DISTANCE_BP,
-            GNOMAD_VERSION,
-        )
-        from genome.annotate.loaders.gnomad import (  # noqa: PLC0415 — local import keeps the module side-effect-free
-            refresh as gnomad_refresh,
-        )
-
-        result: RefreshResult = gnomad_refresh(
-            force,
-            skip_if_same_version,
-            version=version or GNOMAD_VERSION,
-            chromosomes=chrom_filter,
+    if source in _REMOTE_TABIX_SOURCES:
+        result: RefreshResult = _refresh_remote_tabix(
+            source,
+            force=force,
+            skip_if_same_version=skip_if_same_version,
+            version=version,
+            chrom_filter=chrom_filter,
             resume=resume,
-            coalesce_distance=(
-                coalesce_distance if coalesce_distance is not None else DEFAULT_COALESCE_DISTANCE_BP
-            ),
+            coalesce_distance=coalesce_distance,
         )
     else:
-        # Reject gnomad-only flags on other sources — passing them is a
+        # Reject remote-tabix-only flags on other sources — passing them is a
         # misroute, and silent acceptance would mask the bug.
         if version is not None:
-            _reject_gnomad_only_flag("version", source)
+            _reject_remote_tabix_only_flag("version", source)
         if chrom_filter is not None:
-            _reject_gnomad_only_flag("chromosomes", source)
+            _reject_remote_tabix_only_flag("chromosomes", source)
         if resume:
-            _reject_gnomad_only_flag("resume", source)
+            _reject_remote_tabix_only_flag("resume", source)
         if coalesce_distance is not None:
-            _reject_gnomad_only_flag("coalesce-distance", source)
+            _reject_remote_tabix_only_flag("coalesce-distance", source)
         result = loader(force, skip_if_same_version)
     typer.echo(
         f"source_db={result.source_db} "

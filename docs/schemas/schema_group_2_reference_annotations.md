@@ -31,7 +31,7 @@ The bulk-loaded knowledge layer: dbSNP, ClinVar, GWAS Catalog, PharmGKB, CPIC, P
 | PGS Catalog scores | **Full bulk-load (metadata)** | Just the score-list |
 | PGS Catalog weights | **Overlapping-only** | Per locked decision #5 |
 | gnomAD | **Filtered to overlap** | Full is ~140GB; filter to variants in (user ∪ ClinVar ∪ GWAS ∪ PGS) |
-| dbSNP | **Filtered to overlap** | Same reasoning |
+| dbSNP | **Filtered to user variants** | dbSNP annotates the user's own variants (rsID, REF/ALT, gene, class); its consumers all read `variants_master`. ClinVar/GWAS/PGS legs deferred — see [finding-016](../findings/finding-016-dbsnp-user-only-filter.md) |
 | VEP | **Computed on user variants** | Run locally via Ensembl VEP CLI; no bulk-load needed |
 | Genes / Traits / Pathways | **Full bulk-load** | Small reference dictionaries |
 
