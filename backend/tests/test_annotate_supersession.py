@@ -24,6 +24,8 @@ from structlog.testing import capture_logs
 from genome.annotate.source_versions import insert_source_version
 from genome.annotate.supersession import (
     VersionFlipResult,
+    _next_alias_id,
+    _next_dbsnp_id,
     commit_and_checkpoint,
     flip_to_new_version,
     maybe_skip_same_version,
@@ -648,6 +650,82 @@ def test_flip_to_new_version_supports_every_phase_5_source(
     assert int(pointer[0]) == new_id
     assert result.prior_version_id is None
     assert result.new_version_id == new_id
+
+
+# ---------------------------------------------------------------------------
+# Surrogate-PK allocators for the dbSNP tables (sub-phase 5.6 PR A).
+# ---------------------------------------------------------------------------
+
+
+def test_next_dbsnp_id_allocates_from_empty_then_continues_from_max(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """``_next_dbsnp_id`` returns 1 on an empty table, then ``MAX(dbsnp_id) + 1``."""
+    init_databases()
+    with duckdb_connection() as conn:
+        assert _next_dbsnp_id(conn) == 1  # empty table
+
+        sv = insert_source_version(
+            conn,
+            source_db="dbsnp",
+            version="b156",
+            source_url=None,
+            source_file_hash="a" * 64,
+            source_file_size=1,
+            record_count=2,
+        )
+        for dbsnp_id in (1, 2):
+            conn.execute(
+                """
+                INSERT INTO dbsnp_annotations (
+                    dbsnp_id, rsid, source_version_id, retrieval_date
+                )
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                [dbsnp_id, f"rs{dbsnp_id}", sv],
+            )
+        assert _next_dbsnp_id(conn) == 3  # MAX(2) + 1
+
+        # MAX, not COUNT: a gap in the ids still continues from the max.
+        conn.execute(
+            """
+            INSERT INTO dbsnp_annotations (
+                dbsnp_id, rsid, source_version_id, retrieval_date
+            )
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            [100, "rs100", sv],
+        )
+        assert _next_dbsnp_id(conn) == 101
+
+
+def test_next_alias_id_allocates_from_empty_then_continues_from_max(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """``_next_alias_id`` returns 1 on an empty table, then ``MAX(alias_id) + 1``."""
+    init_databases()
+    with duckdb_connection() as conn:
+        assert _next_alias_id(conn) == 1  # empty table
+
+        sv = insert_source_version(
+            conn,
+            source_db="dbsnp",
+            version="b156",
+            source_url=None,
+            source_file_hash="a" * 64,
+            source_file_size=1,
+            record_count=1,
+        )
+        conn.execute(
+            """
+            INSERT INTO variant_aliases (
+                alias_id, alias_rsid, current_rsid, source_version_id, retrieval_date
+            )
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            [7, "rs00007", "rs42", sv],
+        )
+        assert _next_alias_id(conn) == 8  # MAX(7) + 1
 
 
 @pytest.fixture(autouse=True)
