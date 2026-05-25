@@ -70,9 +70,9 @@ Sub-phase status:
 - [x] 5.2 — ClinVar loader (PR #36)
 - [x] 5.3 — GWAS Catalog loader (PR #38)
 - [x] 5.4 — PGS Catalog metadata loader (PR #39)
-- [ ] 5.5 — gnomAD filtered (next)
+- [x] 5.5 — gnomAD filtered (PR #49)
 - [ ] 5.5b — gnomAD PGS extension. Gated on Phase 6 `pgs_score_weights` landing. Extends the active gnomAD source-version's coverage to PGS-component variants. Not a version bump — appends to the same active `source_version_id`. Verification: not applicable until Phase 6 lands. See [`finding-011`](docs/findings/finding-011-gnomad-three-way-intersection.md).
-- [ ] 5.6 — dbSNP filtered
+- [ ] 5.6 — dbSNP filtered. Schema correction (surrogate BIGINT PKs for `dbsnp_annotations` / `variant_aliases`) landed in PR #57; the filtered loader (PR B) is the remaining work.
 - [ ] 5.7 — `variant_annotations_index` refresh
 - [ ] 5.8 — Profile-level QC rollup
 
