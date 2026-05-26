@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Workflow — document four-actor split with VSC-ClaudeCodePlanning. 
+  Adds a Working with this codebase section to CLAUDE.md naming the four actors (AI-Claude, VSC-ClaudeCodePlanning, VSC-ClaudeCode, VSC-User), the plan-mode-first convention, the 8-element plan structure, and the implementation contract. No code, schema, or DDL changes. No re-ingest required.
 
 ### Added
 - **Sub-phase 5.6 PR B — dbSNP build 157 loader + remote-tabix / filter-set
