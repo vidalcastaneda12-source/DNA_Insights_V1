@@ -1459,6 +1459,166 @@ yet observed.
   the in-flight row's coverage is so partial that resume's
   per-chromosome overhead outweighs starting fresh).
 
+### dbSNP (sub-phase 5.6)
+
+**What's loaded.** NCBI's single multi-chromosome dbSNP GRCh38 VCF
+(`GCF_000001405.40.gz`, build 157, ~29.5 GB, bgzipped + tabix-indexed),
+filtered to the user's own variant positions — distinct `(chrom,
+pos_grch38)` in `variants_master`. Chromosomes 1-22 + X + **Y + MT**
+(unlike gnomAD, dbSNP ships rsIDs for every canonical chromosome, and the
+user's 23andMe export carries Y + MT positions worth annotating). The
+loader streams the remote VCF via cyvcf2 remote tabix and chunk-loads
+matching rows into `dbsnp_annotations` via PyArrow Table registration +
+`INSERT ... SELECT` at `DEFAULT_BATCH_SIZE = 50,000`. Supersession follows
+the version-pointer pattern (finding-010): per-chromosome content lands
+under a freshly-allocated `source_version_id`, and the
+`annotation_sources` pointer for `dbsnp` flips only when every supported
+chromosome completes. `variant_aliases` (the second `dbsnp`-governed
+table) is **not** populated in PR B — it pairs with the finding-005 #4
+tier-2 backfill.
+
+**Source contracts (ratified by the finding-013 gate, build 157).**
+
+* `rsid` reads from the VCF **ID column** (`record.ID`), never `INFO/RS` —
+  build 156+ emits `RS` values exceeding 2³¹ that htslib sets to missing
+  (`[W::vcf_parse_info] Extreme INFO/RS value encountered and set to
+  missing`). Confirmed live at `NC_012920.1:11` during the MT smoke below.
+* `#CHROM` uses RefSeq accessions (`NC_000001.11` … `NC_012920.1`), mapped
+  to canonical chroms by the stable GRCh38.p14 (GCF_000001405.40) assembly
+  definition, validated against the VCF header `##contig` set at pre-flight
+  (a missing/renamed accession raises `DbsnpSourceContigError`).
+* Multi-allelic sites are kept as a `VARCHAR[]` array (`alt_alleles`), not
+  split. `variant_class` ← `INFO/VC` (`SNV`→`snv`, `MNV`→`mnv`,
+  `INS`/`DEL`/`INDEL`/`DIV`→`in-del`). `gene_symbols` ← `INFO/GENEINFO`.
+  `is_clinical` ← presence of `INFO/CLNSIG`. `functional_class` and
+  `pos_grch37` are left NULL in PR B — build 157 carries only coarse legacy
+  function-class flags, not a VEP-grade consequence; populated from VEP in
+  Phase 6.
+
+**Filter shape.** `user_only` (distinct `variants_master` positions), not
+gnomAD's three-way `(user ∪ ClinVar ∪ GWAS)` intersection. dbSNP annotates
+the user's variants (rsID canonicalisation, REF/ALT recovery, tier-2
+matching), all of which read `variants_master`; loading dbSNP at
+ClinVar/GWAS/PGS positions the user doesn't carry would add rows nothing
+reads. The ClinVar/GWAS/PGS legs are deferred — the PGS leg to a
+hypothetical 5.6b, mirroring gnomAD's 5.5b. See
+[finding-016](../findings/finding-016-dbsnp-user-only-filter.md).
+
+**HTTP/2 retry behavior.** dbSNP shares the gnomAD remote-tabix machinery,
+extracted to `genome.annotate.remote_tabix` per finding-012 #11. NCBI's
+FTP host serves the same HTTP/2 reality as gnomAD's GCS bucket; the
+`_StderrTap` corruption detector, the `iter_remote_vcf_regions`
+open→detect→reopen→retry generator (bounded by
+`MAX_REMOTE_REGION_ATTEMPTS = 5`), and the `--coalesce-distance 50000`
+default (finding-012 #10) all apply. Events are emitted under the `dbsnp.*`
+prefix (`dbsnp.remote_open`, `dbsnp.chrom.htslib_recover`,
+`dbsnp.chrom.htslib_recover_summary`). Because dbSNP is one file queried
+per chromosome, the (~2.5 MB) `.tbi` is refetched per chrom — acceptable
+for a gated long-running op; an open-once optimization is a noted follow-up
+if real-data verification shows it dominates wall-clock.
+
+**Real-data verification commands.**
+
+```
+genome config set external_calls_enabled true
+genome annotate refresh --source dbsnp
+```
+
+Capture from the `dbsnp.refresh.complete` structlog line: `rows_loaded`,
+`filter_set_composition`, `distinct_variants_per_chrom`, `match_rate` (vs
+`variants_master`), `variant_class_distribution`, `gene_symbols_present`,
+`multiallelic_rows`, `is_clinical_rows`, plus `chromosomes_succeeded` /
+`chromosomes_failed` and wall-clock.
+
+Filter-set composition (`user_only`, distinct `(chrom, pos_grch38)`;
+verified 2026-05-25 against the post-rebuild chip-only `variants_master`):
+
+| Component | Distinct positions |
+|---|---|
+| `user` (`variants_master`) | 942,424 |
+| `union_total` | 942,424 |
+
+**Locked stable numbers (full genome, dbSNP build 157, locked 2026-05-25).**
+First complete refresh — `--resume` continuing the MT+Y subset version
+through chroms 1-22 + X, then flipping the `dbsnp` pointer (all 25
+chromosomes under one `source_version_id`):
+
+| Metric | Locked value |
+|---|---|
+| `rows_loaded` | 1,002,769 |
+| `match_rate` (vs `variants_master`) | 0.9977 (940,210 / 942,424 user positions carry ≥ 1 dbSNP rsID) |
+| `variant_class_distribution` | `{snv: 940145, in-del: 56040, mnv: 6584}` |
+| `multiallelic_rows` (`len(alt_alleles) > 1`) | 435,064 |
+| `is_clinical_rows` (`CLNSIG` present) | 46,935 |
+| `gene_symbols_present` | 623,616 |
+| htslib HTTP/2 reopens | 0 (at `--coalesce-distance 50000`) |
+| First-load wall-clock | ~101 min (6,070 s) |
+
+Per chromosome — user positions queried (the filter set) and dbSNP rows
+loaded (`distinct_variants_per_chrom`; rows exceed positions on the
+autosomes where a position carries multiple dbSNP records — an SNV plus an
+indel — and fall short on Y/MT where dbSNP lacks an rsID for some chip
+probes):
+
+| Chrom | User pos | Rows | Chrom | User pos | Rows |
+|---|---|---|---|---|---|
+| 1 | 73,013 | 77,396 | 14 | 29,823 | 31,739 |
+| 2 | 75,915 | 80,819 | 15 | 28,360 | 30,166 |
+| 3 | 62,886 | 66,865 | 16 | 30,383 | 32,349 |
+| 4 | 56,686 | 60,294 | 17 | 27,915 | 30,018 |
+| 5 | 55,733 | 59,193 | 18 | 27,247 | 28,976 |
+| 6 | 62,300 | 66,165 | 19 | 20,094 | 21,828 |
+| 7 | 50,173 | 53,419 | 20 | 23,211 | 24,667 |
+| 8 | 47,982 | 51,152 | 21 | 13,085 | 13,970 |
+| 9 | 41,132 | 43,856 | 22 | 13,328 | 14,346 |
+| 10 | 47,139 | 50,275 | X | 26,965 | 28,956 |
+| 11 | 45,612 | 48,553 | Y | 3,177 | 3,117 |
+| 12 | 44,337 | 47,299 | MT | 2,335 | 1,379 |
+| 13 | 33,593 | 35,972 | | | |
+
+The `match_rate` at 0.9977 (~99.8 % of user positions carry a dbSNP rsID)
+is the headline value-add — a `variants_master` position without a dbSNP
+row after a clean refresh is almost always a chip probe at a site dbSNP
+has not catalogued (concentrated on MT). A drift in `rows_loaded`, the
+per-chrom counts, or the composition on a re-run against the same build is
+a regression signal.
+
+This run confirmed the full live path against NCBI: the audited HEAD per
+chrom, the pre-flight `##contig` validation against all 25 accessions,
+accession querying for the Y/MT-only chroms (which gnomAD skips), the
+`INFO/RS`-overflow → `record.ID` rsid path (htslib's extreme-RS warning is
+emitted while the row still lands from the ID column), multi-allelic
+`VARCHAR[]` arrays (incl. 3-allele sites), `CLNSIG`→`is_clinical`,
+`GENEINFO`→`gene_symbols`, `functional_class` / `pos_grch37` NULL, and
+**zero htslib HTTP/2 reopens** across the full genome at the 50 kb coalesce
+default. The fast subset smoke `genome annotate refresh --source dbsnp
+--chromosomes MT,Y` (9.4 s, pointer unflipped) lands MT = 1,379 + Y = 3,117
+rows and is the quick reachability check.
+
+**Troubleshooting.**
+
+* **`ExternalCallsDisabledError`** — `external_calls_enabled` is `false`.
+  Run `genome config set external_calls_enabled true`. The blocked attempt
+  is still audit-logged; the pre-flight HEAD is the loader's first audited
+  call.
+* **`RemoteTabixLibcurlMissingError`** — cyvcf2's bundled htslib was built
+  without libcurl support, or NCBI's host is unreachable from this host.
+  Rebuild htslib (and cyvcf2 against it) with libcurl enabled; see the
+  README "Prerequisites". The pre-flight open fetches the VCF header, so a
+  failure here points at the toolchain rather than upstream data.
+* **`DbsnpSourceContigError`** — the VCF header `##contig` set is missing a
+  canonical RefSeq accession the loader expects. NCBI may have bumped the
+  GRCh38 assembly patch and renamed an accession; update
+  `_CHROM_TO_ACCESSION` in `loaders/dbsnp.py` to match.
+* **`RemoteTabixIterationError`** — a tabix region tripped the htslib HTTP/2
+  framing detector `MAX_REMOTE_REGION_ATTEMPTS = 5` times in a row. Inspect
+  the `dbsnp.chrom.htslib_recover` events for the failing region and verify
+  the URL with `curl -I https://ftp.ncbi.nlm.nih.gov/snp/latest_release/VCF/GCF_000001405.40.gz`.
+* **Resume / fresh start.** `genome annotate refresh --source dbsnp
+  --resume` continues the in-flight `source_version_id` (skips populated
+  chromosomes, flips when the full `SUPPORTED_CHROMS` set lands); `--force`
+  allocates a fresh id and starts over.
+
 ## Audit log review
 
 The full audit trail for a refresh is in `app.db.audit_log`. Group by

@@ -8,6 +8,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Sub-phase 5.6 PR B — dbSNP build 157 loader + remote-tabix / filter-set
+  extraction.** Adds `genome.annotate.loaders.dbsnp`, the seventh and last
+  Phase-5 reference-annotation source and the second remote-tabix source after
+  gnomAD. Streams NCBI's single multi-chromosome dbSNP GRCh38 VCF
+  (`GCF_000001405.40.gz`, build 157) via cyvcf2 remote-tabix, filtered to the
+  user's own variant positions (the `user_only` filter strategy — dbSNP
+  annotates `variants_master`, so the ClinVar/GWAS/PGS legs are deferred; see
+  [`finding-016`](docs/findings/finding-016-dbsnp-user-only-filter.md)), and
+  chunk-loads `dbsnp_annotations` (chromosomes 1-22 + X + Y + MT) under the
+  version-pointer supersession pattern with `--force` / `--resume` /
+  `--chromosomes` support and orphan version-row cleanup (finding-015).
+  Projection contracts were ratified against the real source by the finding-013
+  gate: `rsid` reads from the VCF ID column (never `INFO/RS`, which overflows
+  int32 on build 156+); multi-allelic sites are kept as a `VARCHAR[]` array (not
+  split); `variant_class` maps `INFO/VC`; `gene_symbols` parse `INFO/GENEINFO`;
+  `is_clinical` is the presence of `INFO/CLNSIG`; `functional_class` is left
+  NULL pending VEP (Phase 6). `variant_aliases` stays empty (it pairs with the
+  finding-005 #4 tier-2 backfill). Per finding-012 #11, the shared htslib/HTTP-2
+  machinery is extracted from `gnomad.py` into two reusable modules —
+  `genome.annotate.remote_tabix` (the `_StderrTap` corruption detector, the
+  open→iterate→detect→reopen→retry generator `iter_remote_vcf_regions`,
+  `coalesce_positions`, `audited_head`, `check_libcurl_available`) and
+  `genome.annotate.filter_set` (`build_filter_set` parameterised on
+  `strategy="user_only" | "three_way"`) — with `gnomad.py` re-exporting every
+  moved symbol so its loader and tests are behaviour-unchanged (structlog event
+  names preserved byte-for-byte). The `annotate refresh` CLI generalises its
+  former gnomad-only branch to `_REMOTE_TABIX_SOURCES = {gnomad, dbsnp}`. New
+  tests `test_loaders_dbsnp.py`, `test_remote_tabix.py`, `test_filter_set.py`
+  (+46; full suite 701 → 747, `test_loaders_gnomad.py` green unchanged);
+  `docs/runbooks/annotations.md` gains a `### dbSNP (sub-phase 5.6)` section with
+  the locked full-genome real-data identifiers — build 157, verified
+  2026-05-25: 1,002,769 rows at `match_rate` 0.9977 over the user's 942,424
+  positions, ~101 min wall-clock, zero htslib HTTP/2 reopens. The schema
+  coverage-strategy table's
+  dbSNP row is updated to "Filtered to user variants" (prose-only — no
+  `CREATE TABLE` block touched, so no `rm -rf data/` rebuild is implied). (PR B)
 - **Workflow tooling — `scripts/verify.sh` + `/handoff` slash command.**
   Two tooling additions ahead of Phase 5.6. `scripts/verify.sh` is a thin
   convenience executor for the merge-gate verification protocol

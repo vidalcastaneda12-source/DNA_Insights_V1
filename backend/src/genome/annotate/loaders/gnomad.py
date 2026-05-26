@@ -53,20 +53,28 @@ before the new version becomes user-visible.
 
 from __future__ import annotations
 
-import contextlib
-import fcntl
-import os
-import sys
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final, Self
+from typing import TYPE_CHECKING, Final
 
 import httpx
 import pyarrow as pa
 import structlog
 
+from genome.annotate.filter_set import FilterSet, build_filter_set
 from genome.annotate.registry import RefreshResult, register_loader
+from genome.annotate.remote_tabix import (
+    MAX_REMOTE_REGION_ATTEMPTS,
+    RemoteTabixIterationError,
+    RemoteTabixLibcurlMissingError,
+    _scan_for_htslib_errors,  # noqa: F401 — re-export for the gnomad public surface (tests)
+    _StderrTap,  # noqa: F401 — re-export for the gnomad public surface (tests reference it)
+    audited_head,
+    check_libcurl_available,
+    coalesce_positions,
+    iter_remote_vcf_regions,
+)
 from genome.annotate.source_versions import (
     get_current_version,
     insert_source_version,
@@ -252,185 +260,17 @@ class GnomadLoadResult:
 # ---------------------------------------------------------------------------
 
 
-class GnomadLibcurlMissingError(RuntimeError):
-    """Raised when the cyvcf2-bundled htslib cannot reach the gnomAD URL.
-
-    The pre-flight check opens a known-tiny tabix range against the
-    chr22 exomes VCF. If the open fails the most likely cause is that
-    the installed htslib was built without libcurl support, which means
-    remote-tabix reads (the loader's whole filtering strategy) cannot
-    work. The message points the operator at the rebuild instructions
-    rather than swallowing the failure and falling back to a full
-    download.
-    """
+# finding-012 #11 moved the error types to ``remote_tabix``. These aliases
+# preserve the gnomad public surface — callers and tests still raise/catch
+# ``GnomadLibcurlMissingError`` / ``GnomadRemoteIterationError``. They are the
+# *same* classes the shared machinery raises, so the catches keep working.
+GnomadLibcurlMissingError = RemoteTabixLibcurlMissingError
+GnomadRemoteIterationError = RemoteTabixIterationError
 
 
-class GnomadRemoteIterationError(RuntimeError):
-    """Raised when a single tabix region exhausts its retry budget.
-
-    The loader detects htslib BGZF / libcurl transient errors by
-    capturing C-level stderr writes and reopening the VCF on the next
-    region. When the *same* region keeps tripping the corruption
-    detector across many reopens, something more durable than a
-    transient HTTP/2 framing blip is at play (e.g. gnomAD has rotated
-    the URL, or the local network is degraded enough that no region
-    completes). The chromosome is failed in that case so the operator
-    sees a real error rather than a silent low-row-count run.
-    """
-
-
-# ---------------------------------------------------------------------------
-# htslib transient-error recovery.
-# ---------------------------------------------------------------------------
-#
-# gnomAD's GCS bucket responds over HTTPS with HTTP/2 multiplexed
-# connections. htslib 1.19's hfile_libcurl plugin opens one libcurl
-# easy handle per cyvcf2.VCF. When the loader fires many small tabix
-# range requests in rapid succession on the same handle, libcurl
-# eventually returns CURLE_HTTP2 (16) on one of the BGZF block reads.
-# htslib's iterator can't recover from that — subsequent ``vcf(region)``
-# calls silently return zero records, and stderr fills with
-# "[E::hts_itr_next] Failed to seek to offset NNN: Illegal seek" lines
-# whose offsets are garbage memory. The connection-level state is
-# unsalvageable; the only recovery is to close + reopen the VCF.
-#
-# Detection: htslib writes those error lines directly to fd 2 via the
-# hts_log_* helpers, not as Python exceptions. The Python iterator
-# protocol returns ``StopIteration`` (an empty for-loop) regardless.
-# So the loader captures fd 2 into a pipe during iteration, scans the
-# captured bytes for known htslib error tokens after each region, and
-# forwards every captured byte through to the operator's real stderr
-# so structlog output and other warnings remain visible.
-
-_HTSLIB_ERROR_TOKENS: Final[tuple[bytes, ...]] = (
-    b"easy_errno",
-    b"bgzf_read_block",
-    b"hts_itr_next",
-)
-
-MAX_REMOTE_REGION_ATTEMPTS: Final[int] = 5
-"""Maximum VCF reopens per region before the chromosome is failed.
-
-Each attempt closes the corrupted handle, reopens against the same
-URL, and re-iterates the region. The seen-keys dedup already in
-:func:`_load_chromosome` makes record re-yields idempotent (same
-``(chrom, pos, ref, alt)`` key → skipped on retry), so a successful
-attempt produces no duplicates regardless of how many partial
-yields the prior attempts emitted before tripping the detector.
-
-5 is generous: in practice corruption recovers on the first reopen
-because the transient libcurl HTTP/2 framing error is a connection-
-level event, not a server-side condition. A region that fails 5
-times in a row signals something more durable (network outage, URL
-rotation), which is properly surfaced as a chromosome failure.
-"""
-
-
-class _StderrTap:
-    """Capture and forward htslib's C-level stderr writes.
-
-    Used to detect cyvcf2/htslib BGZF + libcurl errors that don't
-    surface as Python exceptions. On enter the tap replaces fd 2 with
-    a non-blocking pipe; :meth:`check` drains the pipe, forwards the
-    bytes through to the saved real-stderr fd (so structlog output
-    and other warnings remain visible to the operator), and returns
-    True when one of :data:`_HTSLIB_ERROR_TOKENS` appears in the
-    drained bytes. On exit the tap restores the original fd 2 after
-    a final drain.
-
-    The pipe is sized to 1 MiB on Linux (``F_SETPIPE_SZ``) so a few
-    seconds of unread output cannot back up htslib's writer thread.
-    The drain loop is bounded by the pipe contents, not by a timer,
-    so :meth:`check` returns promptly between regions.
-
-    The tap is a thin context manager; constructing one outside a
-    ``with`` block does nothing and consuming :meth:`check` outside
-    the block silently returns ``False``. This makes it safe to keep
-    a reference in test fixtures that mock the loader's iteration.
-    """
-
-    _PIPE_SIZE: Final[int] = 1024 * 1024
-    _READ_CHUNK: Final[int] = 65536
-
-    def __init__(self) -> None:
-        self._original_fd: int | None = None
-        self._pipe_read: int | None = None
-
-    def __enter__(self) -> Self:
-        sys.stderr.flush()
-        self._original_fd = os.dup(2)
-        read_fd, write_fd = os.pipe()
-        fcntl.fcntl(read_fd, fcntl.F_SETFL, os.O_NONBLOCK)
-        # Best-effort enlargement of the pipe buffer so a slow consumer
-        # doesn't block htslib. F_SETPIPE_SZ is Linux-only; absence is
-        # not fatal (the default 64 KiB still works, just with more
-        # frequent drain calls).
-        f_setpipe_sz = getattr(fcntl, "F_SETPIPE_SZ", None)
-        if f_setpipe_sz is not None:
-            with contextlib.suppress(OSError):
-                fcntl.fcntl(read_fd, f_setpipe_sz, self._PIPE_SIZE)
-        os.dup2(write_fd, 2)
-        os.close(write_fd)
-        self._pipe_read = read_fd
-        return self
-
-    def __exit__(self, *_exc: object) -> None:
-        if self._original_fd is None or self._pipe_read is None:
-            return
-        # Final drain so anything written between the last check() and
-        # close reaches the operator's stderr.
-        self._drain_and_forward()
-        sys.stderr.flush()
-        os.dup2(self._original_fd, 2)
-        try:
-            os.close(self._pipe_read)
-        finally:
-            os.close(self._original_fd)
-            self._pipe_read = None
-            self._original_fd = None
-
-    def check(self) -> bool:
-        """Return True when an htslib error token appeared since the last call.
-
-        Drains the captured stderr buffer (forwarding every byte to
-        the operator's real stderr) and scans the drained bytes for
-        any of :data:`_HTSLIB_ERROR_TOKENS`. Subsequent calls only
-        see new output; the scan is monotonic per-call, not
-        cumulative.
-        """
-        return _scan_for_htslib_errors(self._drain_and_forward())
-
-    def _drain_and_forward(self) -> bytes:
-        if self._pipe_read is None or self._original_fd is None:
-            return b""
-        chunks: list[bytes] = []
-        while True:
-            try:
-                data = os.read(self._pipe_read, self._READ_CHUNK)
-            except BlockingIOError:
-                break
-            if not data:
-                break
-            chunks.append(data)
-        buf = b"".join(chunks)
-        if buf:
-            os.write(self._original_fd, buf)
-        return buf
-
-
-def _scan_for_htslib_errors(buf: bytes) -> bool:
-    """Return True when ``buf`` contains one of the htslib error tokens.
-
-    Module-level helper so tests can exercise the scan logic without
-    standing up an fd-redirecting tap. The token list intentionally
-    covers libcurl's ``easy_errno`` line (the original-cause signal),
-    BGZF's ``bgzf_read_block`` line (htslib's framing-layer signal),
-    and the iterator's ``hts_itr_next`` line (the post-corruption
-    seek-failure signal that the verification-2 run was flooded with).
-    Any one is sufficient evidence that the VCF handle is in a state
-    where subsequent region queries will silently return no records.
-    """
-    return any(token in buf for token in _HTSLIB_ERROR_TOKENS)
+# (htslib transient-error recovery moved to genome.annotate.remote_tabix —
+#  finding-012 #11. _StderrTap, _scan_for_htslib_errors, _HTSLIB_ERROR_TOKENS,
+#  and MAX_REMOTE_REGION_ATTEMPTS are imported + re-exported at module top.)
 
 
 # ---------------------------------------------------------------------------
@@ -439,46 +279,18 @@ def _scan_for_htslib_errors(buf: bytes) -> bool:
 
 
 def _check_libcurl_available() -> None:
-    """Confirm cyvcf2 can open a remote gnomAD VCF.
+    """Confirm cyvcf2 can open the gnomAD chr22 exomes VCF (libcurl pre-flight).
 
-    Opens a known-tiny tabix range against the gnomAD chr22 exomes
-    VCF. The query fetches at most one record from a tight position
-    window (no I/O cost on the gnomAD server side). A success means
-    htslib was built with libcurl support and the gnomAD GCS bucket
-    is reachable.
-
-    Raises :class:`GnomadLibcurlMissingError` with an actionable
-    message when the open or initial fetch fails for any reason. The
-    error preserves the underlying exception via ``__cause__`` so a
-    log reader can see the root cause (typically a libcurl-missing
-    htslib build).
+    Thin wrapper over
+    :func:`genome.annotate.remote_tabix.check_libcurl_available` pinned to
+    the gnomAD chr22 exomes URL and a known-tiny probe range
+    (``chr22:10500000-10500100`` — a low-coverage window near the short-arm
+    acrocentric boundary, free server-side). Raises
+    :class:`GnomadLibcurlMissingError` (the remote_tabix error type,
+    re-exported) on failure.
     """
-    from cyvcf2 import VCF  # noqa: PLC0415 — local import keeps the module-level surface narrow
-
     url = GNOMAD_URL_TEMPLATE.format(data_type="exomes", chrom="22")
-    # chr22:10500000-10500100 is in a low-coverage region near the
-    # short-arm acrocentric boundary; the range is small enough that
-    # the open + iter is essentially free server-side.
-    probe_region = "chr22:10500000-10500100"
-    try:
-        vcf = VCF(url)
-        try:
-            # Pull one record from a tight tabix range; the open path
-            # is what exercises libcurl, but fetching at least one row
-            # makes the failure mode unambiguous if the bucket changes
-            # shape.
-            iter(vcf(probe_region))
-        finally:
-            vcf.close()
-    except Exception as exc:
-        msg = (
-            "gnomAD remote VCF open failed. "
-            "htslib must be built with libcurl support; this environment "
-            "doesn't have it (or the gnomAD GCS bucket is unreachable). "
-            "Rebuild htslib (and cyvcf2 against it) with libcurl enabled. "
-            f"Probe URL: {url}"
-        )
-        raise GnomadLibcurlMissingError(msg) from exc
+    check_libcurl_available(url, "chr22:10500000-10500100")
 
 
 # ---------------------------------------------------------------------------
@@ -486,190 +298,33 @@ def _check_libcurl_available() -> None:
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True, slots=True)
-class _FilterSet:
-    """Result of :func:`_build_filter_set`.
+# finding-012 #11 moved the filter-set builder to genome.annotate.filter_set
+# and parameterised it on ``strategy``. gnomAD's three-way
+# ``(user U ClinVar U GWAS)`` intersection is the ``"three_way"`` strategy;
+# the alias + wrapper preserve the names the tests import (``_FilterSet``,
+# ``_build_filter_set``) and that ``load`` calls.
+_FilterSet = FilterSet
 
-    Carries the per-chromosome sorted-unique position lists plus the
-    composition counts the end-of-load summary surfaces.
+
+def _build_filter_set(conn: DuckDBPyConnection) -> FilterSet:
+    """Compute gnomAD's three-way ``(user U ClinVar U GWAS)`` filter set.
+
+    Thin wrapper over :func:`genome.annotate.filter_set.build_filter_set`
+    pinned to the ``"three_way"`` strategy and gnomAD's
+    :data:`SUPPORTED_CHROMS` (1-22, X). The PGS leg is intentionally
+    excluded at PR B; 5.5b will extend coverage without a version bump.
+    See finding-011 for the three-way-vs-four-way design discussion.
     """
-
-    positions: dict[str, list[int]]
-    composition: dict[str, int]
-
-
-def _build_filter_set(conn: DuckDBPyConnection) -> _FilterSet:
-    """Compute the three-way ``(user U ClinVar U GWAS)`` filter set.
-
-    Three components:
-
-    * ``user`` — distinct ``(chrom, pos_grch38)`` from
-      ``variants_master``. No per-row activity filter — every row in
-      ``variants_master`` is considered current (CLAUDE.md #7
-      version-pointer pattern applies to evolving annotation sources
-      only; user variants supersede at the row grain via
-      ``genotype_calls``).
-    * ``clinvar`` — distinct ``(chrom, pos_grch38)`` from
-      ``clinvar_annotations`` joined through
-      ``annotation_sources`` so only rows under the
-      currently-active ClinVar source-version contribute.
-    * ``gwas`` — same shape, joined through
-      ``annotation_sources`` against ``gwas_catalog_associations``.
-
-    PGS is intentionally excluded at PR B: ``pgs_catalog_scores`` is
-    metadata only and does not carry per-variant positions; the
-    per-variant weights table (``pgs_score_weights``) lands in
-    Phase 6, and 5.5b will then extend gnomAD coverage to those
-    additional positions without a version bump. See finding-011.
-
-    Returns a :class:`_FilterSet` whose ``positions`` dict maps each
-    chrom in :data:`SUPPORTED_CHROMS` to a sorted list of unique
-    positions. ``composition`` carries the per-source distinct counts
-    (``user``, ``clinvar``, ``gwas``) plus the ``union_total`` so the
-    end-of-load summary can name the filter set's shape.
-
-    Every subquery guards ``pos_grch38 > 0``. Upstream annotation
-    loaders (notably ClinVar) emit a ``-1`` sentinel for variants
-    whose GRCh38 coordinate could not be resolved; an ``IS NOT NULL``
-    guard would still admit those rows, and any negative value
-    flowing through :func:`_coalesce_positions` would produce an
-    invalid ``chr<N>:-1--1`` tabix region that htslib rejects with
-    "Coordinates must be > 0" and may corrupt the BGZF read offset
-    state. ``variants_master`` enforces ``pos_grch38 BIGINT NOT
-    NULL`` at the schema level, but the same guard is applied
-    uniformly for defense in depth.
-    """
-    chrom_list = ",".join(f"'{c}'" for c in SUPPORTED_CHROMS)
-
-    user_row = conn.execute(
-        f"""
-        SELECT COUNT(*) FROM (
-            SELECT DISTINCT chrom, pos_grch38
-              FROM variants_master
-             WHERE chrom::VARCHAR IN ({chrom_list})
-               AND pos_grch38 > 0
-        )
-        """,  # noqa: S608 — chrom_list is built from the module constant SUPPORTED_CHROMS
-    ).fetchone()
-    user_count = int(user_row[0]) if user_row is not None else 0
-
-    clinvar_row = conn.execute(
-        f"""
-        SELECT COUNT(*) FROM (
-            SELECT DISTINCT c.chrom, c.pos_grch38
-              FROM clinvar_annotations c
-              JOIN annotation_sources s
-                ON s.source_db = 'clinvar'
-               AND s.current_source_version_id = c.source_version_id
-             WHERE c.chrom::VARCHAR IN ({chrom_list})
-               AND c.pos_grch38 > 0
-        )
-        """,  # noqa: S608
-    ).fetchone()
-    clinvar_count = int(clinvar_row[0]) if clinvar_row is not None else 0
-
-    gwas_row = conn.execute(
-        f"""
-        SELECT COUNT(*) FROM (
-            SELECT DISTINCT g.chrom, g.pos_grch38
-              FROM gwas_catalog_associations g
-              JOIN annotation_sources s
-                ON s.source_db = 'gwas_catalog'
-               AND s.current_source_version_id = g.source_version_id
-             WHERE g.chrom::VARCHAR IN ({chrom_list})
-               AND g.pos_grch38 > 0
-        )
-        """,  # noqa: S608
-    ).fetchone()
-    gwas_count = int(gwas_row[0]) if gwas_row is not None else 0
-
-    union_rows = conn.execute(
-        f"""
-        WITH all_positions AS (
-            SELECT chrom::VARCHAR AS chrom, pos_grch38 AS pos
-              FROM variants_master
-             WHERE chrom::VARCHAR IN ({chrom_list})
-               AND pos_grch38 > 0
-            UNION
-            SELECT c.chrom::VARCHAR AS chrom, c.pos_grch38 AS pos
-              FROM clinvar_annotations c
-              JOIN annotation_sources s
-                ON s.source_db = 'clinvar'
-               AND s.current_source_version_id = c.source_version_id
-             WHERE c.chrom::VARCHAR IN ({chrom_list})
-               AND c.pos_grch38 > 0
-            UNION
-            SELECT g.chrom::VARCHAR AS chrom, g.pos_grch38 AS pos
-              FROM gwas_catalog_associations g
-              JOIN annotation_sources s
-                ON s.source_db = 'gwas_catalog'
-               AND s.current_source_version_id = g.source_version_id
-             WHERE g.chrom::VARCHAR IN ({chrom_list})
-               AND g.pos_grch38 > 0
-        )
-        SELECT chrom, pos
-          FROM all_positions
-         ORDER BY chrom, pos
-        """,  # noqa: S608
-    ).fetchall()
-
-    by_chrom: dict[str, list[int]] = {chrom: [] for chrom in SUPPORTED_CHROMS}
-    union_total = 0
-    for chrom_value, pos_value in union_rows:
-        chrom_str = str(chrom_value)
-        if chrom_str not in by_chrom:
-            continue
-        by_chrom[chrom_str].append(int(pos_value))
-        union_total += 1
-
-    composition = {
-        "user": user_count,
-        "clinvar": clinvar_count,
-        "gwas": gwas_count,
-        "union_total": union_total,
-    }
-    return _FilterSet(positions=by_chrom, composition=composition)
+    return build_filter_set(conn, strategy="three_way", supported_chroms=SUPPORTED_CHROMS)
 
 
 # ---------------------------------------------------------------------------
-# Position coalescing.
+# Position coalescing — re-export.
 # ---------------------------------------------------------------------------
 
-
-def _coalesce_positions(
-    positions: list[int],
-    max_gap: int,
-) -> list[tuple[int, int]]:
-    """Merge sorted positions into inclusive ranges when within ``max_gap``.
-
-    Adjacent positions whose gap (``next - current``) is less than or
-    equal to ``max_gap`` merge into one ``(start, end)`` tuple.
-    Positions farther apart than ``max_gap`` produce separate ranges.
-
-    Returns ``[]`` for an empty input. A single position ``p`` returns
-    ``[(p, p)]``.
-
-    Pure function — exercised independently by unit tests without a
-    DuckDB connection or network. Tabix accepts ``start:end`` ranges
-    inclusively on both ends, so the merged range covers every
-    original position; gnomAD records inside the gaps (sites we don't
-    care about) are still seen by the iterator and filtered in
-    :func:`_load_chromosome`.
-    """
-    if not positions:
-        return []
-    out: list[tuple[int, int]] = []
-    start = positions[0]
-    end = positions[0]
-    for pos in positions[1:]:
-        if pos - end <= max_gap:
-            end = pos
-        else:
-            out.append((start, end))
-            start = pos
-            end = pos
-    out.append((start, end))
-    return out
+# finding-012 #11 moved the implementation to remote_tabix. The gnomad alias
+# preserves the name the tests import and that ``load`` calls.
+_coalesce_positions = coalesce_positions
 
 
 # ---------------------------------------------------------------------------
@@ -876,31 +531,21 @@ def _insert_batch(
 def _audited_head(client: ExternalClient, url: str) -> None:
     """Issue an audited HEAD against ``url`` for the audit-log paper trail.
 
-    The remote-tabix VCF open is the actual data fetch, but it does
-    not flow through the audited HTTP client (cyvcf2 talks to htslib's
-    libcurl directly). To keep the audit-log invariant — every external
-    call is logged — the loader issues an audited HEAD against the
-    same URL once per chromosome / data_type. The HEAD's response
-    headers carry no genome content; the audit row records that the
-    URL was opened.
-
-    A non-200 HEAD does not abort the chromosome — gnomAD's GCS bucket
-    occasionally rejects HEAD against the canonical URL even when GET
-    works fine. The loader logs the failure and proceeds; the real
-    error path is the cyvcf2 open inside :func:`_load_chromosome`.
+    Thin wrapper over :func:`genome.annotate.remote_tabix.audited_head`
+    pinned to gnomAD's resource id + event prefix, so the audit row's
+    ``resource_id`` stays ``gnomad_remote_vcf_open`` and the non-fatal log
+    event stays ``gnomad.audited_head_non_fatal``.
     """
-    try:
-        client.request(
-            "HEAD",
-            url,
-            resource_type="annotation_source",
-            resource_id=_REMOTE_OPEN_RESOURCE_ID,
-        )
-    except ExternalCallError as exc:
-        logger.info("gnomad.audited_head_non_fatal", url=url, error=str(exc))
+    audited_head(
+        client,
+        url,
+        resource_id=_REMOTE_OPEN_RESOURCE_ID,
+        event_prefix=SOURCE_DB,
+        log=logger,
+    )
 
 
-def _load_chromosome(  # noqa: C901, PLR0913, PLR0915 — irreducible per-chrom configuration + retry loop
+def _load_chromosome(  # noqa: C901, PLR0913 — irreducible per-chrom configuration
     conn: DuckDBPyConnection,
     audited_client: ExternalClient,
     chrom: str,
@@ -912,34 +557,26 @@ def _load_chromosome(  # noqa: C901, PLR0913, PLR0915 — irreducible per-chrom 
 ) -> int:
     """Iterate gnomAD's remote VCFs for ``chrom`` and insert filtered rows.
 
-    Steps for each ``data_type`` in ``("exomes", "genomes")``:
+    For each ``data_type`` in ``("exomes", "genomes")`` the loader issues
+    an audited HEAD (paper trail) and streams the remote VCF via
+    :func:`genome.annotate.remote_tabix.iter_remote_vcf_regions`, which
+    owns the open → iterate → detect-corruption → reopen → retry loop (the
+    gnomAD-on-GCS HTTP/2 framing failure mode) and emits the
+    ``gnomad.remote_open`` / ``gnomad.chrom.htslib_recover`` events. Each
+    yielded record is consumed here:
 
-    1. Issue an audited HEAD against the URL (paper trail).
-    2. Open the remote VCF via cyvcf2 ``VCF(url)`` inside a stderr-tap
-       context that captures htslib's C-level error writes.
-    3. For each ``(start, end)`` tabix range, iterate records. After
-       the inner iterator exhausts, the tap's :meth:`_StderrTap.check`
-       reports whether libcurl tripped a transient HTTP/2 framing
-       error during the read (the gnomAD-on-GCS failure mode that
-       silently corrupts htslib's iterator state and turns every
-       subsequent ``vcf(region)`` call into an empty yield). When
-       detected, the VCF is closed + reopened and the region is
-       re-iterated. Bounded by :data:`MAX_REMOTE_REGION_ATTEMPTS`.
-    4. Reject records whose position is not in ``filter_positions``
-       (the coalesced ranges cover gaps between actual filter
-       positions; the membership check is the precise filter).
-    5. Build per-row dicts via :func:`_record_to_row`; dedup by
-       ``(chrom, pos, ref, alt)`` with first-write-wins (exomes
-       iterates first → exomes-derived AF wins on overlapping sites).
-       The dedup set is shared across retry attempts, so any records
-       yielded before a mid-region corruption event are simply re-
-       skipped on the retry pass — record re-yields are idempotent.
-    6. Flush every ``batch_size`` rows via :func:`_insert_batch`.
+    * Reject records whose position is not in ``filter_positions`` (the
+      coalesced ranges cover gaps between actual filter positions; the
+      membership check is the precise filter).
+    * Build per-row dicts via :func:`_record_to_row`; dedup by
+      ``(chrom, pos, ref, alt)`` with first-write-wins (exomes iterates
+      first → exomes-derived AF wins on overlapping sites). The dedup set
+      is shared across the two data types and across retry attempts, so a
+      record re-yielded after a mid-region reopen lands at most once.
+    * Flush every ``batch_size`` rows via :func:`_insert_batch`.
 
     Returns the number of rows inserted for the chromosome.
     """
-    from cyvcf2 import VCF  # noqa: PLC0415 — local import keeps module surface narrow
-
     seen_keys: set[tuple[str, int, str, str]] = set()
     pending: list[dict[str, object]] = []
     inserted = 0
@@ -983,78 +620,20 @@ def _load_chromosome(  # noqa: C901, PLR0913, PLR0915 — irreducible per-chrom 
         if len(pending) >= batch_size:
             _flush()
 
+    region_strings = [f"chr{chrom}:{start}-{end}" for start, end in regions]
+    # exomes iterates first so its AF wins on (chrom, pos, ref, alt)
+    # overlaps via the seen_keys first-write-wins dedup.
     for data_type in ("exomes", "genomes"):
         url = GNOMAD_URL_TEMPLATE.format(data_type=data_type, chrom=chrom)
         _audited_head(audited_client, url)
-        logger.info("gnomad.remote_open", chrom=chrom, data_type=data_type, url=url)
-        reopens = 0
-        with _StderrTap() as detector:
-            # Discard any stderr written during VCF construction; tests
-            # mock VCF and write nothing, the real cyvcf2 may emit
-            # benign warnings (e.g. about index recency) that should
-            # not look like a corruption event to the first region's
-            # post-iteration check.
-            vcf = VCF(url)
-            detector.check()
-            try:
-                for start, end in regions:
-                    region = f"chr{chrom}:{start}-{end}"
-                    recovered = False
-                    for attempt in range(MAX_REMOTE_REGION_ATTEMPTS):
-                        for record in vcf(region):
-                            _consume_record(record)
-                        if not detector.check():
-                            recovered = True
-                            break
-                        # Transient htslib error during read. Close the
-                        # corrupted handle and reopen against the same
-                        # URL only if there is another attempt left —
-                        # the final attempt's failure leads straight to
-                        # raise, no point spending a reopen on a handle
-                        # that will never be used. The seen_keys set
-                        # makes record re-yields on the next attempt
-                        # idempotent.
-                        if attempt + 1 == MAX_REMOTE_REGION_ATTEMPTS:
-                            break
-                        # Corrupt-handle close may raise; the open
-                        # call that follows discards the handle anyway,
-                        # so a close failure here is not actionable.
-                        with contextlib.suppress(Exception):
-                            vcf.close()
-                        vcf = VCF(url)
-                        # Drain stderr produced during reopen so the
-                        # next region's check starts clean.
-                        detector.check()
-                        reopens += 1
-                        logger.warning(
-                            "gnomad.chrom.htslib_recover",
-                            chrom=chrom,
-                            data_type=data_type,
-                            region=region,
-                            attempt=attempt + 1,
-                            reopens=reopens,
-                        )
-                    if not recovered:
-                        msg = (
-                            f"gnomAD region {region!r} for chrom {chrom} "
-                            f"({data_type}) failed after "
-                            f"{MAX_REMOTE_REGION_ATTEMPTS} attempts — "
-                            "persistent htslib transient errors"
-                        )
-                        raise GnomadRemoteIterationError(msg)
-            finally:
-                # Final close of whichever VCF handle is current. The
-                # last handle may be corrupt; suppress close errors so
-                # the outer summary log still runs.
-                with contextlib.suppress(Exception):
-                    vcf.close()
-        if reopens:
-            logger.info(
-                "gnomad.chrom.htslib_recover_summary",
-                chrom=chrom,
-                data_type=data_type,
-                reopens=reopens,
-            )
+        for record in iter_remote_vcf_regions(
+            url,
+            region_strings,
+            event_prefix=SOURCE_DB,
+            log_context={"chrom": chrom, "data_type": data_type},
+            log=logger,
+        ):
+            _consume_record(record)
 
     _flush()
     return inserted
