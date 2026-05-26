@@ -13,7 +13,7 @@ A local-first personal DNA insights application that ingests 23andMe + Ancestry 
 This codebase is built collaboratively across four actors. The boundaries between them are part of the convention.
 
 - **AI-Claude** — the planning chat (claude.ai / Claude desktop). Roadmap planning, plan review, handoff review, test-results review. Does not touch the codebase or run commands.
-- **VSC-ClaudeCodePlanning** — Claude Code in plan mode (Shift+Tab to toggle). Reads the repo, produces a technical plan, surfaces questions. Does not write code or run commands.
+- **VSC-ClaudeCodePlanning** — Claude Code in plan mode — toggled locally via Shift+Tab, or invoked in the cloud via /ultraplan for inline-comment review. Reads the repo, produces a technical plan, surfaces questions. Does not write code or run commands.
 - **VSC-ClaudeCode** — Claude Code in normal mode. Writes code, runs the dev-loop tests, commits, pushes, opens PRs, produces an end-of-session handoff via `/handoff`.
 - **VSC-User** — the human operator. Approves plans, runs the formal verification protocol (`docs/runbooks/verification.md`), merges.
 
