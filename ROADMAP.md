@@ -54,7 +54,7 @@ completes against real 23andMe + Ancestry corpus.
 
 ## Phase 5 — Reference annotation loaders
 
-**Status:** in progress — 5.0–5.6 complete; 5.7 remains and closes the phase.
+**Status:** complete — 5.0–5.7 shipped; the phase is closed (5.7 PR #62).
 
 - Per-source downloaders (ClinVar, GWAS Catalog, PharmGKB, CPIC, PGS Catalog metadata, gnomAD filtered, dbSNP filtered)
 - Each writes to `annotation_source_versions` and the per-source table; supersession is via the version-pointer pattern (see CLAUDE.md #7 and [`finding-010`](docs/findings/finding-010-version-pointer-supersession-pattern.md))
@@ -70,7 +70,7 @@ Sub-phase status:
 - [x] 5.4 — PGS Catalog metadata loader (PR #39)
 - [x] 5.5 — gnomAD filtered (PR #49)
 - [x] 5.6 — dbSNP filtered (surrogate BIGINT PKs PR #57; filtered loader PR #59)
-- [ ] 5.7 — `variant_annotations_index` refresh (closes Phase 5). Ships with the VEP columns NULL; Phase 6's VEP runner backfills them via a later rollup refresh.
+- [x] 5.7 — `variant_annotations_index` refresh (closes Phase 5; PR #62). Joins ClinVar / GWAS / gnomAD / PharmGKB into one sparse row per variant via `genome annotate refresh-index`. Ships with the VEP columns + `is_acmg_sf` NULL (Phase 6's VEP runner / ACMG SF detection backfill them via a later rollup refresh) and `is_curated` from ClinVar/PharmGKB only (CPIC excluded at variant level — no gene→variant mapping yet).
 
 Follow-ups (not phase-bound; slot when convenient):
 - PharmGKB / CPIC `already_current=True` cosmetic cleanup (finding-010 #12)

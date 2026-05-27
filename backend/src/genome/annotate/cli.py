@@ -294,6 +294,36 @@ def annotate_refresh(  # noqa: PLR0913 — irreducible CLI surface; gnomad-speci
     )
 
 
+@annotate_app.command("refresh-index")
+def annotate_refresh_index(
+    force: Annotated[  # noqa: FBT002 — typer boolean flag, opt-in
+        bool,
+        typer.Option(
+            "--force",
+            help="Accepted for symmetry; the build is unconditional (no-op).",
+        ),
+    ] = False,
+) -> None:
+    """Rebuild the ``variant_annotations_index`` rollup (sub-phase 5.7).
+
+    Joins the currently-active ClinVar / GWAS Catalog / gnomAD / PharmGKB
+    releases into one sparse row per variant that carries ≥1 annotation, so
+    ``variant_full_v`` returns joined annotations instead of NULLs. VEP columns
+    and ``is_acmg_sf`` ship NULL pending Phase 6. Wholesale replace in one
+    transaction — readers never see a torn index.
+    """
+    from genome.annotate.index_refresh import refresh_index  # noqa: PLC0415
+
+    result = refresh_index(force=force)
+    typer.echo(
+        f"variant_annotations_index rebuilt: rows={result.row_count} "
+        f"clinvar={result.clinvar_matches} gwas={result.gwas_matches} "
+        f"gnomad={result.gnomad_matches} pharmgkb={result.pharmgkb_matches} "
+        f"curated={result.curated_count} versions={result.refresh_versions} "
+        f"elapsed_ms={result.elapsed_ms}",
+    )
+
+
 __all__ = [
     "annotate_app",
 ]
