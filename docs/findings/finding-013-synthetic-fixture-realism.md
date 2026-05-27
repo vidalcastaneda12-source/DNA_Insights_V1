@@ -120,7 +120,7 @@
     `pos_grch38 > 0` guard uniformly across the user / ClinVar /
     GWAS subqueries and the union in `_build_filter_set`. Any
     future loader that consumes the filter set (sub-phase 5.6
-    dbSNP, sub-phase 5.5b PGS extension, the materialized
+    dbSNP, the gnomAD PGS extension, the materialized
     `variant_annotations_index` refresh in 5.7) inherits the
     guard for free. New sentinel-emitting upstream sources do not
     require per-consumer fixes.
@@ -128,8 +128,8 @@
 ## Follow-up
 
 12. **Apply the "open source, list schema" step to future external
-    loaders.** The remaining Phase-5 loader (sub-phase 5.6 dbSNP)
-    and any later VEP / Ensembl / ENCODE loaders should
+    loaders.** The dbSNP loader (sub-phase 5.6, now shipped) and any
+    later VEP / Ensembl / ENCODE loaders should
     incorporate a canonical-record inspection step into the
     planning prompt before any code is written.
 

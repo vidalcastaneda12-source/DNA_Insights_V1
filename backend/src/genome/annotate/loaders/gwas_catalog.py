@@ -64,7 +64,7 @@ older ``source_version_id``. The schema lives in
 for this sub-phase.
 
 The loader does **not** touch ``variant_annotations_index`` -- that
-refresh is a separate downstream concern in sub-phase 5.8.
+refresh is a separate downstream concern in sub-phase 5.7.
 """
 
 from __future__ import annotations

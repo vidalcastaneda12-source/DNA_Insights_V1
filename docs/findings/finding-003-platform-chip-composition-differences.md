@@ -28,6 +28,6 @@ profile-level QC rollup should combine per-source inferences.
 
 ## Follow-up
 
-Phase 5 or later should introduce a profile-level `sample_qc` rollup that
+Phase 6's genome-QC pipeline should introduce a profile-level `sample_qc` rollup that
 combines per-run inferences across sources. Until then, treat ambiguous
 Ancestry sex inferences as expected behavior, not anomalies.

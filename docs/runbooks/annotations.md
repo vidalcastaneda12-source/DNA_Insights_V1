@@ -1283,9 +1283,9 @@ partial-run semantics.
 **Filter shape.** CLAUDE.md "Things never to do" #3 mandates the
 broader `(user ∪ ClinVar ∪ GWAS ∪ PGS)` intersection, but PGS
 per-variant weights do not yet exist in the DB at PR-B time (they
-land in Phase 6 as `pgs_score_weights`). Sub-phase 5.5b will
-extend the active gnomAD source-version's coverage to PGS-component
-variants without a version bump. See
+land in Phase 6 as `pgs_score_weights`). A Phase 6 follow-up gated on
+`pgs_score_weights` will extend the active gnomAD source-version's
+coverage to PGS-component variants without a version bump. See
 [finding-011](../findings/finding-011-gnomad-three-way-intersection.md).
 
 **HTTP/2 retry behavior.** Remote-tabix iteration against gnomAD's
@@ -1500,8 +1500,9 @@ gnomAD's three-way `(user ∪ ClinVar ∪ GWAS)` intersection. dbSNP annotates
 the user's variants (rsID canonicalisation, REF/ALT recovery, tier-2
 matching), all of which read `variants_master`; loading dbSNP at
 ClinVar/GWAS/PGS positions the user doesn't carry would add rows nothing
-reads. The ClinVar/GWAS/PGS legs are deferred — the PGS leg to a
-hypothetical 5.6b, mirroring gnomAD's 5.5b. See
+reads. The ClinVar/GWAS/PGS legs are deferred — the PGS leg to a Phase 6
+follow-up gated on `pgs_score_weights`, mirroring the gnomAD PGS extension.
+See
 [finding-016](../findings/finding-016-dbsnp-user-only-filter.md).
 
 **HTTP/2 retry behavior.** dbSNP shares the gnomAD remote-tabix machinery,

@@ -158,9 +158,9 @@ Discrepancy rows are produced in two distinct situations:
 
 Severity escalation to `critical` for variants in ACMG SF genes (per the
 schema's documented rule) is **out of scope for Phase 3**. The
-`variants_master.is_acmg_sf` flag is not populated until the Phase 5
-reference-annotation loaders run; a later enrichment job in Phase 5+ will
-retroactively bump severity on the affected discrepancy rows.
+`variants_master.is_acmg_sf` flag is not populated until Phase 6's ACMG SF
+detection pipeline runs (its first task); that pipeline then retroactively
+bumps severity on the affected discrepancy rows.
 
 ## Idempotence
 
@@ -176,8 +176,9 @@ tables in their previous consistent state.
 - `dosage` counts ALT-matching alleles in the consensus (`0`, `1`, or `2`),
   using `variants_master.alt_allele` as the ALT label. The ALT label
   assigned at ingest is the alphabetically-larger observed allele, not the
-  real reference-panel ALT — that reconciliation lands in Phase 5 once VEP
-  and dbSNP annotations are loaded.
+  real reference-panel ALT — that reconciliation is a post-5.7 backfill on
+  dbSNP canonical REF/ALT (loaded in 5.6), with Phase 6's VEP runner refining
+  functional calls.
 - `confidence` is a placeholder in Phase 3. The current values are:
   `both_concordant` ⇒ 0.99, `disagreement_resolved` (strand-flip) ⇒ 0.90,
   `single_source` (true `platform_unique`) ⇒ 0.85, `single_source` (with a
