@@ -117,6 +117,8 @@ VSC-User runs the canonical verification independently against the pushed branch
 
    These numbers are stable identifiers for the current (pre-canonicalization) `variants_master`. Drift on a re-run against the same corpus + same source versions is a regression signal; the post-5.7 backfill is the deliberate event that re-locks them upward.
 
+5. **`variant_aliases` is populated by `genome annotate refresh-aliases`, the first post-5.7 backfill (see finding-019).** It loads NCBI's dbSNP `RsMergeArch.bcp.gz` (legacy rs-merge archive, ~146 MB, frozen 2018/build ~151 — the VCF carries no merge history) filtered to merges touching the user's own rsIDs on either side, mapping `alias_rsid (old) → current_rsid (survivor)` with `alias_type='merged'`. It is **not** a registered `--source` loader; it attaches alias rows under the **current dbSNP `source_version_id`** (the dbsnp source group's two tables share one `annotation_sources` pointer per decision #7 / PR #57) — no new version, no pointer flip, no VCF re-stream. Consequence: **re-run `refresh-aliases` after any future `refresh --source dbsnp`** that flips the dbsnp pointer, or the new epoch carries no aliases. The drift identifiers (`rows_loaded`, `distinct_alias_rsid`, `distinct_current_rsid`, `user_old_rsid_hits` — the tier-2-lift proxy — and `user_current_rsid_hits`) lock on the first real-data run; capture them into finding-019 and here at verification. Tier-2 rsID matching (finding-005 #4) is the consumer, a later PR.
+
 ## Environment requirements
 
 - **SQLCipher must be built with FTS5.** `app.db` includes a `notes_fts` virtual

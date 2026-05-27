@@ -324,6 +324,54 @@ def annotate_refresh_index(
     )
 
 
+@annotate_app.command("refresh-aliases")
+def annotate_refresh_aliases(
+    force: Annotated[  # noqa: FBT002 — typer boolean flag, opt-in
+        bool,
+        typer.Option(
+            "--force",
+            help=(
+                "Re-download RsMergeArch and rebuild the alias set even when "
+                "variant_aliases is already populated for the current dbSNP "
+                "version (DELETE + re-INSERT under the same source_version_id, "
+                "in one transaction)."
+            ),
+        ),
+    ] = False,
+) -> None:
+    """Populate ``variant_aliases`` from dbSNP's rs-merge archive (post-5.7 backfill).
+
+    Loads NCBI's ``RsMergeArch.bcp.gz`` (filtered to merges touching the user's
+    own rsIDs on either side) into ``variant_aliases`` under the **current**
+    dbSNP ``source_version_id`` — the dbSNP VCF must already be loaded
+    (``genome annotate refresh --source dbsnp``); the pointer is not flipped and
+    the VCF is not re-streamed. Fills the map the deferred tier-2 rsID merge
+    matching consumes. Re-run after any future dbSNP refresh to re-attach the
+    map to the new epoch.
+    """
+    from genome.annotate.loaders.variant_aliases import (  # noqa: PLC0415
+        DbsnpNotLoadedError,
+        refresh_aliases,
+    )
+
+    try:
+        result = refresh_aliases(force=force)
+    except DbsnpNotLoadedError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
+    typer.echo(
+        f"variant_aliases populated: source_version_id={result.target_source_version_id} "
+        f"already_populated={result.already_populated} "
+        f"rows={result.rows_loaded} "
+        f"distinct_alias={result.distinct_alias_rsid} "
+        f"distinct_current={result.distinct_current_rsid} "
+        f"user_old_rsid_hits={result.user_old_rsid_hits} "
+        f"user_current_rsid_hits={result.user_current_rsid_hits} "
+        f"scanned={result.source_rows_scanned}",
+    )
+
+
 __all__ = [
     "annotate_app",
 ]

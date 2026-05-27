@@ -89,7 +89,8 @@ Deferred to later phases:
 Re-derivations of `variants_master` / `consensus_genotypes` content enabled by the loaded dbSNP build (5.6). Not loaders, not analyses — they slot after 5.7 closes Phase 5 and before the Phase 6 analyses begin. Gated on dbSNP canonical REF/ALT, and on `variant_aliases` being populated (5.6 PR B shipped `dbsnp_annotations` only and left `variant_aliases` empty — see finding-016 #8; these backfills populate and consume it).
 
 - Canonical REF/ALT for strand-flip dedupe (finding-005 #1)
-- Tier-2 rsID matching via `variant_aliases` (finding-005 #4)
+- [x] `variant_aliases` population from dbSNP RsMergeArch — `genome annotate refresh-aliases` (finding-019). The data dependency for the item below; attaches to the current dbSNP epoch (no pointer flip).
+- Tier-2 rsID matching via `variant_aliases` (finding-005 #4) — consumes the populated map above
 - Hom-only recovery via canonical REF/ALT (finding-005 #6)
 
 ## Phase 6 — Analysis pipelines
