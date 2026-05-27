@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scripts/verify.sh` a `TMPDIR` prelude that relocates pytest + DuckDB
   scratch to a gitignored repo-local `.verify-tmp/` and clears it each run,
   keeping the system `/tmp` clean during verification. No schema, DDL, or
-  data changes; no re-ingest.
+  data changes; no re-ingest. (#63)
 - Phase 5 restructure — reset the loader phase around the loader/runner cut
   (Phase 5 downloads-and-loads; Phase 6 runs-tools-against-user-variants).
   Phase 5 now has exactly one remaining sub-phase, 5.7
