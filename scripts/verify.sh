@@ -9,6 +9,13 @@
 
 set -euo pipefail
 
+# Keep pytest + DuckDB scratch off the system /tmp (small/slow on WSL2) and
+# give each run a clean slate. See docs/runbooks/verification.md.
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+export TMPDIR="${REPO_ROOT}/.verify-tmp"
+rm -rf "${TMPDIR}"
+mkdir -p "${TMPDIR}"
+
 run_step() {
     local label="$1"
     shift

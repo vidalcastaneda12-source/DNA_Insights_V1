@@ -2,6 +2,9 @@
 data/
 archive/
 
+# Verification scratch — TMPDIR for scripts/verify.sh; cleared each run.
+.verify-tmp/
+
 # Tabix index files (cyvcf2 caches these in cwd when opening remote VCFs;
 # they're regenerable on demand and never part of source).
 *.tbi

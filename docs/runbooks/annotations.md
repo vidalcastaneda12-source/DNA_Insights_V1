@@ -113,7 +113,17 @@ database needs to be reloaded:
    genome annotate refresh --source clinvar
    genome annotate refresh --source gwas_catalog
    genome annotate refresh --source pgs_catalog
+   genome annotate refresh --source gnomad
+   genome annotate refresh --source dbsnp
+   genome annotate refresh-index
    ```
+
+The last three are order-sensitive: `gnomad` builds its
+`(user ∪ ClinVar ∪ GWAS)` filter from the active ClinVar and GWAS
+releases, so both must already be loaded; `refresh-index` rolls up the
+four variant-linkable sources (ClinVar, GWAS, gnomAD, PharmGKB) through
+their version pointers, so it runs last. `dbsnp` reads only
+`variants_master` and is order-independent among the loaders.
 
 The annotation refreshes are idempotent on
 `(source_db, version, source_file_hash)` — if upstream hasn't moved

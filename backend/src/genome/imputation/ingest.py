@@ -44,6 +44,7 @@ Schema fields we write:
 from __future__ import annotations
 
 import contextlib
+import os
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Final, Literal
@@ -84,6 +85,22 @@ _ESTIMATED_VARIANTS_PER_SECOND: Final[int] = 16_500
 _IMPUTABLE_CHROMS: Final[frozenset[str]] = frozenset(
     {*(str(i) for i in range(1, 23)), "X", "Y"},
 )
+
+# A cleanly-closed BGZF file (Beagle's .vcf.gz output) ends with this 28-byte
+# empty-block EOF marker (htslib's BGZF_EOF). Its absence on a BGZF file means
+# the writer died mid-stream — the truncated result/chrX.vcf.gz of
+# finding-008 #2, which cyvcf2 reads as zero variants with only a
+# "[W::bgzf_read_block] EOF marker is absent" warning rather than an error.
+_BGZF_EOF_MARKER: Final[bytes] = bytes.fromhex(
+    "1f8b08040000000000ff0600424302001b0003000000000000000000",
+)
+# A BGZF block starts with the gzip+deflate magic (1f 8b 08) and sets the
+# FEXTRA flag (0x04) for its per-block size subfield. Plain gzip — our synthetic
+# fixtures and the prepare-step upload VCFs — leaves FEXTRA unset, so this
+# distinguishes real Beagle BGZF output from plain gzip and limits the
+# EOF-marker check to the former.
+_GZIP_DEFLATE_MAGIC: Final[bytes] = b"\x1f\x8b\x08"
+_GZIP_FLG_FEXTRA: Final[int] = 0x04
 
 
 @dataclass(slots=True)
@@ -233,8 +250,65 @@ def _extract_r2(info: _cyvcf2_typing.INFO) -> float | None:
     return None
 
 
+def _is_bgzf(path: Path) -> bool:
+    """Return True if ``path`` is a BGZF file (vs. plain gzip / uncompressed).
+
+    Beagle writes BGZF; our synthetic test fixtures and the prepare-step upload
+    VCFs use plain ``gzip.open``. Only BGZF carries the EOF marker checked by
+    :func:`_has_bgzf_eof`, so plain gzip is exempt from the truncation guard.
+    """
+    try:
+        with path.open("rb") as fh:
+            head = fh.read(4)
+    except OSError:
+        return False
+    return (
+        head.startswith(_GZIP_DEFLATE_MAGIC)
+        and len(head) > len(_GZIP_DEFLATE_MAGIC)
+        and bool(head[3] & _GZIP_FLG_FEXTRA)
+    )
+
+
+def _has_bgzf_eof(path: Path) -> bool:
+    """Return True if BGZF ``path`` ends with the canonical 28-byte EOF marker."""
+    marker_len = len(_BGZF_EOF_MARKER)
+    try:
+        if path.stat().st_size < marker_len:
+            return False
+        with path.open("rb") as fh:
+            fh.seek(-marker_len, os.SEEK_END)
+            return fh.read(marker_len) == _BGZF_EOF_MARKER
+    except OSError:
+        return False
+
+
+def _assert_result_vcf_intact(path: Path) -> None:
+    """Refuse a truncated BGZF result VCF (finding-008 #2).
+
+    When Beagle fails mid-run — e.g. the chrX reference-panel ploidy error — it
+    leaves a BGZF ``result/chr*.vcf.gz`` with no EOF marker. cyvcf2 reads such a
+    file as zero (or partially-zero) variants with only a warning, so a broken
+    run would otherwise import as a silent empty success. Raise instead.
+    """
+    if _is_bgzf(path) and not _has_bgzf_eof(path):
+        msg = (
+            f"result VCF {path} is a truncated BGZF file (missing its EOF "
+            "marker); the imputation runner almost certainly failed mid-write "
+            "(e.g. the chrX reference-panel ploidy failure, finding-008). "
+            "Re-run `genome imputation run <id>`, or import the intact "
+            "chromosomes with `--chromosomes` (excluding the truncated one)."
+        )
+        raise RuntimeError(msg)
+
+
 def _open_imputed_vcf(path: Path) -> _cyvcf2_typing.VCF:
-    """Open ``path`` with cyvcf2. Import is deferred so the type hint stays clean."""
+    """Open ``path`` with cyvcf2; refuse a truncated BGZF result first.
+
+    Import is deferred so the type hint stays clean. The truncation guard runs
+    before cyvcf2 sees the file, which would otherwise read a truncated result
+    as a silent zero-variant success (finding-008 #2).
+    """
+    _assert_result_vcf_intact(path)
     import cyvcf2  # noqa: PLC0415 — import deferred so module loads without cyvcf2 at type-check time
 
     return cyvcf2.VCF(str(path))

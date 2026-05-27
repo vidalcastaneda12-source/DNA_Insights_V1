@@ -702,3 +702,94 @@ def test_batch_size_rejects_non_positive_values(
     _write_synthetic_vcf(archive.result_dir / "chr1.dose.vcf.gz", n_variants=1)
     with pytest.raises(ValueError, match="batch_size"):
         import_result(imp_id, archive_root=archive_root, batch_size=0)
+
+
+# ---------------------------------------------------------------------------
+# Pre-Phase-6: truncated-BGZF import guard (finding-008 #2).
+# ---------------------------------------------------------------------------
+
+
+def _write_bgzf_vcf(dest: Path, *, chrom: str = "chrX", n_variants: int = 3) -> None:
+    """Write a real BGZF (not plain-gzip) imputed VCF, EOF marker included.
+
+    Beagle's output is BGZF; the plain-``gzip.open`` path in
+    :func:`_write_synthetic_vcf` is fine for the parsing tests but cannot
+    exercise the BGZF-truncation guard. Build the records with that helper, then
+    transcode through ``cyvcf2.Writer(mode="wz")`` so htslib appends the
+    canonical 28-byte BGZF EOF marker.
+    """
+    import cyvcf2  # noqa: PLC0415 — deferred; mirrors the production import site
+
+    plain = dest.parent / f"{dest.name}.plain.vcf.gz"
+    _write_synthetic_vcf(plain, chrom=chrom, n_variants=n_variants)
+    reader = cyvcf2.VCF(str(plain))
+    writer = cyvcf2.Writer(str(dest), reader, mode="wz")
+    try:
+        for v in reader:
+            writer.write_record(v)
+    finally:
+        writer.close()
+        reader.close()
+    plain.unlink()
+
+
+def test_import_raises_on_truncated_bgzf_result_vcf(
+    isolated_settings: dict[str, str],
+) -> None:
+    """A truncated BGZF result VCF (missing its EOF marker) aborts the import.
+
+    Reproduces finding-008 #2: Beagle dies mid-write on chrX, leaving a BGZF
+    file with no EOF marker; cyvcf2 reads it as zero variants without raising.
+    The guard must turn that silent success into a loud failure.
+    """
+    init_databases()
+    archive_root = isolated_settings_archive_root(isolated_settings)
+    imp_id = _seed_completed_run(archive_root=archive_root)
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+
+    chrx = archive.result_dir / "chrX.dose.vcf.gz"
+    _write_bgzf_vcf(chrx, chrom="chrX", n_variants=3)
+    # Drop the trailing 28-byte BGZF EOF marker to mimic the truncated write.
+    chrx.write_bytes(chrx.read_bytes()[:-28])
+
+    with pytest.raises(RuntimeError, match="truncated BGZF"):
+        import_result(imp_id, archive_root=archive_root)
+
+
+def test_import_accepts_intact_bgzf_result_vcf(
+    isolated_settings: dict[str, str],
+) -> None:
+    """An intact BGZF result VCF imports normally.
+
+    Confirms the guard keys on the EOF marker, not the gzip flavor: a complete
+    BGZF file (marker present) passes, so real Beagle output that finished
+    cleanly is accepted and the plain-gzip fixtures elsewhere stay exempt.
+    """
+    init_databases()
+    archive_root = isolated_settings_archive_root(isolated_settings)
+    imp_id = _seed_completed_run(archive_root=archive_root)
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+
+    chr1 = archive.result_dir / "chr1.dose.vcf.gz"
+    _write_bgzf_vcf(chr1, chrom="chr1", n_variants=4)
+
+    result = import_result(imp_id, archive_root=archive_root)
+    assert isinstance(result, ImportResult)
+    assert result.variants_total == 4
+
+
+def test_dry_run_also_rejects_truncated_bgzf_result_vcf(
+    isolated_settings: dict[str, str],
+) -> None:
+    """The truncation guard also fires on the dry-run path (shared open helper)."""
+    init_databases()
+    archive_root = isolated_settings_archive_root(isolated_settings)
+    imp_id = _seed_completed_run(archive_root=archive_root)
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+
+    chrx = archive.result_dir / "chrX.dose.vcf.gz"
+    _write_bgzf_vcf(chrx, chrom="chrX", n_variants=3)
+    chrx.write_bytes(chrx.read_bytes()[:-28])
+
+    with pytest.raises(RuntimeError, match="truncated BGZF"):
+        import_result(imp_id, archive_root=archive_root, dry_run=True)

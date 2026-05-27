@@ -1,1 +1,1 @@
-"""Phase 6 — insight generation (deferred)."""
+"""Phase 7 — insight generation (deferred)."""
