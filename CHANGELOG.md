@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Pre-Phase-6 cleanup (docs + operational). Corrects the off-by-one phase
+  numbers in the `analyze` / `insights` / `api` package docstrings (now
+  Phase 6 / 7 / 8 per ROADMAP). Completes the `annotations.md` "After a
+  schema rebuild" reload sequence, which omitted the gnomAD (5.5), dbSNP
+  (5.6), and `refresh-index` (5.7) steps, and adds an ordering note for the
+  three appended commands. Adds a hard-fail guard in `imputation.ingest`:
+  a truncated BGZF result VCF (one missing its EOF marker) now raises
+  instead of importing as a silent zero-variant success — the chrX failure
+  mode documented in finding-008 #2. Plain-gzip fixtures are unaffected
+  (the guard only checks files that are actually BGZF). Gives
+  `scripts/verify.sh` a `TMPDIR` prelude that relocates pytest + DuckDB
+  scratch to a gitignored repo-local `.verify-tmp/` and clears it each run,
+  keeping the system `/tmp` clean during verification. No schema, DDL, or
+  data changes; no re-ingest.
 - Phase 5 restructure — reset the loader phase around the loader/runner cut
   (Phase 5 downloads-and-loads; Phase 6 runs-tools-against-user-variants).
   Phase 5 now has exactly one remaining sub-phase, 5.7

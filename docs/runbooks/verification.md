@@ -32,6 +32,13 @@ the canonical protocol; the script is a thin wrapper for the
 always-run portion, and the schema-rebuild and pipeline-verification
 sections below still apply on top of either invocation.
 
+`verify.sh` exports `TMPDIR` to a gitignored repo-local directory
+(`.verify-tmp/`) and clears it at the start of each run, so pytest and
+DuckDB scratch never touch the system `/tmp` and cannot accumulate
+across runs. A bare `uv run pytest` during development does not set
+`TMPDIR`, so it still writes to `/tmp/pytest-of-$USER`; if a dev run
+fills `/tmp`, clear it with `rm -rf /tmp/pytest-of-$USER`.
+
 Run from the repository root, in the order listed:
 
 ```
