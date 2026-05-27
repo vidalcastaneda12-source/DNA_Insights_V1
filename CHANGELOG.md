@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   flip — so it requires dbSNP to be loaded first and must be re-run after any
   future dbSNP refresh. Audited download (intent+blocked on disabled), PyArrow
   bulk insert, single-transaction `--force` DELETE+re-INSERT. No schema, DDL, or
-  data changes; no re-ingest; `dbsnp_annotations` untouched. (#TBD)
+  data changes; no re-ingest; `dbsnp_annotations` untouched. (#64)
 - Pre-Phase-6 cleanup (docs + operational). Corrects the off-by-one phase
   numbers in the `analyze` / `insights` / `api` package docstrings (now
   Phase 6 / 7 / 8 per ROADMAP). Completes the `annotations.md` "After a
