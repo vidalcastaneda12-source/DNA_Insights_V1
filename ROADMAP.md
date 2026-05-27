@@ -54,13 +54,11 @@ completes against real 23andMe + Ancestry corpus.
 
 ## Phase 5 — Reference annotation loaders
 
-**Status:** in progress.
+**Status:** in progress — 5.0–5.6 complete; 5.7 remains and closes the phase.
 
 - Per-source downloaders (ClinVar, GWAS Catalog, PharmGKB, CPIC, PGS Catalog metadata, gnomAD filtered, dbSNP filtered)
 - Each writes to `annotation_source_versions` and the per-source table; supersession is via the version-pointer pattern (see CLAUDE.md #7 and [`finding-010`](docs/findings/finding-010-version-pointer-supersession-pattern.md))
 - Refresh `variant_annotations_index` rollup across all loaded sources
-- Profile-level QC rollup combining per-source `sample_qc` rows into one per-profile answer (finding-005 #2)
-- `variants_master.is_acmg_sf` flag enrichment from the curated ACMG SF v3.x gene list intersected with ClinVar rows (finding-005 #5)
 - CLI: `genome annotate refresh [--source ...]`
 
 Sub-phase status:
@@ -71,45 +69,46 @@ Sub-phase status:
 - [x] 5.3 — GWAS Catalog loader (PR #38)
 - [x] 5.4 — PGS Catalog metadata loader (PR #39)
 - [x] 5.5 — gnomAD filtered (PR #49)
-- [ ] 5.5b — gnomAD PGS extension. Gated on Phase 6 `pgs_score_weights` landing. Extends the active gnomAD source-version's coverage to PGS-component variants. Not a version bump — appends to the same active `source_version_id`. Verification: not applicable until Phase 6 lands. See [`finding-011`](docs/findings/finding-011-gnomad-three-way-intersection.md).
-- [ ] 5.6 — dbSNP filtered. Schema correction (surrogate BIGINT PKs for `dbsnp_annotations` / `variant_aliases`) landed in PR #57; the filtered loader (PR B) is the remaining work.
-- [ ] 5.7 — `variant_annotations_index` refresh
-- [ ] 5.8 — Profile-level QC rollup
+- [x] 5.6 — dbSNP filtered (surrogate BIGINT PKs PR #57; filtered loader PR #59)
+- [ ] 5.7 — `variant_annotations_index` refresh (closes Phase 5). Ships with the VEP columns NULL; Phase 6's VEP runner backfills them via a later rollup refresh.
 
-Follow-ups (small PRs, slot between sub-phases as convenient):
+Follow-ups (not phase-bound; slot when convenient):
 - PharmGKB / CPIC `already_current=True` cosmetic cleanup (finding-010 #12)
 - HEAD-request-failure version-label fallback behavior — capture as its own finding (finding-010 #13)
 - Cleanup of orphan rows under superseded `source_version_id`s (finding-010 #14)
 - Cross-source generalization of the version-pointer pattern (finding-010 #15)
 - `MAPPED_TRAIT_URI` truncation entry for finding-005 (deferred from sub-phase 5.3)
 
-Enrichment (depends on ClinVar from 5.2, can slot any time after 5.2):
-- `variants_master.is_acmg_sf` flag population — populate via the curated ACMG SF v3.x gene list intersected with ClinVar rows. Phase 3 deferred ACMG SF severity escalation pending this flag (finding-005 #5). Consumed by Phase 6's ACMG SF detection pipeline.
+Deferred to later phases:
+- Genes / traits / pathways dictionary tables — primarily serve insight generation and rendering; defer to Phase 7. The loaders we ship in Phase 5 carry gene symbols and trait IDs inline, so the index does not need the dictionaries to do its joins.
 
-Backfills (require dbSNP from 5.6, slot after 5.6 lands):
+**Verification:** all seven annotation source loaders complete (ClinVar, GWAS Catalog, PharmGKB, CPIC, PGS Catalog metadata, gnomAD, dbSNP); `variant_annotations_index` populated with the expected per-variant join across them (VEP columns NULL pending Phase 6's VEP runner); queries against `variant_full_v` view return joined annotations.
+
+## Post-5.7 backfills
+
+Re-derivations of `variants_master` / `consensus_genotypes` content enabled by the loaded dbSNP build (5.6). Not loaders, not analyses — they slot after 5.7 closes Phase 5 and before the Phase 6 analyses begin. Gated on dbSNP canonical REF/ALT, and on `variant_aliases` being populated (5.6 PR B shipped `dbsnp_annotations` only and left `variant_aliases` empty — see finding-016 #8; these backfills populate and consume it).
+
 - Canonical REF/ALT for strand-flip dedupe (finding-005 #1)
 - Tier-2 rsID matching via `variant_aliases` (finding-005 #4)
 - Hom-only recovery via canonical REF/ALT (finding-005 #6)
 
-Deferred from Phase 5 to later phases:
-- VEP local runner — fits Phase 6's runner pattern (Beagle / PharmCAT / HIBAG); structurally a subprocess tool that runs against user variants, not a download-and-load source. The `variant_annotations_index` ships with the VEP column NULL initially and gets refreshed when VEP lands in Phase 6.
-- Genes / traits / pathways dictionary tables — primarily serve insight generation and rendering; defer to Phase 7. The loaders we ship in Phase 5 carry gene symbols and trait IDs inline, so the index does not need the dictionaries to do its joins.
-
-**Verification:** all seven annotation source loaders complete (ClinVar, GWAS Catalog, PharmGKB, CPIC, PGS Catalog metadata, gnomAD, dbSNP); `variant_annotations_index` populated with the expected per-variant join across them; queries against `variant_full_v` view return joined annotations; profile-level QC rollup combines per-source `sample_qc` rows into a single per-profile answer that resolves CLAUDE.md "Real-data observations" #1; `variants_master.is_acmg_sf` flag is populated on the expected gene set.
-
 ## Phase 6 — Analysis pipelines
-- PRS computation against PGS Catalog (overlapping-only weights)
+- Load `pgs_score_weights` (per-variant PGS weights, overlapping-only per locked decision #5) → PRS computation against PGS Catalog
 - PharmCAT integration → `derived_pgx_phenotypes`
 - Carrier detection rules
-- ACMG SF detection
+- ACMG SF detection — first task: populate `variants_master.is_acmg_sf` from the curated ACMG SF v3.x gene list intersected with ClinVar rows (finding-005 #5), which unblocks Phase 3's deferred ACMG SF severity escalation
 - HIBAG → `derived_hla_typing`
 - VEP local runner against user variants → populates VEP columns in `variant_annotations_index` via the rollup refresh.
 - ROH via plink2
 - Y/mtDNA haplogroup assignment
 - Global ancestry (RFMix or admixture)
-- ROH summary, genome QC
+- ROH summary, genome QC — including a profile-level QC rollup that combines per-source `sample_qc` rows into a single per-profile answer, resolving CLAUDE.md "Real-data observations" #1 (finding-005 #2)
 - Each writes an `analysis_runs` row capturing source versions used
 - CLI: `genome analyze [pgs|pgx|carrier|acmg|hla|roh|haplogroup|ancestry|qc|all]`
+
+Follow-ups (gated on `pgs_score_weights` landing):
+- gnomAD PGS coverage extension — append PGS-component variants to the active gnomAD source-version (append, not refresh; no version bump). See [`finding-011`](docs/findings/finding-011-gnomad-three-way-intersection.md).
+- dbSNP PGS leg — extend the `user_only` dbSNP filter to PGS-component positions, mirroring the gnomAD extension. See [`finding-016`](docs/findings/finding-016-dbsnp-user-only-filter.md).
 
 **Verification:** each pipeline produces non-zero output on the merged+imputed dataset; supersession works on re-run.
 

@@ -37,9 +37,10 @@ The filter set is the three-way union ``(user U ClinVar U GWAS)``;
 CLAUDE.md "Things never to do" #3 mandates the broader
 ``(user U ClinVar U GWAS U PGS)`` intersection but PGS per-variant
 weights do not yet exist in the database at PR-B time (they land in
-Phase 6 as ``pgs_score_weights``). Sub-phase 5.5b will extend the
-active gnomAD source-version's coverage to PGS-component variants
-without a version bump; see finding-011.
+Phase 6 as ``pgs_score_weights``). A Phase 6 follow-up gated on
+``pgs_score_weights`` will extend the active gnomAD source-version's
+coverage to PGS-component variants without a version bump; see
+finding-011.
 
 Supersession is via the ``annotation_sources`` pointer table
 (finding-010 version-pointer pattern): the loader inserts new content
@@ -312,7 +313,8 @@ def _build_filter_set(conn: DuckDBPyConnection) -> FilterSet:
     Thin wrapper over :func:`genome.annotate.filter_set.build_filter_set`
     pinned to the ``"three_way"`` strategy and gnomAD's
     :data:`SUPPORTED_CHROMS` (1-22, X). The PGS leg is intentionally
-    excluded at PR B; 5.5b will extend coverage without a version bump.
+    excluded at PR B; a Phase 6 follow-up gated on ``pgs_score_weights``
+    will extend coverage without a version bump.
     See finding-011 for the three-way-vs-four-way design discussion.
     """
     return build_filter_set(conn, strategy="three_way", supported_chroms=SUPPORTED_CHROMS)

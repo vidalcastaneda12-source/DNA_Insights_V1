@@ -13,14 +13,15 @@ manageable. This document tracks them so they aren't forgotten.
    handles this at merge time (106 cases in real data), but the underlying
    duplication remains in `variants_master`. Each row joins independently to
    annotation sources, potentially duplicating insights at Phase 5.
-   *Recommended fix point:* when Phase 5 annotation joins surface duplicate
-   findings visibly, a normalization step at ingest can consolidate these.
+   *Recommended fix point:* the post-5.7 backfills slot — with dbSNP canonical
+   REF/ALT loaded (5.6), a normalization step can consolidate the
+   strand-flipped duplicates.
 
 2. **Profile-level QC rollup.** The current `sample_qc` table is
    per-ingestion-run. A profile-level rollup that combines per-source
    inferences (e.g., resolving "23andMe says M, Ancestry says ambiguous" to
    a single profile-level "M") doesn't exist. *Recommended fix point:*
-   Phase 5 or whenever the user-facing summary view is built.
+   Phase 6's genome-QC pipeline (consolidated there per finding-017).
 
 3. **`het_outlier` threshold calibration across sources.** Currently QC
    passes without a strict outlier check. When introduced, the threshold
@@ -32,16 +33,17 @@ manageable. This document tracks them so they aren't forgotten.
    (chrom+pos+ref+alt) and tier-3 (fuzzy strand) but deferred tier-2 (rsID
    matching with merge resolution via `variant_aliases`). Currently the
    `variant_aliases` table isn't populated, so tier-2 has nothing to match
-   against. *Recommended fix point:* Phase 5 annotation loaders will
-   populate `variant_aliases` from dbSNP merge records; tier-2 merge logic
-   can be added then.
+   against. *Recommended fix point:* the post-5.7 backfills slot — populate
+   `variant_aliases` from dbSNP merge records (the dbSNP loader shipped in 5.6
+   but left `variant_aliases` empty per finding-016 #8), then add tier-2 merge
+   logic.
 
 5. **ACMG SF severity escalation.** Phase 3's discrepancy detection writes
    base severity correctly but doesn't escalate to `critical` for variants
    in ACMG SF genes (the `is_acmg_sf` flag on `variants_master` isn't
-   populated until Phase 5). *Recommended fix point:* Phase 5 enrichment
-   job re-walks discrepancies and bumps severity once ACMG SF flags are in
-   place.
+   populated until Phase 6's ACMG SF detection pipeline). *Recommended fix
+   point:* Phase 6 ACMG SF detection populates `is_acmg_sf` as its first task,
+   then re-walks discrepancies and bumps severity once the flags are in place.
 
 6. **Imputation input misses hom-only positions until canonical REF/ALT is
    loaded.** Phase 4's `genome imputation prepare` filters out variants
@@ -55,9 +57,9 @@ manageable. This document tracks them so they aren't forgotten.
    polymorphic subset. (The observation was originally surfaced against
    the TopMed upload contract, but the same input requirement applies
    identically to the local Beagle 5.5 workflow that replaced it per
-   `finding-006`.) *Recommended fix point:* Phase 5 dbSNP load populates
-   `variant_aliases` with canonical REF/ALT; a follow-on prepare step
-   can rewrite the filtered positions and recover the dropped rows.
+   `finding-006`.) *Recommended fix point:* the post-5.7 backfills slot — the
+   dbSNP load (5.6) supplies canonical REF/ALT; a follow-on prepare step can
+   rewrite the filtered positions and recover the dropped rows.
 
 7. **ClinVar supersession UPDATE+checkpoint dominates same-version
    `--force` re-runs (~28 min for ~9M rows).** Sub-phase 5.2 verification

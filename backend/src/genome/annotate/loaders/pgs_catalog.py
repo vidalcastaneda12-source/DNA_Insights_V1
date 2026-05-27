@@ -82,7 +82,7 @@ set stays in ``pgs_catalog_scores`` indefinitely under its older
 ``source_version_id``.
 
 The loader does **not** touch ``variant_annotations_index`` (refresh
-is a separate downstream concern in sub-phase 5.8), and it does
+is a separate downstream concern in sub-phase 5.7), and it does
 **not** load per-PGS variant weights (``pgs_score_weights`` is Phase
 6 work; this PR ships score-level metadata only).
 """

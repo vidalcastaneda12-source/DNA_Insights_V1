@@ -67,7 +67,8 @@ def _dosage(
 
     ``None`` for no-call rows. The ALT label here is the alphabetically-ordered
     pseudo-ALT we assign at ingest, not the real reference panel ALT — that
-    reconciliation happens in Phase 5 once VEP / dbSNP land.
+    reconciliation is a post-5.7 backfill on dbSNP canonical REF/ALT
+    (finding-005 #1/#6); the Phase 6 VEP runner refines functional calls.
     """
     if is_no_call or allele_1 is None or allele_2 is None:
         return None

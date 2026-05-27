@@ -6,8 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Phase 5 restructure — reset the loader phase around the loader/runner cut
+  (Phase 5 downloads-and-loads; Phase 6 runs-tools-against-user-variants).
+  Phase 5 now has exactly one remaining sub-phase, 5.7
+  (`variant_annotations_index` refresh), which closes it; 5.0–5.6 are marked
+  shipped (5.6 closed by PR #57 + #59). Relocations: the profile-level QC
+  rollup (was 5.8) and `variants_master.is_acmg_sf` population move to Phase 6
+  (the latter as the first task of ACMG SF detection); the gnomAD and dbSNP
+  PGS-coverage extensions (was 5.5b / hypothetical 5.6b) become Phase 6
+  follow-ups gated on `pgs_score_weights`; the finding-005 #1/#4/#6
+  dbSNP-dependent backfills move to a new post-5.7 backfills slot;
+  genes/traits/pathways dictionary tables stay deferred to Phase 7. New
+  `finding-017` records the cut, the VEP-stays-in-Phase-6 rationale (the
+  closest call), and the disposition of every moved item. findings
+  011/016/005/013/003, `docs/consensus.md`, and `docs/runbooks/annotations.md`
+  are reconciled to drop the retired 5.5b/5.6b/5.8 labels; CLAUDE.md
+  "Real-data observations" #1 retargets the QC rollup to Phase 6. Four backend
+  comments carrying retired labels are corrected (gnomad ×2, pgs_catalog,
+  gwas_catalog, consensus); the pgs_catalog / gwas_catalog `5.8 → 5.7` edits
+  correct a write-time mislabel (the `variant_annotations_index` refresh has
+  always been 5.7) and are not the restructure relabel. Docs-alignment plus
+  mechanical comment cleanup only — no schema, DDL, or data changes; no rebuild
+  or re-ingest.
 - Workflow — document four-actor split with VSC-ClaudeCodePlanning. 
-  Adds a Working with this codebase section to CLAUDE.md naming the four actors (AI-Claude, VSC-ClaudeCodePlanning, VSC-ClaudeCode, VSC-User), the plan-mode-first convention, the 8-element plan structure, and the implementation contract. No code, schema, or DDL changes. No re-ingest required.
+  Adds a Working with this codebase section to CLAUDE.md naming the four actors (AI-Claude, VSC-ClaudeCodePlanning, VSC-ClaudeCode, VSC-User), the plan-mode-first convention, the 8-element plan structure, and the implementation contract, and clarifies that VSC-ClaudeCodePlanning is reached locally via Shift+Tab or in the cloud via /ultraplan for inline-comment review. No code, schema, or DDL changes. No re-ingest required.
 
 ### Added
 - **Sub-phase 5.6 PR B — dbSNP build 157 loader + remote-tabix / filter-set

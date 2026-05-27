@@ -1,4 +1,4 @@
-# Finding 011 — gnomAD filter is three-way at PR B; PGS extension lands at 5.5b
+# Finding 011 — gnomAD filter is three-way at PR B; PGS extension is a Phase 6 follow-up
 
 ## Context
 
@@ -30,9 +30,9 @@
 3. PR B's filter is therefore the three-way union
    ``(user ∪ clinvar ∪ gwas)``. Skipping the absent PGS leg keeps the
    loader implementable now; deferring the PGS coverage extension to
-   sub-phase 5.5b keeps CLAUDE.md "Things never to do" #3's intent
-   intact (the full four-way intersection still bounds the eventual
-   on-disk footprint).
+   a Phase 6 follow-up (gated on ``pgs_score_weights``) keeps CLAUDE.md
+   "Things never to do" #3's intent intact (the full four-way
+   intersection still bounds the eventual on-disk footprint).
 
 ## Observation
 
@@ -49,11 +49,11 @@
    exactly the rows that PGS introduces but neither ClinVar, GWAS, nor
    the user variants supply. Real-data verification at PR B will
    record the four composition counts (``user``, ``clinvar``,
-   ``gwas``, ``union_total``) so the 5.5b extension can compare its
+   ``gwas``, ``union_total``) so the PGS extension can compare its
    added coverage against the same baseline rather than re-discovering
    what was already present.
 
-6. The 5.5b extension is structurally an APPEND, not a refresh. It
+6. The PGS extension is structurally an APPEND, not a refresh. It
    computes the set of PGS-component ``(chrom, pos_grch38)`` not
    already present in ``gnomad_frequencies`` under the active
    source-version, streams those positions out of gnomAD's remote
@@ -64,9 +64,9 @@
    rows, and the loader emits a ``gnomad.coverage_extended`` event so
    the audit trail records the append.
 
-   The CLI surface for 5.5b is a new flag ``--extend-pgs`` on
+   The CLI surface for the extension is a new flag ``--extend-pgs`` on
    ``genome annotate refresh --source gnomad`` (or a sibling
-   subcommand, TBD at 5.5b implementation time). The flag is rejected
+   subcommand, TBD at implementation time). The flag is rejected
    when no active gnomAD source-version exists (no version to extend);
    the operator must run a full ``genome annotate refresh --source
    gnomad`` first.
@@ -76,43 +76,47 @@
 7. The three-way filter at PR B is a temporary under-coverage of the
    four-way rule, not a permanent departure. CLAUDE.md "Things never
    to do" #3's wording stays as four-way; the gap between text and
-   implementation is documented here and tracked as 5.5b. Future
-   sessions reading the runbook + this finding will see the
-   under-coverage and the bounded plan to close it.
+   implementation is documented here and tracked as a Phase 6
+   follow-up. Future sessions reading the runbook + this finding will
+   see the under-coverage and the bounded plan to close it.
 
-8. PR B's drift identifiers stay durable through 5.5b. The 5.5b
-   APPEND increases ``rows_loaded``, ``distinct_variants_per_chrom``,
+8. PR B's drift identifiers stay durable through the PGS extension.
+   The PGS-extension APPEND increases ``rows_loaded``,
+   ``distinct_variants_per_chrom``,
    ``filter_set_composition.union_total``, and the per-population
    presence counts; it does **not** re-derive the same numbers under a
-   new ``source_version_id``. A real-data verification of 5.5b
+   new ``source_version_id``. A real-data verification of the extension
    compares the new totals against PR B's locked baseline and reports
    ``pgs_extension_delta_rows`` as a new event field.
 
 9. The four-way filter rule will become the literal SQL in
-   ``_build_filter_set`` once 5.5b lands and ``pgs_score_weights``
-   exists. At that point the implementation matches the CLAUDE.md
-   wording exactly, and this finding becomes historical. Until then,
-   the loader's docstring + this finding + the runbook's gnomAD
-   section all carry the explicit "three-way at PR B" note so the
-   under-coverage is visible to every reader of the code or docs.
+   ``_build_filter_set`` once the extension lands and
+   ``pgs_score_weights`` exists. At that point the implementation
+   matches the CLAUDE.md wording exactly, and this finding becomes
+   historical. Until then, the loader's docstring + this finding + the
+   runbook's gnomAD section all carry the explicit "three-way at PR B"
+   note so the under-coverage is visible to every reader of the code
+   or docs.
 
-10. Sub-phase 5.5b is gated on Phase 6 ``pgs_score_weights`` landing.
-    The ROADMAP entry for 5.5b is informational only at PR B time; the
-    verification block remains "not applicable until Phase 6 lands."
+10. The PGS extension is gated on Phase 6 ``pgs_score_weights``
+    landing — it is a Phase 6 follow-up, not a Phase 5 sub-phase. The
+    ROADMAP carries it under Phase 6's ``pgs_score_weights``-gated
+    follow-ups; its verification is not applicable until
+    ``pgs_score_weights`` exists.
 
 ## Follow-up
 
-11. **5.5b implementation triggers.** The 5.5b APPEND requires the
+11. **PGS-extension implementation triggers.** The APPEND requires the
     active ``pgs_score_weights`` row set to exist under a non-NULL
     ``annotation_sources`` pointer for ``pgs_catalog`` (the existing
     pointer flips to a version row whose record_count covers
     per-variant weights, not just score metadata). The Phase 6
     PGS-weights loader needs to flip the same pointer; if Phase 6
-    keeps the metadata loader's pointer separate, 5.5b will instead
-    look at a parallel ``pgs_score_weights`` source-version pointer.
-    The decision lives at Phase 6 scaffold time.
+    keeps the metadata loader's pointer separate, the extension will
+    instead look at a parallel ``pgs_score_weights`` source-version
+    pointer. The decision lives at Phase 6 scaffold time.
 
-12. **Drift sentinel for 5.5b.** When 5.5b lands, the PR's
+12. **Drift sentinel for the extension.** When it lands, the PR's
     verification step should compare the added rows to the PGS
     coverage *not already present* in the three-way intersection. A
     delta of zero indicates either (a) every PGS-component position is
@@ -122,8 +126,8 @@
     coverage.
 
 13. **Optional: drop the three-way under-coverage note from CLAUDE.md
-    once 5.5b verifies.** CLAUDE.md "Things never to do" #3 already
-    reads as four-way; no edit is required when 5.5b lands. This
-    finding can be marked as resolved (or moved to an archived
-    sub-section) at that point so future sessions don't waste time
-    re-reading the historical gap.
+    once the extension verifies.** CLAUDE.md "Things never to do" #3
+    already reads as four-way; no edit is required when the extension
+    lands. This finding can be marked as resolved (or moved to an
+    archived sub-section) at that point so future sessions don't waste
+    time re-reading the historical gap.

@@ -61,9 +61,9 @@
 7. **The ClinVar/GWAS/PGS legs are deferred, not forbidden.** If a future
    consumer needs dbSNP annotations at non-user positions, a `"three_way"` (or
    four-way) dbSNP refresh is the same one-argument change. The PGS leg
-   specifically is deferred to a hypothetical **sub-phase 5.6b**, mirroring
-   gnomAD's 5.5b PGS extension (finding-011) and gated on Phase 6
-   `pgs_score_weights`.
+   specifically is deferred to **a Phase 6 follow-up gated on
+   `pgs_score_weights`**, mirroring the gnomAD PGS extension (finding-011) —
+   the two extensions are symmetric: same gate, same append-not-refresh shape.
 
 8. **`variant_aliases` is not populated in PR B.** dbSNP governs two tables
    under one `annotation_sources` pointer (`dbsnp_annotations` and
@@ -101,10 +101,12 @@
 
 ## Follow-up
 
-11. **5.6b (PGS leg)** and the finding-005 dbSNP-dependent backfills (#1
-    canonical REF/ALT strand-flip dedupe, #4 tier-2 rsID matching, #6 hom-only
-    recovery) are the consumers that may justify broader dbSNP coverage. They
-    land in Phase 6+. When they do, revisit whether `user_only` still suffices.
+11. **The PGS leg** (a Phase 6 follow-up gated on `pgs_score_weights`) and the
+    finding-005 dbSNP-dependent backfills (#1 canonical REF/ALT strand-flip
+    dedupe and #6 hom-only recovery, now in the post-5.7 backfills slot; #4
+    tier-2 rsID matching, which populates `variant_aliases`) are the consumers
+    that may justify broader dbSNP coverage. When they land, revisit whether
+    `user_only` still suffices.
 
 12. **VEP supersedes `functional_class`.** When the Phase 6 VEP runner lands,
     `functional_class` is populated from VEP's per-transcript consequence, not
