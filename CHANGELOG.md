@@ -32,6 +32,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Adds a Working with this codebase section to CLAUDE.md naming the four actors (AI-Claude, VSC-ClaudeCodePlanning, VSC-ClaudeCode, VSC-User), the plan-mode-first convention, the 8-element plan structure, and the implementation contract, and clarifies that VSC-ClaudeCodePlanning is reached locally via Shift+Tab or in the cloud via /ultraplan for inline-comment review. No code, schema, or DDL changes. No re-ingest required.
 
 ### Added
+- **Sub-phase 5.7 — `variant_annotations_index` rollup builder (closes Phase
+  5).** Adds `genome.annotate.index_refresh` and the `genome annotate
+  refresh-index` CLI subcommand. Joins the currently-active ClinVar / GWAS
+  Catalog / gnomAD / PharmGKB releases — each filtered to its
+  `annotation_sources` version pointer — into one sparse row per variant that
+  carries ≥1 annotation, so `variant_full_v` and `gene_variant_summary_v`
+  return joined annotations instead of NULL. ClinVar and gnomAD join on full
+  GRCh38 coords (allele-specific, ≤1:1 against the `variants_master` UNIQUE
+  key); GWAS and PharmGKB join on rsid (locus-level — a multi-allelic split
+  attaches the same trait/drug to both biallelic rows). The build is a pure
+  in-engine `INSERT … SELECT` wholesale-replaced inside one transaction
+  (`variant_id` is the PK), so readers never see a torn index (CLAUDE.md #7).
+  The four VEP columns (`most_severe_consequence`, `impact`, `cadd_phred`,
+  `alphamissense_class`) and `is_acmg_sf` ship NULL pending Phase 6's VEP runner
+  / ACMG SF detection (finding-017). `is_curated` is computed from ClinVar or
+  PharmGKB only — CPIC is gene+drug grain with no variant linkage, so it cannot
+  contribute at the variant level until a gene→variant mapping lands (Phase
+  6/7); the DDL comment's "ClinVar, PharmGKB, CPIC" overstates current coverage.
+  Not a registered source — it has no `annotation_sources` row of its own and
+  does not route through the loader registry. No schema, DDL, or data changes;
+  no rebuild or re-ingest required. (PR #62)
 - **Sub-phase 5.6 PR B — dbSNP build 157 loader + remote-tabix / filter-set
   extraction.** Adds `genome.annotate.loaders.dbsnp`, the seventh and last
   Phase-5 reference-annotation source and the second remote-tabix source after

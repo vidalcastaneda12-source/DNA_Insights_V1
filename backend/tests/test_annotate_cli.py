@@ -260,3 +260,66 @@ def test_annotate_refresh_without_skip_flag_passes_false_to_loader(
     result = runner.invoke(app, ["annotate", "refresh", "--source", "clinvar"])
     assert result.exit_code == 0, result.output
     assert received == {"force": False, "skip_if_same_version": False}
+
+
+def test_annotate_refresh_index_builds_and_echoes_summary(
+    annotations_root: Path,  # noqa: ARG001
+) -> None:
+    """``refresh-index`` builds the rollup and echoes the per-source summary.
+
+    On a fresh DB with one variant + one ClinVar match, the command exits 0
+    and reports the row/match counts and the version snapshot.
+    """
+    init_databases()
+    with duckdb_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO variants_master
+                (variant_id, rsid, chrom, pos_grch38, ref_allele, alt_allele)
+            VALUES (1, 'rs1', '1', 1000, 'A', 'G')
+            """,
+        )
+        sv = insert_source_version(
+            conn,
+            source_db="clinvar",
+            version="2026_05_10",
+            source_url=None,
+            source_file_hash="a" * 64,
+            source_file_size=1,
+            record_count=1,
+        )
+        conn.execute(
+            """
+            INSERT INTO clinvar_annotations
+                (clinvar_id, chrom, pos_grch38, ref_allele, alt_allele,
+                 clinical_significance, source_version_id, retrieval_date)
+            VALUES (1, '1', 1000, 'A', 'G', 'Pathogenic', ?, CURRENT_TIMESTAMP)
+            """,
+            [sv],
+        )
+        flip_to_new_version(
+            conn,
+            source="clinvar",
+            table="clinvar_annotations",
+            new_source_version_id=sv,
+        )
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["annotate", "refresh-index"])
+    assert result.exit_code == 0, result.output
+    assert "variant_annotations_index rebuilt:" in result.output
+    assert "rows=1" in result.output
+    assert "clinvar=1" in result.output
+    assert "curated=1" in result.output
+    assert "2026_05_10" in result.output
+    assert "elapsed_ms=" in result.output
+
+
+def test_annotate_refresh_index_appears_in_help(
+    annotations_root: Path,  # noqa: ARG001
+) -> None:
+    """The new subcommand is discoverable in ``annotate --help``."""
+    runner = CliRunner()
+    result = runner.invoke(app, ["annotate", "--help"])
+    assert result.exit_code == 0
+    assert "refresh-index" in result.output

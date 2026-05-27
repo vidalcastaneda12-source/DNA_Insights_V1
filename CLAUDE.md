@@ -109,6 +109,14 @@ VSC-User runs the canonical verification independently against the pushed branch
 
    These numbers are stable identifiers. Drift in any of them on a re-run against the same input corpus is a regression signal.
 
+4. **Phase 5.7 `variant_annotations_index` first build is allele-match-gated, not position-match-gated (see finding-018).** Real-data verification of `genome annotate refresh-index` against the user's loaded corpus (ClinVar `2026_05_17`, gnomAD `4.1.1`, GWAS `2026_05_16`, PharmGKB `2025_07_05`) established these durable numbers:
+   - `row_count` = 159,658; wall-clock ~2.2 s (well under the 30 s target).
+   - `gnomad_matches` = 101,501, `clinvar_matches` = 2,559, `gwas_matches` = 66,726, `pharmgkb_matches` = 1,737, `curated_count` = 4,198.
+   - `is_rare` TRUE = 848, `is_ultrarare` TRUE = 421 (the matched variants are overwhelmingly common chip SNPs).
+   - The coord-keyed sources (ClinVar, gnomAD) match far below the position-level overlap because **78.3% of `variants_master` is hom-ref (`ref==alt`, finding-005 #6)** and **~50% of the genuine `ref≠alt` variants match gnomAD only with REF/ALT swapped** — `variants_master` REF/ALT is not yet canonicalized (finding-005 #1). The rsid-keyed sources (GWAS, PharmGKB) are unaffected. This is expected, not a regression; the match rate rises when the post-5.7 canonical-REF/ALT backfill re-runs the index.
+
+   These numbers are stable identifiers for the current (pre-canonicalization) `variants_master`. Drift on a re-run against the same corpus + same source versions is a regression signal; the post-5.7 backfill is the deliberate event that re-locks them upward.
+
 ## Environment requirements
 
 - **SQLCipher must be built with FTS5.** `app.db` includes a `notes_fts` virtual

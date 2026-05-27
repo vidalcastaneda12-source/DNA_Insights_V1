@@ -1620,6 +1620,112 @@ rows and is the quick reachability check.
   chromosomes, flips when the full `SUPPORTED_CHROMS` set lands); `--force`
   allocates a fresh id and starts over.
 
+### Variant Annotations Index Refresh (sub-phase 5.7)
+
+**What's built.** `variant_annotations_index` is the denormalized
+one-row-per-variant rollup that `variant_full_v` and the SNP detail page read
+from. Sub-phase 5.7 (`genome.annotate.index_refresh`) joins the four
+variant-linkable sources — ClinVar, GWAS Catalog, gnomAD, PharmGKB — into one
+sparse row per variant that carries at least one annotation. PGS Catalog
+(score-level) and dbSNP (rsID canonicalization via the still-empty
+`variant_aliases`) are loaded but contribute no rollup column. The four VEP
+columns (`most_severe_consequence`, `impact`, `cadd_phred`,
+`alphamissense_class`) and `is_acmg_sf` ship NULL — Phase 6's VEP runner / ACMG
+SF detection backfill them via a later rollup refresh (finding-017).
+
+**Command.**
+
+```
+genome annotate refresh-index
+```
+
+No external calls. `--force` is accepted for symmetry but the build is
+unconditional (a documented no-op). The builder is a pure in-engine
+`INSERT … SELECT`: it `DELETE`s the prior index and re-inserts inside one
+transaction, so a concurrent reader sees either the entire old index or the
+entire new one — never a torn mix (CLAUDE.md decision #7). `variant_id` is the
+table's PRIMARY KEY, so retained-superseded rows are structurally impossible;
+the index is not a registered source and has no `annotation_sources` row of its
+own.
+
+**Join model.** Each source is filtered to its *currently-active* version via
+the `annotation_sources` pointer (the same shape as `user_pgx_variants_v`), so a
+superseded release never leaks in. The join key differs by source:
+
+| Source | Key | Grain |
+|---|---|---|
+| ClinVar | full coords `(chrom, pos, ref, alt)` | allele-specific (≤1:1 vs the `variants_master` UNIQUE key) |
+| gnomAD | full coords | allele-specific |
+| GWAS Catalog | `rsid` | **locus-level** |
+| PharmGKB | `rsid` | **locus-level** |
+
+Two reader-facing caveats the DDL comments don't capture:
+
+1. **`is_curated` is ClinVar ∪ PharmGKB only.** The DDL comment (group_2 line
+   494) reads "present in any curated source (ClinVar, PharmGKB, CPIC)", but
+   CPIC is gene+drug grain with no rsid/coord/variant_id (group_2 283–305), so
+   it cannot contribute at the variant level until a gene→variant mapping lands
+   (Phase 6/7). 5.7 computes `is_curated` from ClinVar and PharmGKB only; the
+   implementation is narrower than the comment by design.
+2. **GWAS traits attach at rsid grain.** A GWAS association is locus-level
+   evidence, not allele-level. When two `variants_master` rows share an rsid (a
+   multi-allelic split), both carry the same trait — so a "total user variants
+   associated with trait X" aggregation across the rollup over-counts at
+   multi-allelic loci. Read GWAS (and PharmGKB) columns as locus-level.
+
+**Provenance.** Every row stamps `refresh_versions` — a JSON snapshot of the
+`{source_db: version}` map resolved from the pointers at build time, identical
+on every row — and `last_refreshed` (the build timestamp).
+
+**Runtime.** A pure vectorized DuckDB scan over the user variants × the loaded
+source tables. Target < 30 s (CLAUDE.md performance contract); the real-data
+first run completed in ~2.2 s. Per-step structlog events
+(`index_refresh.versions_resolved` → `…cleared` → `…inserted` →
+`supersession_commit_*` / `…checkpoint_*` → `index_refresh.complete`) make the
+window observable. If a future run overshoots 60 s, investigate a missing index,
+an accidental cross-product, or a fan-out join before restructuring SQL.
+
+**Drift identifiers (first real-data run; see finding-018).** Against the user's
+loaded corpus (ClinVar `2026_05_17`, gnomAD `4.1.1`, GWAS `2026_05_16`, PharmGKB
+`2025_07_05`):
+
+| Metric | Value |
+|---|---|
+| `row_count` | 159,658 |
+| `gnomad_matches` | 101,501 |
+| `clinvar_matches` | 2,559 |
+| `gwas_matches` | 66,726 |
+| `pharmgkb_matches` | 1,737 |
+| `curated_count` | 4,198 |
+| `is_rare` TRUE | 848 |
+| `is_ultrarare` TRUE | 421 |
+
+These are **allele-match-gated**, far below the position-level gnomAD↔user
+overlap (~1.27M), because 78.3% of `variants_master` is hom-ref (`ref==alt`,
+finding-005 #6) and ~50% of the genuine `ref≠alt` variants match gnomAD only
+with REF/ALT swapped (un-canonicalized REF/ALT, finding-005 #1). This is
+expected, not a regression: re-running `refresh-index` after the post-5.7
+canonical-REF/ALT backfill is expected to materially raise the coord-keyed
+counts; capture and re-lock then. The rsid-keyed counts (GWAS, PharmGKB) are
+unaffected by REF/ALT and are stable now.
+
+**Troubleshooting.**
+
+* **Every annotation column is NULL in `variant_full_v`.** The index has never
+  been built (it ships empty from `genome init`). Run `genome annotate
+  refresh-index`.
+* **`gnomad_matches` / `clinvar_matches` look "too low".** Expected at 5.7 — see
+  the drift-identifier note above and finding-018. The coord-join is
+  allele-gated; the lift is the post-5.7 canonical-REF/ALT backfill, not a 5.7
+  fix.
+* **`gene_variant_summary_v` returns 0 pathogenic counts.** The `genes`
+  dictionary table is empty (deferred to Phase 7), so the view's
+  `genes ⨝ variants_master` join has no left side. Expected until Phase 7 loads
+  `genes`; unrelated to the index build.
+* **A source's rows are missing after a refresh.** Confirm its
+  `annotation_sources` pointer names the version you loaded (`genome annotate
+  status`); the builder reads only current-pointer rows.
+
 ## Audit log review
 
 The full audit trail for a refresh is in `app.db.audit_log`. Group by
