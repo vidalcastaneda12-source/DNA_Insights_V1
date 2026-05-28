@@ -96,28 +96,38 @@ dbSNP `source_version_id`, fails fast with a clear error if dbSNP is not loaded
 
 ## Implication
 
-Drift identifiers (locked on first real-data run, mirrored in CLAUDE.md
-"Real-data observations" and the CHANGELOG entry):
+Drift identifiers, locked on the first real-data run against the user's loaded
+corpus (dbSNP `157` / `source_version_id = 8`, `variants_master` = 942,620 rows
+/ 927,964 distinct `rs<n>` rsIDs; RsMergeArch downloaded 2026-05-28, SHA-256
+`b1cc5c7743d3…`, 153,003,470 bytes, 11,963,907 source rows). Mirrored in
+CLAUDE.md "Real-data observations" #5 and the CHANGELOG entry:
 
 | Metric | Value |
 |---|---|
-| `rows_loaded` | _pending first real-data run_ |
-| `distinct_alias_rsid` | _pending_ |
-| `distinct_current_rsid` | _pending_ |
-| `user_old_rsid_hits` (user rsID ∈ `alias_rsid`) | _pending — the tier-2-lift proxy_ |
-| `user_current_rsid_hits` (user rsID ∈ `current_rsid`) | _pending_ |
-| wall-clock | _pending (expected single-digit minutes)_ |
+| `rows_loaded` | 839,413 |
+| `distinct_alias_rsid` | 839,413 |
+| `distinct_current_rsid` | 513,573 |
+| `user_old_rsid_hits` (user rsID ∈ `alias_rsid`) | 1,190 — the tier-2-lift proxy |
+| `user_current_rsid_hits` (user rsID ∈ `current_rsid`) | 512,408 |
+| wall-clock | 54.2 s |
 
-`user_old_rsid_hits` is the headline number: it is the count of user variants
-whose rsID is a merged-away alias that now has a canonical mapping — i.e. how
-much tier-2 lift the matching PR can land. A re-run against the same corpus +
-frozen RsMergeArch that deviates from the locked values is a regression signal.
+`user_old_rsid_hits` is the headline number: 1,190 user variants carry a
+merged-away rsID that now has a canonical mapping — i.e. how much tier-2 lift
+the matching PR can land. The much larger `user_current_rsid_hits` = 512,408 is
+the both-sided filter's other leg: the user's canonical (chip) rsIDs that have
+*absorbed* historical merges — 513,573 distinct survivors absorbing 839,413
+merged-away IDs (~1.6 each), almost all of which are user rsIDs (512,408 of
+513,573). A re-run against the same corpus + frozen RsMergeArch that deviates
+from these values is a regression signal. The first authoritative run (a clean
+`--force` rebuild) reproduced the pre-existing numbers exactly.
 
-**Performance.** The ~80M-row RsMergeArch scan runs in Python (`csv.reader` is
-C-backed) with the matched set bulk-inserted via PyArrow; expected single-digit
-minutes. This exceeds the 30 s routine-refresh target by design — it is a named,
-gated backfill subcommand with per-5M-row `variant_aliases.scan.progress`
-logging, within the same contract carve-out as `imputation run`.
+**Performance.** The ~12M-row RsMergeArch scan runs in Python (`csv.reader` is
+C-backed, ~24 s) with the matched set bulk-inserted via PyArrow; the 839K-row
+INSERT + checkpoint into the multi-GB DuckDB is ~30 s, for ~54 s wall-clock
+end-to-end. A named, gated backfill subcommand with per-5M-row
+`variant_aliases.scan.progress` logging — outside the 30 s routine-refresh
+target by design, in the same contract carve-out as `imputation run` (though in
+practice it lands close to it).
 
 ## Follow-up
 

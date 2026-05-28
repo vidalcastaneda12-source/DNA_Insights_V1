@@ -166,7 +166,7 @@ def _load_user_rsids(conn: DuckDBPyConnection) -> frozenset[int]:
 
     Only ``rs<digits>`` values participate (23andMe ``i`` probe IDs and NULLs
     are ignored — RsMergeArch is entirely numeric). Stored as ``int`` so the
-    per-row membership test against the ~80M-row merge file is a cheap set
+    per-row membership test against the ~12M-row merge file is a cheap set
     lookup rather than a string compare.
     """
     rows = conn.execute(

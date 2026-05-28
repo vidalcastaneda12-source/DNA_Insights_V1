@@ -1778,16 +1778,28 @@ tier-2 resolves a user's stale rsID *and* an external source's stale rsID
 against the user's current rsID. Self-merges, malformed/non-numeric rows, and
 duplicate `alias_rsid`s are dropped.
 
-**Runtime.** The ~80M-row scan runs in Python (`csv.reader`) with PyArrow bulk
-insert of the small matched set — single-digit minutes, with a
-`variant_aliases.scan.progress` line every 5M source rows. This is a named,
-gated backfill, deliberately outside the 30 s routine-refresh target.
+**Runtime.** The ~12M-row scan runs in Python (`csv.reader`, ~24 s) with PyArrow
+bulk insert of the matched set; the 839K-row INSERT + checkpoint into the
+multi-GB DuckDB is ~30 s, for ~54 s wall-clock end-to-end, with a
+`variant_aliases.scan.progress` line every 5M source rows. A named, gated
+backfill, outside the 30 s routine-refresh target by design.
 
-**Drift identifiers (lock on first real-data run).** Capture from the
-`variant_aliases.refresh.complete` structlog line: `rows_loaded`,
-`distinct_alias_rsid`, `distinct_current_rsid`, `user_old_rsid_hits` (the
-tier-2-lift proxy — user variants carrying a now-mappable stale rsID),
-`user_current_rsid_hits`. Verify with:
+**Drift identifiers (locked — finding-019).** Real-data first run against the
+user's corpus (dbSNP `157`, `variants_master` 927,964 distinct rsIDs;
+RsMergeArch 11,963,907 source rows):
+
+| Metric | Locked value |
+|---|---|
+| `rows_loaded` | 839,413 |
+| `distinct_alias_rsid` | 839,413 |
+| `distinct_current_rsid` | 513,573 |
+| `user_old_rsid_hits` (tier-2-lift proxy) | 1,190 |
+| `user_current_rsid_hits` | 512,408 |
+| wall-clock | 54.2 s |
+
+Capture from the `variant_aliases.refresh.complete` structlog line; a re-run
+against the same corpus + frozen RsMergeArch that deviates is a regression
+signal. Verify with:
 
 ```sql
 SELECT COUNT(*), COUNT(DISTINCT alias_rsid), COUNT(DISTINCT current_rsid)
