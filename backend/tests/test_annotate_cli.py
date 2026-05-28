@@ -323,3 +323,105 @@ def test_annotate_refresh_index_appears_in_help(
     result = runner.invoke(app, ["annotate", "--help"])
     assert result.exit_code == 0
     assert "refresh-index" in result.output
+
+
+def test_annotate_canonicalize_variants_appears_in_help(
+    annotations_root: Path,  # noqa: ARG001
+) -> None:
+    """``canonicalize-variants`` and ``align-tier3-consensus`` are discoverable."""
+    runner = CliRunner()
+    result = runner.invoke(app, ["annotate", "--help"])
+    assert result.exit_code == 0
+    assert "canonicalize-variants" in result.output
+    assert "align-tier3-consensus" in result.output
+
+
+def test_annotate_canonicalize_variants_fails_fast_without_dbsnp(
+    annotations_root: Path,  # noqa: ARG001
+) -> None:
+    """No active dbSNP pointer -> exit 2 with a clear message (mirrors refresh-aliases)."""
+    init_databases()
+    runner = CliRunner()
+    result = runner.invoke(app, ["annotate", "canonicalize-variants", "--no-backup"])
+    assert result.exit_code == 2, result.output
+    assert "dbSNP" in result.output or "dbsnp" in result.output
+
+
+def test_annotate_canonicalize_variants_echoes_summary(
+    annotations_root: Path,  # noqa: ARG001
+) -> None:
+    """End-to-end happy path: seed dbSNP + a swap-victim variant, run the
+    command, expect ``rows_reoriented=1`` in the echoed summary.
+    """
+    init_databases()
+    with duckdb_connection() as conn:
+        sv = insert_source_version(
+            conn,
+            source_db="dbsnp",
+            version="157",
+            source_url=None,
+            source_file_hash="d" * 64,
+            source_file_size=1,
+            record_count=0,
+        )
+        flip_to_new_version(
+            conn,
+            source="dbsnp",
+            table="dbsnp_annotations",
+            new_source_version_id=sv,
+        )
+        conn.execute(
+            """
+            INSERT INTO variants_master
+                (variant_id, rsid, chrom, pos_grch38, ref_allele, alt_allele, variant_type)
+            VALUES (1, 'rs1', '1', 1000, 'A', 'G', 'SNV')
+            """,
+        )
+        conn.execute(
+            """
+            INSERT INTO dbsnp_annotations
+                (dbsnp_id, rsid, chrom, pos_grch38, ref_allele, alt_alleles,
+                 variant_class, source_version_id, retrieval_date)
+            VALUES (1, 'rs1', '1', 1000, 'G', ['A'], 'snv', ?, CURRENT_TIMESTAMP)
+            """,
+            [sv],
+        )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        ["annotate", "canonicalize-variants", "--no-backup"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "variants_master canonicalized:" in result.output
+    assert "rows_reoriented=1" in result.output
+    assert "already_canonical=False" in result.output
+    assert "backup=skipped" in result.output
+
+
+def test_annotate_align_tier3_consensus_no_op_on_fresh_db(
+    annotations_root: Path,  # noqa: ARG001
+) -> None:
+    """No tier-3 pairs -> exit 0 with rows_deleted=0."""
+    init_databases()
+    with duckdb_connection() as conn:
+        sv = insert_source_version(
+            conn,
+            source_db="dbsnp",
+            version="157",
+            source_url=None,
+            source_file_hash="d" * 64,
+            source_file_size=1,
+            record_count=0,
+        )
+        flip_to_new_version(
+            conn,
+            source="dbsnp",
+            table="dbsnp_annotations",
+            new_source_version_id=sv,
+        )
+    runner = CliRunner()
+    result = runner.invoke(app, ["annotate", "align-tier3-consensus"])
+    assert result.exit_code == 0, result.output
+    assert "tier-3 consensus aligned:" in result.output
+    assert "rows_deleted=0" in result.output

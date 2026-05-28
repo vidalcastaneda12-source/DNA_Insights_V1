@@ -16,6 +16,18 @@ manageable. This document tracks them so they aren't forgotten.
    *Recommended fix point:* the post-5.7 backfills slot — with dbSNP canonical
    REF/ALT loaded (5.6), a normalization step can consolidate the
    strand-flipped duplicates.
+   *Status:* **partially shipped in PR 3 (finding-020)** — the ordering
+   aspect (the ~101,918 alphabetical-swap victims dominant in finding-018) is
+   canonicalized by `genome annotate canonicalize-variants`. The
+   complement/strand-flip aspect — the 106 tier-3 cases where the two chips
+   stored complementary allele sets at the same position — is **deferred to
+   PR 5 (chrX/strand architecture)** as a sub-item: a full
+   `variants_master` collapse there requires complementing
+   `genotype_calls.allele_1/2` via row-grain supersession, which is the PR 5
+   scope. PR 3 leaves these as two `variants_master` rows; merge tier-3
+   keeps pairing them at the genotype level, and the new
+   `align-tier3-consensus` post-merge step deletes the non-canonical-side
+   consensus so Phase 6 reads see exactly one consensus row per pair.
 
 2. **Profile-level QC rollup.** The current `sample_qc` table is
    per-ingestion-run. A profile-level rollup that combines per-source
@@ -45,8 +57,9 @@ manageable. This document tracks them so they aren't forgotten.
    point:* Phase 6 ACMG SF detection populates `is_acmg_sf` as its first task,
    then re-walks discrepancies and bumps severity once the flags are in place.
 
-6. **Imputation input misses hom-only positions until canonical REF/ALT is
-   loaded.** Phase 4's `genome imputation prepare` filters out variants
+6. *(Status: shipped in PR 3 / finding-020.)* **Imputation input misses
+   hom-only positions until canonical REF/ALT is loaded.** Phase 4's
+   `genome imputation prepare` filters out variants
    where `ref_allele == alt_allele`, because Phase 2's alphabetical-ordering
    normalize sets both fields to the same base for positions where every
    observation is homozygous. Imputation engines reject `ref=A alt=A`

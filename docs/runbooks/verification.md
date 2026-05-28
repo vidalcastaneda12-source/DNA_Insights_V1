@@ -99,10 +99,25 @@ identifiers documented in CLAUDE.md "Real-data observations":
   `both_concordant=120,516`, `disagreement_resolved=106`,
   `single_source=821,998`, shared-call concordance=1.0000,
   `strand_flip_resolutions=106`, palindromic shared variants=31.
+  **Post-PR-3 (canonicalize step) these numbers re-lock per
+  finding-020 — shared-call concordance specifically DROPS from
+  1.0000 by design. If `< 1.0000`, this is the post-PR-3 re-lock
+  value, not a regression; see the finding's bedrock anchor table
+  for the exact post-canonicalize numbers and the
+  correction-not-regression framing.**
 * Phase 4 imputation: input 204,153 polymorphic SNVs (chr1–chr22 + X),
   imputed output at DR² > 0.3 = 2,369,171, mean DR² 0.8242,
   high-quality (DR² > 0.8) = 1,592,735, chrX imputed = 0 for males,
   full-genome runtime ~30 min on 16 threads / 8 GB heap.
+* PR-3 canonicalize step (`genome annotate canonicalize-variants` →
+  `genome merge` → `genome annotate align-tier3-consensus` →
+  `genome annotate refresh-index`): the bedrock anchor table in
+  finding-020 lists every post-PR-3 locked number. Headline checks:
+  `gnomad_matches` / `clinvar_matches` rise dramatically from
+  101,501 / 2,559; `gwas_matches=66,726` and `pharmgkb_matches=1,737`
+  stay unchanged; the post-`align-tier3` `consensus_genotypes WHERE
+  consensus_method='disagreement_resolved'` count drops to 53 (one per
+  pair on the canonical side) from the post-merge 106.
 
 Drift in any of these numbers against the same input corpus is a
 regression signal, not noise. The numbers are recorded as stable
