@@ -88,10 +88,10 @@ Deferred to later phases:
 
 Re-derivations of `variants_master` / `consensus_genotypes` content enabled by the loaded dbSNP build (5.6). Not loaders, not analyses — they slot after 5.7 closes Phase 5 and before the Phase 6 analyses begin. Gated on dbSNP canonical REF/ALT, and on `variant_aliases` being populated (5.6 PR B shipped `dbsnp_annotations` only and left `variant_aliases` empty — see finding-016 #8; these backfills populate and consume it).
 
-- Canonical REF/ALT for strand-flip dedupe (finding-005 #1)
+- [x] Canonical REF/ALT for strand-flip dedupe (finding-005 #1) — **ordering aspect**; `genome annotate canonicalize-variants` + companion `genome annotate align-tier3-consensus` (finding-020). Strand-flip `variants_master` collapse (the ~106 tier-3 pairs that need `genotype_calls` allele complementing via supersession) is deferred to PR 5; finding-005 #1 tracks it as a deferred sub-item.
 - [x] `variant_aliases` population from dbSNP RsMergeArch — `genome annotate refresh-aliases` (finding-019). The data dependency for the item below; attaches to the current dbSNP epoch (no pointer flip).
 - Tier-2 rsID matching via `variant_aliases` (finding-005 #4) — consumes the populated map above
-- Hom-only recovery via canonical REF/ALT (finding-005 #6)
+- [x] Hom-only recovery via canonical REF/ALT (finding-005 #6) — shipped together with the canonicalize step above (same `genome annotate canonicalize-variants` command; mapping_kind `hom_ref_recover` / `hom_ref_recover_multialt` / `hom_alt_recover`).
 
 ## Phase 6 — Analysis pipelines
 - Load `pgs_score_weights` (per-variant PGS weights, overlapping-only per locked decision #5) → PRS computation against PGS Catalog

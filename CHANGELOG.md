@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Canonical REF/ALT backfill + hom-only recovery — the second post-5.7
+  backfill (finding-020). New `genome annotate canonicalize-variants` rewrites
+  `variants_master.(ref_allele, alt_allele)` against the currently-active
+  dbSNP source-version: re-orients the alphabetical-ordering swap victims
+  (~101,918 genuine rows), recovers hom-only `ref==alt` rows by assigning a
+  real ALT from dbSNP (closing finding-005 #1 ordering aspect and #6), and
+  collapses rows whose new canonical key collides with a sibling at the same
+  position. Companion `genome annotate align-tier3-consensus` runs after
+  `merge` to delete the non-canonical-side consensus rows for the
+  strand-flipped duplicates that Scope-A canonicalize leaves as two rows, so
+  Phase 6 reads see exactly one `variant_id` per real biallelic site. Auto
+  pre-mutation snapshot of `genome.duckdb` to `archive/canonicalize/` with
+  `--no-backup` opt-out and a documented restore one-liner. Two-transaction
+  split sidesteps DuckDB's FK-on-DELETE enforcement that doesn't see
+  in-transaction FK re-points. No schema or DDL change; **requires re-running
+  `merge` → `align-tier3-consensus` → `refresh-index`** to bring the database
+  to a coherent state (per the reload sequence in `docs/runbooks/annotations.md`).
+  The shared-call concordance rate drops from 1.0000 — this is the deliberate
+  re-lock event finding-018 anticipated, not a regression; see finding-020
+  for the full bedrock anchor table. Strand-flip `variants_master` collapse
+  (genotype_calls supersession) deferred to PR 5.
 - Populate `variant_aliases` from dbSNP's `RsMergeArch.bcp.gz` rs-merge archive
   via a new standalone `genome annotate refresh-aliases` command — the first
   post-5.7 backfill (finding-019). Fills the table the dbSNP loader (5.6) left
