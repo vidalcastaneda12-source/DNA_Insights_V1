@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Populate `variant_aliases` from dbSNP's `RsMergeArch.bcp.gz` rs-merge archive
+  via a new standalone `genome annotate refresh-aliases` command — the first
+  post-5.7 backfill (finding-019). Fills the table the dbSNP loader (5.6) left
+  empty (finding-016 #8), mapping `alias_rsid (old) → current_rsid (survivor)`
+  for merges touching the user's own rsIDs on either side, so the deferred
+  tier-2 rsID merge matching (finding-005 #4) has a map to resolve against. The
+  alias rows attach to the **current dbSNP `source_version_id`** (the dbsnp
+  source group's shared version pointer) with no new version and no pointer
+  flip — so it requires dbSNP to be loaded first and must be re-run after any
+  future dbSNP refresh. Audited download (intent+blocked on disabled), PyArrow
+  bulk insert, single-transaction `--force` DELETE+re-INSERT. No schema, DDL, or
+  data changes; no re-ingest; `dbsnp_annotations` untouched. (#64)
 - Pre-Phase-6 cleanup (docs + operational). Corrects the off-by-one phase
   numbers in the `analyze` / `insights` / `api` package docstrings (now
   Phase 6 / 7 / 8 per ROADMAP). Completes the `annotations.md` "After a

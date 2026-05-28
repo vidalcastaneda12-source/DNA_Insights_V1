@@ -115,15 +115,19 @@ database needs to be reloaded:
    genome annotate refresh --source pgs_catalog
    genome annotate refresh --source gnomad
    genome annotate refresh --source dbsnp
+   genome annotate refresh-aliases
    genome annotate refresh-index
    ```
 
-The last three are order-sensitive: `gnomad` builds its
+The last four are order-sensitive: `gnomad` builds its
 `(user ∪ ClinVar ∪ GWAS)` filter from the active ClinVar and GWAS
 releases, so both must already be loaded; `refresh-index` rolls up the
 four variant-linkable sources (ClinVar, GWAS, gnomAD, PharmGKB) through
 their version pointers, so it runs last. `dbsnp` reads only
-`variants_master` and is order-independent among the loaders.
+`variants_master` and is order-independent among the loaders, **but
+`refresh-aliases` must run after `--source dbsnp`** — it attaches the
+rsID-merge map to the current dbSNP `source_version_id` and must be
+re-run after any future dbSNP refresh that flips that pointer.
 
 The annotation refreshes are idempotent on
 `(source_db, version, source_file_hash)` — if upstream hasn't moved
@@ -1735,6 +1739,86 @@ unaffected by REF/ALT and are stable now.
 * **A source's rows are missing after a refresh.** Confirm its
   `annotation_sources` pointer names the version you loaded (`genome annotate
   status`); the builder reads only current-pointer rows.
+
+### variant_aliases backfill (post-5.7)
+
+**What's loaded.** NCBI's dbSNP rs-merge archive
+(`RsMergeArch.bcp.gz`, ~146 MB gzipped, frozen 2018-02-07 / build ~151),
+filtered to merges touching the user's own rsIDs, into `variant_aliases` as a
+canonical `alias_rsid (old) → current_rsid (survivor)` map with
+`alias_type = 'merged'`. It fills the table the dbSNP loader (5.6) left empty
+(finding-016 #8) and unblocks the deferred tier-2 rsID merge matching
+(finding-005 #4). The dbSNP VCF carries no merge history, so this is a separate
+download — see [finding-019](../findings/finding-019-variant-aliases-backfill.md)
+for the source choice, the both-sided filter, and the staleness rationale.
+
+**Command.**
+
+```
+genome annotate refresh-aliases          # dbSNP must already be loaded
+genome annotate refresh-aliases --force  # re-download + rebuild for the current epoch
+```
+
+**Supersession (same dbSNP epoch, no flip).** `variant_aliases` shares the
+`dbsnp` version pointer with `dbsnp_annotations`. The command reads the current
+dbSNP `source_version_id` and writes alias rows **under that same id** — it
+allocates no new version, does **not** flip the pointer, and does **not** mutate
+`annotation_source_versions.record_count` (that belongs to `dbsnp_annotations`).
+It therefore requires dbSNP to be loaded first and fails fast (exit 2) with a
+clear message otherwise. **Re-run `refresh-aliases` after any future
+`refresh --source dbsnp`** that flips the pointer, or the new dbSNP epoch will
+carry no aliases. A `--force` re-run does `DELETE` + re-`INSERT` under the same
+id inside one transaction (atomic; readers never see a torn map); a re-run
+without `--force` short-circuits when the current epoch is already populated
+(no re-download).
+
+**Filter + dedup.** Kept when either `rsHigh` (merged-away) or `rsCurrent`
+(survivor) is present in `variants_master.rsid` — both directions, because
+tier-2 resolves a user's stale rsID *and* an external source's stale rsID
+against the user's current rsID. Self-merges, malformed/non-numeric rows, and
+duplicate `alias_rsid`s are dropped.
+
+**Runtime.** The ~12M-row scan runs in Python (`csv.reader`, ~24 s) with PyArrow
+bulk insert of the matched set; the 839K-row INSERT + checkpoint into the
+multi-GB DuckDB is ~30 s, for ~54 s wall-clock end-to-end, with a
+`variant_aliases.scan.progress` line every 5M source rows. A named, gated
+backfill, outside the 30 s routine-refresh target by design.
+
+**Drift identifiers (locked — finding-019).** Real-data first run against the
+user's corpus (dbSNP `157`, `variants_master` 927,964 distinct rsIDs;
+RsMergeArch 11,963,907 source rows):
+
+| Metric | Locked value |
+|---|---|
+| `rows_loaded` | 839,413 |
+| `distinct_alias_rsid` | 839,413 |
+| `distinct_current_rsid` | 513,573 |
+| `user_old_rsid_hits` (tier-2-lift proxy) | 1,190 |
+| `user_current_rsid_hits` | 512,408 |
+| wall-clock | 54.2 s |
+
+Capture from the `variant_aliases.refresh.complete` structlog line; a re-run
+against the same corpus + frozen RsMergeArch that deviates is a regression
+signal. Verify with:
+
+```sql
+SELECT COUNT(*), COUNT(DISTINCT alias_rsid), COUNT(DISTINCT current_rsid)
+  FROM variant_aliases va
+  JOIN annotation_sources s
+    ON s.source_db = 'dbsnp' AND s.current_source_version_id = va.source_version_id;
+SELECT COUNT(DISTINCT vm.rsid) AS user_old_rsid_hits
+  FROM variants_master vm JOIN variant_aliases va ON va.alias_rsid = vm.rsid;
+```
+
+**Troubleshooting.**
+
+* **`exit code 2: load the dbSNP VCF first`** — no active dbSNP pointer. Run
+  `genome annotate refresh --source dbsnp` first.
+* **`ExternalCallsDisabledError`** — `external_calls_enabled` is `false`. Run
+  `genome config set external_calls_enabled true`. The blocked attempt is still
+  recorded in `audit_log` (intent + blocked pair for `dbsnp_rsmergearch`).
+* **All aliases vanished from reader joins after a dbSNP refresh.** Expected —
+  the pointer moved to a new epoch. Re-run `genome annotate refresh-aliases`.
 
 ## Audit log review
 
