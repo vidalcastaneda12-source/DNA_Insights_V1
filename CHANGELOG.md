@@ -20,7 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pre-mutation snapshot of `genome.duckdb` to `archive/canonicalize/` with
   `--no-backup` opt-out and a documented restore one-liner. Two-transaction
   split sidesteps DuckDB's FK-on-DELETE enforcement that doesn't see
-  in-transaction FK re-points. No schema or DDL change; **requires re-running
+  in-transaction FK re-points, and re-syncs `variant_id_seq` past the
+  explicitly-allocated survivor ids so the next default-`nextval` ingest can't
+  collide on the PK. No schema or DDL change; **requires re-running
   `merge` → `align-tier3-consensus` → `refresh-index`** to bring the database
   to a coherent state (per the reload sequence in `docs/runbooks/annotations.md`).
   The shared-call concordance rate drops from 1.0000 — this is the deliberate

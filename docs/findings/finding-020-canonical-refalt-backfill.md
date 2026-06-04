@@ -184,6 +184,23 @@ rebuilt by `merge` / `refresh-index`), or (b) precondition-empty in the PR-3
 window (the Phase-6/7 derived/insight tables enumerated in
 `_PRECONDITION_TABLES`).
 
+**`variant_id_seq` re-sync (a consequence of the explicit allocator).**
+`variants_master.variant_id` is the schema's only sequence-backed PK
+(`DEFAULT nextval('variant_id_seq')`), and the ingest paths (`writer.py`,
+`imputation.ingest`) omit `variant_id` and rely on that default. The allocator
+above assigns survivor ids explicitly as `MAX(variant_id) + ROW_NUMBER()`
+without advancing the sequence, so TX2 must re-sync `variant_id_seq` past the
+new high-water mark afterward (`_resync_variant_id_sequence`) — otherwise the
+next default-`nextval` ingest collides on the PK. DuckDB has no usable sequence
+reset under the column-DEFAULT dependency (`CREATE OR REPLACE SEQUENCE` trips a
+DependencyException; `ALTER SEQUENCE … RESTART` is unimplemented), so the
+re-sync advances by draining `nextval` to `MAX(variant_id)` via
+`SELECT max(s) FROM (SELECT nextval('variant_id_seq') FROM range(delta))`; the
+volatile `nextval` must be materialized through `max(s)` or DuckDB prunes it
+under a `count(*)` wrapper. Dropping `variant_id_seq` in favor of the
+`MAX`-based allocator the annotation tables already use is a candidate schema
+follow-up that would remove this asymmetry entirely.
+
 ### 3. Two-transaction split
 
 DuckDB's FK enforcement on `DELETE FROM variants_master` reads the
@@ -194,8 +211,10 @@ The canonicalize step splits across two transactions on the same connection:
 - **TX1**: stage `_canon_map` / `_canon_resolve` / `_canon_remap`, DELETE the
   three downstream tables, INSERT new survivor rows, UPDATE
   `genotype_calls.variant_id` to point to them. Commit.
-- **TX2**: DELETE the now-orphan old mover rows, recompute survivor
-  `has_*_call` flags. `commit_and_checkpoint`.
+- **TX2**: DELETE the now-orphan old mover rows (keyed off the still-live
+  connection-scoped `_canon_map` TEMP, which survives the TX1 commit), recompute
+  survivor `has_*_call` flags, then re-sync `variant_id_seq` past the
+  explicitly-allocated survivor ids (see §2). `commit_and_checkpoint`.
 
 The crash window between commits leaves **harmless** orphan `variants_master`
 rows (no calls reference them, the downstream tables are empty). A re-run of

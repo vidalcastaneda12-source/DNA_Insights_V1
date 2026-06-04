@@ -99,6 +99,40 @@ def _seed_variant(  # noqa: PLR0913 — variant identity fields not collapsible
     )
 
 
+def _seed_variant_via_sequence(  # noqa: PLR0913 — variant identity fields not collapsible
+    conn: DuckDBPyConnection,
+    *,
+    chrom: str = "1",
+    pos: int = 1000,
+    ref: str = "A",
+    alt: str = "G",
+    variant_type: str = "SNV",
+) -> int:
+    """Insert one ``variants_master`` row via the ``variant_id_seq`` DEFAULT.
+
+    Mirrors the production ingest path (``writer.py`` / ``imputation.ingest``)
+    which omits ``variant_id`` and relies on the sequence default — *this* is
+    what keeps ``variant_id_seq`` in sync with reality, the condition the
+    explicit-id :func:`_seed_variant` helper never reproduces. Returns the
+    sequence-assigned ``variant_id``.
+    """
+    conn.execute(
+        """
+        INSERT INTO variants_master
+            (rsid, chrom, pos_grch38, ref_allele, alt_allele, variant_type)
+        VALUES (NULL, ?, ?, ?, ?, ?::variant_type_enum)
+        """,
+        [chrom, pos, ref, alt, variant_type],
+    )
+    row = conn.execute(
+        "SELECT variant_id FROM variants_master WHERE pos_grch38 = ? "
+        "AND ref_allele = ? AND alt_allele = ?",
+        [pos, ref, alt],
+    ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
 def _seed_call(  # noqa: PLR0913 — call identity fields not collapsible
     conn: DuckDBPyConnection,
     call_id: int,
@@ -436,6 +470,64 @@ def test_force_bypasses_fast_path_and_reports_zero_deltas(
     assert result.already_canonical is False
     assert result.rows_changed == 0
     assert result.rows_collapsed == 0
+
+
+# ---------------------------------------------------------------------------
+# Sequence re-sync (regression — the explicit-id allocator must not strand
+# variant_id_seq behind the survivor ids it allocated)
+# ---------------------------------------------------------------------------
+
+
+def test_sequence_resynced_allows_default_path_insert(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """After a reorient allocates a survivor at MAX+1, the next default-path
+    insert must not collide with it.
+
+    The allocator assigns survivor ids explicitly as ``MAX(variant_id) +
+    ROW_NUMBER()`` and never advances ``variant_id_seq``. Seeding the initial
+    row *via the sequence default* (mirroring writer.py) is what puts the
+    sequence in sync with reality — the production condition the explicit-id
+    :func:`_seed_variant` helper never reproduces, which is exactly why the
+    stale-sequence collision hid. Post-canonicalize,
+    ``_resync_variant_id_sequence`` advances the sequence past the survivor id
+    so a subsequent default-path (``nextval``) insert gets a fresh id instead
+    of a duplicate-PK ``ConstraintException``.
+    """
+    init_databases()
+    with duckdb_connection() as conn:
+        svid = _seed_dbsnp_version(conn)
+        # Seed via the sequence DEFAULT so variant_id_seq tracks reality.
+        seeded_id = _seed_variant_via_sequence(conn, ref="A", alt="G")
+        _seed_call(conn, 1, seeded_id, allele_1="A", allele_2="G")
+        # dbSNP says ref=G alt=[A] -> forces a reorient to (G,A). The only row at
+        # the position is the mover, so a *new* survivor is allocated at MAX+1.
+        _seed_dbsnp_annotation(conn, 1, svid, ref="G", alts=("A",))
+
+        result = canonicalize_variants(conn, no_backup=True)
+        assert result.rows_reoriented == 1
+        assert result.new_variant_ids_allocated == 1
+
+        post_max_row = conn.execute(
+            "SELECT MAX(variant_id) FROM variants_master",
+        ).fetchone()
+        assert post_max_row is not None
+        post_max = int(post_max_row[0])
+
+        # The re-sync advanced the sequence so its next nextval exceeds the
+        # survivor id (last_value >= post_max => next value == last_value+1).
+        seq_row = conn.execute(
+            "SELECT last_value FROM duckdb_sequences() WHERE sequence_name = 'variant_id_seq'",
+        ).fetchone()
+        assert seq_row is not None
+        assert seq_row[0] is not None
+        assert int(seq_row[0]) >= post_max
+
+        # The default-path insert must succeed (pre-fix: the stale sequence
+        # yields MAX+1 again — the id the new survivor already took — raising a
+        # duplicate-PK ConstraintException here).
+        new_id = _seed_variant_via_sequence(conn, pos=2000, ref="C", alt="T")
+        assert new_id > post_max
 
 
 # ---------------------------------------------------------------------------

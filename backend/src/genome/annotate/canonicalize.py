@@ -800,6 +800,33 @@ def _count_post(conn: DuckDBPyConnection) -> tuple[int, int]:
     return (int(row[0]), int(row[1]))
 
 
+def _resync_variant_id_sequence(conn: DuckDBPyConnection) -> None:
+    """Advance ``variant_id_seq`` so its next value exceeds ``MAX(variant_id)``.
+
+    The allocator assigns survivor ids explicitly as ``MAX + ROW_NUMBER`` and
+    never touches the sequence, so the default-``nextval`` ingest path
+    (writer.py / imputation.ingest) would otherwise collide. DuckDB has no
+    usable reset (``CREATE OR REPLACE SEQUENCE`` trips the column-DEFAULT
+    dependency; ``ALTER SEQUENCE … RESTART`` is unimplemented), so we advance
+    by draining ``nextval`` to the high-water mark.
+    """
+    mx_row = conn.execute("SELECT COALESCE(MAX(variant_id), 0) FROM variants_master").fetchone()
+    mx = int(mx_row[0]) if mx_row is not None else 0
+    seq_row = conn.execute(
+        "SELECT last_value, start_value, increment_by "
+        "FROM duckdb_sequences() WHERE sequence_name = 'variant_id_seq'",
+    ).fetchone()
+    if seq_row is None:
+        return
+    last_value, start_value, increment_by = seq_row
+    consumed = int(last_value) if last_value is not None else int(start_value) - int(increment_by)
+    delta = mx - consumed
+    if delta > 0:
+        conn.execute(
+            f"SELECT max(s) FROM (SELECT nextval('variant_id_seq') AS s FROM range({delta}))",  # noqa: S608 — integer delta only
+        ).fetchone()
+
+
 # ---------------------------------------------------------------------------
 # Top-level entrypoint.
 # ---------------------------------------------------------------------------
@@ -852,13 +879,17 @@ def canonicalize_variants(  # noqa: PLR0915 — one orchestrator, intentional ph
     4. When ``conn is None`` and ``no_backup`` is False: take a pre-mutation
        file snapshot of ``genome.duckdb`` (CHECKPOINT → cp → chmod 0600). A
        borrowed connection (tests) skips the snapshot by construction.
-    5. In one transaction: stage ``_canon_map`` / ``_canon_resolve`` /
-       ``_canon_remap``, ``DELETE`` the three downstream tables that will be
-       regenerated, INSERT new variants_master rows for target keys with no
-       existing unchanged sibling, re-point ``genotype_calls.variant_id`` to
-       the survivors, ``DELETE`` old mover rows, recompute survivor flags,
-       ``commit_and_checkpoint``. On any exception ``conn.rollback()`` and
-       re-raise.
+    5. In **two** transactions (the DuckDB FK-on-DELETE enforcement forces the
+       split — see the module docstring). TX1: stage ``_canon_map`` /
+       ``_canon_resolve`` / ``_canon_remap``, ``DELETE`` the three downstream
+       tables that will be regenerated, INSERT new ``variants_master`` rows for
+       target keys with no existing unchanged sibling, re-point
+       ``genotype_calls.variant_id`` to the survivors, ``commit``. TX2: ``DELETE``
+       the now-orphan old mover rows (``_DELETE_OLD_VARIANTS_SQL``, keyed off the
+       still-live ``_canon_map`` TEMP), recompute survivor flags, then re-sync
+       ``variant_id_seq`` past the explicitly-allocated survivor ids so the
+       default-``nextval`` ingest path can't collide, ``commit_and_checkpoint``.
+       On any exception in either transaction ``conn.rollback()`` and re-raise.
     6. Return the locked drift identifiers.
     """
     started = time.monotonic()
@@ -959,17 +990,6 @@ def canonicalize_variants(  # noqa: PLR0915 — one orchestrator, intentional ph
             active_conn.execute(_REPOINT_GENOTYPE_CALLS_SQL)
             log.info("canonicalize.fk_repointed", calls_repointed=calls_repointed)
 
-            # Persist a snapshot of canon_map's old_variant_ids so the TX2
-            # DELETE can target them even though the TEMP tables (connection-
-            # scoped, but we drop them deliberately at TX2 end) will still be
-            # present here.
-            old_ids = [
-                int(r[0])
-                for r in active_conn.execute(
-                    "SELECT old_variant_id FROM _canon_map",
-                ).fetchall()
-            ]
-
             active_conn.commit()
             log.info("canonicalize.tx1_committed")
         except Exception:
@@ -980,26 +1000,13 @@ def canonicalize_variants(  # noqa: PLR0915 — one orchestrator, intentional ph
         # ---- TX2: DELETE now-orphan old rows + recompute flags ----
         active_conn.begin()
         try:
-            # Re-create the deleted-id list as a TEMP table so the DELETE uses
-            # a single set-based statement (mirrors the bulk-load convention).
-            active_conn.execute("DROP TABLE IF EXISTS _canon_dead_ids")
-            active_conn.execute(
-                "CREATE TEMP TABLE _canon_dead_ids (variant_id BIGINT)",
-            )
-            if old_ids:
-                # Bulk INSERT via VALUES rows to avoid executemany.
-                values_sql = ", ".join(f"({vid})" for vid in old_ids)
-                active_conn.execute(
-                    f"INSERT INTO _canon_dead_ids (variant_id) VALUES {values_sql}",  # noqa: S608 — integers only
-                )
-
-            active_conn.execute(
-                """
-                DELETE FROM variants_master
-                 WHERE variant_id IN (SELECT variant_id FROM _canon_dead_ids)
-                """,
-            )
-            log.info("canonicalize.old_rows_deleted", count=len(old_ids))
+            # The old mover rows are now orphan (their genotype_calls were
+            # re-pointed in TX1, downstream tables cleared). DELETE them keyed
+            # off the still-live connection-scoped ``_canon_map`` TEMP — it
+            # survives the TX1 commit and is only torn down by
+            # ``_drop_temp_tables`` below.
+            active_conn.execute(_DELETE_OLD_VARIANTS_SQL)
+            log.info("canonicalize.old_rows_deleted", count=canon_map_count)
 
             # Count survivors whose flags will be recomputed (rowcount unreliable).
             survivors_row = active_conn.execute(
@@ -1013,8 +1020,12 @@ def canonicalize_variants(  # noqa: PLR0915 — one orchestrator, intentional ph
             active_conn.execute(_RECOMPUTE_FLAGS_SQL)
             log.info("canonicalize.flags_recomputed", survivors=survivors_updated)
 
+            # The allocator assigned survivor ids explicitly as MAX + ROW_NUMBER
+            # and never advanced variant_id_seq; re-sync it so the default-
+            # nextval ingest path (writer.py / imputation.ingest) can't collide.
+            _resync_variant_id_sequence(active_conn)
+
             _drop_temp_tables(active_conn)
-            active_conn.execute("DROP TABLE IF EXISTS _canon_dead_ids")
 
             commit_and_checkpoint(
                 active_conn,
