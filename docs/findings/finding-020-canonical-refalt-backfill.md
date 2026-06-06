@@ -179,7 +179,7 @@ re-points to it, the hom-only row is deleted).
 Consequence: **`variant_id` is NOT preserved for movers** (re-oriented or
 recovered rows). This is acceptable because every consumer of `variant_id` is
 either (a) downstream-regenerated (`consensus_genotypes`, `discrepancies`,
-`variant_annotations_index` — all DELETEd in the canonicalize transaction and
+`variant_annotations_index` — all DELETEd during the canonicalize step and
 rebuilt by `merge` / `refresh-index`), or (b) precondition-empty in the PR-3
 window (the Phase-6/7 derived/insight tables enumerated in
 `_PRECONDITION_TABLES`).
@@ -201,30 +201,40 @@ under a `count(*)` wrapper. Dropping `variant_id_seq` in favor of the
 `MAX`-based allocator the annotation tables already use is a candidate schema
 follow-up that would remove this asymmetry entirely.
 
-### 3. Two-transaction split
+### 3. Three-transaction split
 
-DuckDB's FK enforcement on `DELETE FROM variants_master` reads the
-*pre-transaction* state of `genotype_calls.variant_id` and so does not see the
-in-transaction UPDATE that re-pointed the FK away from the row being deleted.
-The canonicalize step splits across two transactions on the same connection:
+DuckDB's FK enforcement on a row delete reads the *pre-transaction* state of the
+*referencing* table, so an in-transaction DELETE of the referencing rows is
+invisible to the check. Two distinct FKs hit this, forcing a three-way split on
+the same connection:
 
-- **TX1**: stage `_canon_map` / `_canon_resolve` / `_canon_remap`, DELETE the
-  three downstream tables, INSERT new survivor rows, UPDATE
+- **TX0**: `DELETE FROM discrepancies` and commit. `discrepancies` is the only
+  table whose FK points *onto* `genotype_calls` (`call_a_id` / `call_b_id` →
+  `genotype_calls(call_id)`). The TX1 repoint `UPDATE genotype_calls SET
+  variant_id` is executed by DuckDB as delete+reinsert of each row (`variant_id`
+  carries its own FK's ART index), which fires that parent-side check; it must
+  already see `discrepancies` empty as of a committed transaction.
+- **TX1**: stage `_canon_map` / `_canon_resolve` / `_canon_remap`, DELETE the two
+  `variants_master`-keyed rollups (`consensus_genotypes` /
+  `variant_annotations_index`), INSERT new survivor rows, UPDATE
   `genotype_calls.variant_id` to point to them. Commit.
 - **TX2**: DELETE the now-orphan old mover rows (keyed off the still-live
-  connection-scoped `_canon_map` TEMP, which survives the TX1 commit), recompute
-  survivor `has_*_call` flags, then re-sync `variant_id_seq` past the
+  connection-scoped `_canon_map` TEMP, which survives the TX1 commit; the same
+  quirk again — the repoint away from the movers must be committed first),
+  recompute survivor `has_*_call` flags, then re-sync `variant_id_seq` past the
   explicitly-allocated survivor ids (see §2). `commit_and_checkpoint`.
 
-The crash window between commits leaves **harmless** orphan `variants_master`
-rows (no calls reference them, the downstream tables are empty). A re-run of
-`canonicalize-variants` detects and DELETEs them as a no-new-survivors-needed
-pass. The supersession atomicity guarantee (CLAUDE.md decision #7) is
-preserved at the *downstream* boundary — a reader sees either the entire
-pre-canonicalize state or the entire post-canonicalize state at the
-`consensus_genotypes` / `variant_annotations_index` grain (those are
-wholesale-cleared in TX1 and re-derived by `merge` / `refresh-index` after
-the canonicalize finishes).
+Crash windows are recoverable within the runbook: a crash after TX0 / before TX1
+leaves `discrepancies` empty with `variants_master` unchanged; a crash after TX1
+/ before TX2 leaves **harmless** orphan `variants_master` rows (no calls
+reference them, downstream tables empty). A re-run of `canonicalize-variants`
+DELETEs orphans as a no-new-survivors-needed pass, and `merge` /
+`refresh-index` rebuild the downstream tables regardless. The supersession
+atomicity guarantee (CLAUDE.md decision #7) is preserved at the *downstream*
+boundary — a reader sees either the entire pre-canonicalize state or the entire
+post-canonicalize state at the `consensus_genotypes` / `variant_annotations_index`
+grain (those are wholesale-cleared here and re-derived by `merge` /
+`refresh-index` after the canonicalize finishes).
 
 ### 4. Post-merge `align-tier3-consensus`
 
@@ -317,7 +327,7 @@ Two new standalone `annotate` subcommands; see
 ordering:
 
 ```
-genome annotate canonicalize-variants    # checkpoint → snapshot → mutate (2 txns)
+genome annotate canonicalize-variants    # checkpoint → snapshot → mutate (3 txns)
 genome merge                              # rebuild consensus_genotypes + discrepancies
 genome annotate align-tier3-consensus     # delete non-canonical-side consensus rows
 genome annotate refresh-index             # rebuild variant_annotations_index

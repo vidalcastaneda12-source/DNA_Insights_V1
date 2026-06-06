@@ -193,6 +193,36 @@ def _seed_dbsnp_annotation(  # noqa: PLR0913 — dbsnp identity fields not colla
     )
 
 
+def _seed_discrepancy(
+    conn: DuckDBPyConnection,
+    discrepancy_id: int,
+    variant_id: int,
+    *,
+    call_a_id: int,
+    call_b_id: int | None = None,
+) -> None:
+    """Insert one ``discrepancies`` row referencing ``genotype_calls``.
+
+    The FK ``discrepancies.call_a_id`` / ``call_b_id`` ->
+    ``genotype_calls(call_id)`` is exactly what the TX1 repoint
+    (``UPDATE genotype_calls SET variant_id``, executed by DuckDB as
+    delete+reinsert) trips when this table is non-empty. These rows are the
+    regression guard for the TX0 pre-clear.
+    """
+    source_b = "ancestry" if call_b_id is not None else None
+    conn.execute(
+        """
+        INSERT INTO discrepancies
+            (discrepancy_id, variant_id, discrepancy_type, severity,
+             source_a, call_a_id, source_b, call_b_id)
+        VALUES (?, ?, 'genotype_mismatch'::discrepancy_type_enum,
+                'major'::severity_enum, '23andme'::source_enum, ?,
+                ?::source_enum, ?)
+        """,
+        [discrepancy_id, variant_id, call_a_id, source_b, call_b_id],
+    )
+
+
 def _fetch_variants(conn: DuckDBPyConnection) -> list[dict[str, Any]]:
     cur = conn.execute(
         "SELECT variant_id, chrom, pos_grch38, ref_allele, alt_allele, has_genotyped_call"
@@ -431,6 +461,79 @@ def test_collapse_unmatched_sibling(isolated_settings: dict[str, str]) -> None: 
     assert len(variants) == 1
     assert variants[0]["variant_id"] == 1  # reused existing
     assert sorted(calls) == [(1, 1, "23andme"), (2, 1, "ancestry")]
+
+
+# ---------------------------------------------------------------------------
+# Repoint vs. a non-empty discrepancies table (TX0 pre-clear regression)
+# ---------------------------------------------------------------------------
+
+
+def test_repoint_succeeds_with_referencing_discrepancy(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """A ``discrepancies`` row referencing the calls about to be repointed must
+    not block the repoint.
+
+    Regression for the TX0 pre-clear. ``discrepancies.call_a_id`` / ``call_b_id``
+    -> ``genotype_calls(call_id)`` is a parent-side FK that DuckDB checks against
+    *pre-transaction* state when the repoint UPDATE delete+reinserts the
+    genotype_calls rows. Before the TX0 split, the in-TX1 ``DELETE FROM
+    discrepancies`` was invisible to that check and the repoint raised
+    ``ConstraintException``; now the delete is committed in TX0 first. Both calls
+    collapse to one survivor, so the discrepancy references both via call_a_id +
+    call_b_id (exercises both FK columns).
+    """
+    init_databases()
+    with duckdb_connection() as conn:
+        svid = _seed_dbsnp_version(conn)
+        _seed_variant(conn, 1, ref="A", alt="A")
+        _seed_call(conn, 1, 1, source="23andme", allele_1="A", allele_2="A")
+        _seed_variant(conn, 2, ref="G", alt="G")
+        _seed_call(conn, 2, 2, source="ancestry", allele_1="G", allele_2="G")
+        _seed_dbsnp_annotation(conn, 1, svid, ref="A", alts=("G",))
+        _seed_discrepancy(conn, 1, 1, call_a_id=1, call_b_id=2)
+        before = conn.execute("SELECT COUNT(*) FROM discrepancies").fetchone()
+        assert before is not None
+        assert before[0] == 1  # the FK row is actually present pre-run
+
+        result = canonicalize_variants(conn, no_backup=True)
+
+        after = conn.execute("SELECT COUNT(*) FROM discrepancies").fetchone()
+    # The repoint happened (so the FK would have fired pre-fix) and the
+    # referencing rows were cleared, not merely absent.
+    assert result.calls_repointed == 2
+    assert result.rows_collapsed == 1
+    assert after is not None
+    assert after[0] == 0
+
+
+def test_repoint_with_discrepancy_single_reorient(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """Minimal repro isolated from the collapse/allocator path: one genuine
+    reorient mover, one call, one discrepancy on that call. Guards the FK
+    ordering independently of the collision-collapse logic.
+    """
+    init_databases()
+    with duckdb_connection() as conn:
+        svid = _seed_dbsnp_version(conn)
+        _seed_variant(conn, 1, ref="A", alt="G")
+        _seed_call(conn, 1, 1, allele_1="A", allele_2="G")
+        _seed_dbsnp_annotation(conn, 1, svid, ref="G", alts=("A",))
+        _seed_discrepancy(conn, 1, 1, call_a_id=1)
+        before = conn.execute("SELECT COUNT(*) FROM discrepancies").fetchone()
+        assert before is not None
+        assert before[0] == 1
+
+        result = canonicalize_variants(conn, no_backup=True)
+
+        variants = _fetch_variants(conn)
+        after = conn.execute("SELECT COUNT(*) FROM discrepancies").fetchone()
+    assert result.rows_reoriented == 1
+    assert result.calls_repointed == 1  # the mover's call was repointed
+    assert (variants[0]["ref_allele"], variants[0]["alt_allele"]) == ("G", "A")
+    assert after is not None
+    assert after[0] == 0
 
 
 # ---------------------------------------------------------------------------

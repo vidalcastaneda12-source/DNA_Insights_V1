@@ -18,11 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   strand-flipped duplicates that Scope-A canonicalize leaves as two rows, so
   Phase 6 reads see exactly one `variant_id` per real biallelic site. Auto
   pre-mutation snapshot of `genome.duckdb` to `archive/canonicalize/` with
-  `--no-backup` opt-out and a documented restore one-liner. Two-transaction
-  split sidesteps DuckDB's FK-on-DELETE enforcement that doesn't see
-  in-transaction FK re-points, and re-syncs `variant_id_seq` past the
-  explicitly-allocated survivor ids so the next default-`nextval` ingest can't
-  collide on the PK. No schema or DDL change; **requires re-running
+  `--no-backup` opt-out and a documented restore one-liner. Three-transaction
+  split sidesteps DuckDB's FK enforcement reading *pre-transaction* state:
+  `discrepancies` (whose `call_a_id`/`call_b_id` FK points onto `genotype_calls`)
+  is pre-cleared in its own committed transaction before the
+  `genotype_calls.variant_id` re-point — DuckDB runs that UPDATE as
+  delete+reinsert of each row, which would otherwise trip the parent-side FK —
+  and the old `variants_master` movers are deleted only after the re-point
+  commits. It also re-syncs `variant_id_seq` past the explicitly-allocated
+  survivor ids so the next default-`nextval` ingest can't collide on the PK. No schema or DDL change; **requires re-running
   `merge` → `align-tier3-consensus` → `refresh-index`** to bring the database
   to a coherent state (per the reload sequence in `docs/runbooks/annotations.md`).
   The shared-call concordance rate drops from 1.0000 — this is the deliberate

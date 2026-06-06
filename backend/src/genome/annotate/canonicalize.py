@@ -67,21 +67,37 @@ state, named with the dbSNP version + UTC timestamp), the **structlog
 counts. Row-level "was this canonicalized?" stays derivable by query against
 the snapshot + current state. See CLAUDE.md decision #8.
 
-**Supersession.** The mutation is split across **two** transactions because
-DuckDB's FK enforcement on ``DELETE FROM variants_master`` reads the *pre-
-transaction* state of ``genotype_calls.variant_id`` and so does not see the
-in-transaction UPDATE that re-pointed the FK away from the row being deleted.
-TX1 clears the downstream tables, INSERTs the new survivor rows, and
-re-points ``genotype_calls.variant_id`` to them; TX2 DELETEs the now-orphan
-old mover rows and recomputes ``has_*_call`` flags. The crash window between
-the two commits leaves *harmless* orphan ``variants_master`` rows (no calls
-reference them, downstream tables are empty); a re-run of the same command
-detects and DELETEs them as a no-survivors-needed pass. The supersession
-atomicity guarantee (CLAUDE.md decision #7) is preserved at the *downstream*
-boundary — a reader sees either the entire pre-canonicalize state or the
-entire post-canonicalize state at the ``consensus_genotypes`` /
-``variant_annotations_index`` grain (those are wholesale-cleared in TX1 and
-re-derived by ``merge`` / ``refresh-index`` after the canonicalize finishes).
+**Supersession.** The mutation is split across **three** transactions, all
+forced by the same DuckDB quirk: FK enforcement on a row delete reads the
+*pre-transaction* state of the *referencing* table, so an in-transaction DELETE
+of those referencing rows is invisible to the check.
+
+* **TX0** ``DELETE FROM discrepancies`` and commits. ``discrepancies`` is the
+  only table whose FK points *onto* ``genotype_calls`` (``call_a_id`` /
+  ``call_b_id`` -> ``genotype_calls(call_id)``). The TX1 repoint
+  ``UPDATE genotype_calls SET variant_id`` is run by DuckDB as delete+reinsert
+  of each row, which fires that parent-side check; it must already see
+  ``discrepancies`` empty as of a committed transaction, hence TX0.
+* **TX1** clears the two ``variants_master``-keyed rollups
+  (``consensus_genotypes`` / ``variant_annotations_index``), INSERTs the new
+  survivor rows, and re-points ``genotype_calls.variant_id`` to them.
+* **TX2** DELETEs the now-orphan old mover rows from ``variants_master`` (the
+  same quirk again: the repoint of ``genotype_calls.variant_id`` away from the
+  movers must be committed before TX2 so the delete's FK check sees it) and
+  recomputes ``has_*_call`` flags.
+
+Crash windows are recoverable within the post-PR-3 runbook: a crash after TX0 /
+before TX1 leaves ``discrepancies`` empty with ``variants_master`` unchanged; a
+crash after TX1 / before TX2 leaves *harmless* orphan ``variants_master`` rows
+(no calls reference them, downstream tables empty). A re-run DELETEs orphans as
+a no-survivors-needed pass, and ``merge`` / ``refresh-index`` rebuild the
+downstream tables regardless. Note ``_count_fast_path`` detects remaining
+``variants_master`` work, not remaining downstream-rebuild work. The
+supersession atomicity guarantee (CLAUDE.md decision #7) holds at the
+*downstream* boundary — those tables are wholesale-cleared here and re-derived
+by ``merge`` / ``refresh-index`` after the canonicalize finishes, so a Phase-6
+reader sees either the entire pre- or entire post-canonicalize state across the
+operator-driven ``canonicalize -> merge -> refresh-index`` sequence.
 
 It is **not** a registered loader: like :mod:`genome.annotate.index_refresh` and
 :mod:`genome.annotate.loaders.variant_aliases`, it is a standalone ``annotate``
@@ -574,10 +590,15 @@ UPDATE genotype_calls AS gc
 """Re-point every ``genotype_calls.variant_id`` from the old mover id to its
 new survivor.
 
-``variant_id`` is a plain BIGINT on ``genotype_calls`` (NOT part of its PK or
-any UNIQUE constraint), so this UPDATE does not trip the FK problem that
-blocks the ref/alt rewrite on ``variants_master`` itself. The ``!=`` guard
-skips no-op self-maps defensively.
+The new survivor row was INSERTed earlier in the same TX1, so the *child-side*
+FK (``genotype_calls.variant_id`` -> ``variants_master``) is satisfied (the
+existence check reads-its-own-writes). But ``variant_id`` is itself an FK column,
+so DuckDB executes this UPDATE as delete+reinsert of each ``genotype_calls`` row,
+which fires the *parent-side* FK from ``discrepancies(call_a_id / call_b_id)`` ->
+``genotype_calls(call_id)``. DuckDB's FK enforcement reads pre-transaction state,
+so ``discrepancies`` must already be empty as of a prior committed transaction —
+that is why it is pre-cleared in TX0 (the same snapshot quirk that forces the
+TX1/TX2 split). The ``!=`` guard skips no-op self-maps defensively.
 """
 
 
@@ -588,9 +609,10 @@ DELETE FROM variants_master
 """Remove the old mover rows.
 
 Safe now: their ``genotype_calls`` have been re-pointed (no inbound FK refs)
-and the downstream tables (``consensus_genotypes``, ``discrepancies``,
-``variant_annotations_index``) were DELETEd earlier in the transaction. The
-Phase-6/7 derived/insight tables are precondition-empty.
+and the downstream tables that reference ``variants_master`` were already
+DELETEd — ``discrepancies`` in TX0, ``consensus_genotypes`` /
+``variant_annotations_index`` in TX1. The Phase-6/7 derived/insight tables are
+precondition-empty.
 """
 
 
@@ -879,17 +901,19 @@ def canonicalize_variants(  # noqa: PLR0915 — one orchestrator, intentional ph
     4. When ``conn is None`` and ``no_backup`` is False: take a pre-mutation
        file snapshot of ``genome.duckdb`` (CHECKPOINT → cp → chmod 0600). A
        borrowed connection (tests) skips the snapshot by construction.
-    5. In **two** transactions (the DuckDB FK-on-DELETE enforcement forces the
-       split — see the module docstring). TX1: stage ``_canon_map`` /
-       ``_canon_resolve`` / ``_canon_remap``, ``DELETE`` the three downstream
-       tables that will be regenerated, INSERT new ``variants_master`` rows for
-       target keys with no existing unchanged sibling, re-point
+    5. In **three** transactions (the DuckDB FK-on-DELETE enforcement forces the
+       split — see the module docstring). TX0: ``DELETE FROM discrepancies`` and
+       commit (it FK-references ``genotype_calls``, which the TX1 repoint
+       delete+reinserts). TX1: stage ``_canon_map`` / ``_canon_resolve`` /
+       ``_canon_remap``, ``DELETE`` the two ``variants_master``-keyed rollups
+       that will be regenerated, INSERT new ``variants_master`` rows for target
+       keys with no existing unchanged sibling, re-point
        ``genotype_calls.variant_id`` to the survivors, ``commit``. TX2: ``DELETE``
        the now-orphan old mover rows (``_DELETE_OLD_VARIANTS_SQL``, keyed off the
        still-live ``_canon_map`` TEMP), recompute survivor flags, then re-sync
        ``variant_id_seq`` past the explicitly-allocated survivor ids so the
        default-``nextval`` ingest path can't collide, ``commit_and_checkpoint``.
-       On any exception in either transaction ``conn.rollback()`` and re-raise.
+       On any exception in any transaction ``conn.rollback()`` and re-raise.
     6. Return the locked drift identifiers.
     """
     started = time.monotonic()
@@ -940,6 +964,29 @@ def canonicalize_variants(  # noqa: PLR0915 — one orchestrator, intentional ph
         duckdb_connection() if conn is None else contextlib.nullcontext(conn)
     )
     with mutation_ctx as active_conn:
+        # ---- TX0: pre-clear ``discrepancies`` in its OWN committed transaction.
+        # ``discrepancies`` is the only table with an FK *onto* ``genotype_calls``
+        # (``call_a_id`` / ``call_b_id`` -> ``genotype_calls(call_id)``). The TX1
+        # repoint ``UPDATE genotype_calls SET variant_id`` is executed by DuckDB
+        # as delete+reinsert of each row (``variant_id`` carries the ART index of
+        # its own FK), which fires that parent-side check. DuckDB's FK enforcement
+        # reads *pre-transaction* state, so an in-TX1 ``DELETE FROM discrepancies``
+        # is invisible to the check and the repoint trips it — the same quirk that
+        # forces the TX1/TX2 split for ``DELETE FROM variants_master``. So this
+        # delete must be committed before TX1 opens. The two ``variants_master``-
+        # keyed rollups (``consensus_genotypes`` / ``variant_annotations_index``)
+        # do NOT need early commit and stay in TX1 to keep their clear atomic with
+        # the insert+repoint (decision #7).
+        active_conn.begin()
+        try:
+            active_conn.execute("DELETE FROM discrepancies")
+            active_conn.commit()
+            log.info("canonicalize.discrepancies_cleared")
+        except Exception:
+            active_conn.rollback()
+            log.exception("canonicalize.tx0_failed")
+            raise
+
         # ---- TX1: stage + clear + INSERT new survivors + re-point FKs ----
         active_conn.begin()
         try:
@@ -959,11 +1006,11 @@ def canonicalize_variants(  # noqa: PLR0915 — one orchestrator, intentional ph
                 rows_collapsed=rows_collapsed,
             )
 
-            # Clear downstream tables that reference variant_id and will be
-            # regenerated by the post-PR-3 commands (merge + align +
-            # refresh-index).
+            # Clear the variants_master-keyed rollups that will be regenerated by
+            # the post-PR-3 commands (merge + align + refresh-index).
+            # ``discrepancies`` was already cleared in TX0 (it FK-references
+            # genotype_calls, not just variants_master — see the TX0 note).
             active_conn.execute("DELETE FROM variant_annotations_index")
-            active_conn.execute("DELETE FROM discrepancies")
             active_conn.execute("DELETE FROM consensus_genotypes")
             log.info("canonicalize.downstream_cleared")
 
