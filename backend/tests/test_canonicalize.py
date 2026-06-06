@@ -514,18 +514,14 @@ def test_sequence_resynced_allows_default_path_insert(
         assert post_max_row is not None
         post_max = int(post_max_row[0])
 
-        # The re-sync advanced the sequence so its next nextval exceeds the
-        # survivor id (last_value >= post_max => next value == last_value+1).
-        seq_row = conn.execute(
-            "SELECT last_value FROM duckdb_sequences() WHERE sequence_name = 'variant_id_seq'",
-        ).fetchone()
-        assert seq_row is not None
-        assert seq_row[0] is not None
-        assert int(seq_row[0]) >= post_max
-
-        # The default-path insert must succeed (pre-fix: the stale sequence
-        # yields MAX+1 again — the id the new survivor already took — raising a
-        # duplicate-PK ConstraintException here).
+        # The default-path insert is the authoritative re-sync check, and the
+        # only one: it exercises the real ``nextval`` ingest path against a fresh
+        # (chrom, pos) so the lone possible collision is the variant_id PK the
+        # survivor already took. Pre-fix, the stranded sequence yields MAX+1
+        # again and this raises a duplicate-PK ConstraintException. A
+        # ``duckdb_sequences().last_value`` assertion would cover the same
+        # invariant but is version-fragile (the catalog view's semantics can
+        # shift across DuckDB releases); the insert is not.
         new_id = _seed_variant_via_sequence(conn, pos=2000, ref="C", alt="T")
         assert new_id > post_max
 
