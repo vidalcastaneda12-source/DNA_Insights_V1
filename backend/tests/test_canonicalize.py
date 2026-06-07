@@ -241,6 +241,21 @@ def _fetch_calls(conn: DuckDBPyConnection) -> list[tuple[int, int, str]]:
     ]
 
 
+def _fetch_rsid_by_key(conn: DuckDBPyConnection, ref: str, alt: str) -> str | None:
+    """Return the ``rsid`` of the single survivor at canonical key ``(ref, alt)``.
+
+    ``_fetch_variants`` deliberately does not select ``rsid`` (other tests assert
+    on its dict shape), so the rsID-inheritance tests query by canonical key —
+    the same idiom as ``test_survivor_flag_recompute_absorbs_imputed_call``.
+    """
+    row = conn.execute(
+        "SELECT rsid FROM variants_master WHERE ref_allele = ? AND alt_allele = ?",
+        [ref, alt],
+    ).fetchone()
+    assert row is not None
+    return None if row[0] is None else str(row[0])
+
+
 # ---------------------------------------------------------------------------
 # Preconditions
 # ---------------------------------------------------------------------------
@@ -558,6 +573,8 @@ def test_second_run_reports_already_canonical(
     assert second.already_canonical is True
     assert second.rows_reoriented == 0
     assert second.rows_changed == 0
+    assert second.survivors_enriched == 0
+    assert second.rsid_conflicts == 0
 
 
 def test_force_bypasses_fast_path_and_reports_zero_deltas(
@@ -573,6 +590,8 @@ def test_force_bypasses_fast_path_and_reports_zero_deltas(
     assert result.already_canonical is False
     assert result.rows_changed == 0
     assert result.rows_collapsed == 0
+    assert result.survivors_enriched == 0
+    assert result.rsid_conflicts == 0
 
 
 # ---------------------------------------------------------------------------
@@ -738,6 +757,166 @@ def test_survivor_flag_recompute_absorbs_imputed_call(
     assert survivor[1] is True  # has_imputed_call (beagle_imputed absorbed)
 
 
+# ---------------------------------------------------------------------------
+# rsID preservation across collapse (finding-020 rsID-loss fix)
+# ---------------------------------------------------------------------------
+
+
+def test_reuse_survivor_inherits_mover_rsid(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """A chip mover's rsid fills a NULL-rsid reused survivor; doubles as the
+    FK-on-UPDATE probe (the survivor has a genotype_calls child).
+
+    This is the dominant ~100K real-data case: an imputed-only sibling with
+    rsid=NULL (Beagle ID '.') is reused as the survivor, and a chip swap-victim
+    mover carrying a real rsID collapses into it. Without the enrichment UPDATE
+    the chip rsID is lost. The seeded child call on the survivor means the UPDATE
+    runs against a row with inbound FK references — if rsid sat in the PK/UNIQUE
+    constraint this would raise a ConstraintException; it does not.
+    """
+    init_databases()
+    with duckdb_connection() as conn:
+        svid = _seed_dbsnp_version(conn)
+        # Reused survivor: already-canonical (A,G), imputed, rsid=NULL, has a call.
+        _seed_variant(conn, 1, ref="A", alt="G", rsid=None)
+        _seed_call(conn, 1, 1, source="beagle_imputed", allele_1="A", allele_2="G")
+        # Mover: hom-only (A,A) recovers to (A,G), chip, carries the real rsID.
+        _seed_variant(conn, 2, ref="A", alt="A", rsid="rs55")
+        _seed_call(conn, 2, 2, source="23andme", allele_1="A", allele_2="A")
+        _seed_dbsnp_annotation(conn, 1, svid, ref="A", alts=("G",))
+
+        result = canonicalize_variants(conn, no_backup=True)
+        rsid = _fetch_rsid_by_key(conn, "A", "G")
+        calls = _fetch_calls(conn)
+
+    assert result.new_variant_ids_allocated == 0  # sibling reused, not allocated
+    assert result.rows_collapsed == 1
+    assert result.survivors_enriched == 1
+    assert result.rsid_conflicts == 0
+    assert rsid == "rs55"  # mover's rsID inherited into the NULL-rsid survivor
+    # FK survived the rsid UPDATE: both calls point to the reused survivor (id=1).
+    assert sorted(calls) == [(1, 1, "beagle_imputed"), (2, 1, "23andme")]
+
+
+def test_new_survivor_picks_nonnull_rsid_over_min_rep(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """A new survivor takes the best non-NULL mover rsID, not the rsid-blind MIN-rep.
+
+    Movers collapse to a *new* survivor (no existing sibling). The representative
+    is MIN(old_variant_id)=1 whose rsid is NULL; the higher-id mover (id=2)
+    carries the real rsID. The old ``rep.rsid`` copy would drop it.
+    """
+    init_databases()
+    with duckdb_connection() as conn:
+        svid = _seed_dbsnp_version(conn)
+        _seed_variant(conn, 1, ref="A", alt="A", rsid=None)  # MIN-rep, NULL rsid
+        _seed_call(conn, 1, 1, source="23andme", allele_1="A", allele_2="A")
+        _seed_variant(conn, 2, ref="G", alt="G", rsid="rs77")  # higher id, real rsID
+        _seed_call(conn, 2, 2, source="ancestry", allele_1="G", allele_2="G")
+        _seed_dbsnp_annotation(conn, 1, svid, ref="A", alts=("G",))
+
+        result = canonicalize_variants(conn, no_backup=True)
+        rsid = _fetch_rsid_by_key(conn, "A", "G")
+
+    assert result.new_variant_ids_allocated == 1
+    assert result.survivors_enriched == 0  # new survivor, not a reuse enrichment
+    assert result.rsid_conflicts == 0
+    assert rsid == "rs77"  # beats the NULL MIN-rep
+
+
+def test_reuse_survivor_keeps_own_rsid_over_mover(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """A reused survivor with its own non-NULL rsid keeps it; the mover's is
+    dropped and the disagreement is surfaced via ``rsid_conflicts``."""
+    init_databases()
+    with duckdb_connection() as conn:
+        svid = _seed_dbsnp_version(conn)
+        _seed_variant(conn, 1, ref="A", alt="G", rsid="rsSURV")  # canonical, reused
+        _seed_call(conn, 1, 1, source="23andme", allele_1="A", allele_2="G")
+        _seed_variant(conn, 2, ref="A", alt="A", rsid="rsMOVER")  # recovers to (A,G)
+        _seed_call(conn, 2, 2, source="ancestry", allele_1="A", allele_2="A")
+        _seed_dbsnp_annotation(conn, 1, svid, ref="A", alts=("G",))
+
+        result = canonicalize_variants(conn, no_backup=True)
+        rsid = _fetch_rsid_by_key(conn, "A", "G")
+
+    assert rsid == "rsSURV"  # survivor-wins (vm.rsid IS NULL guard never fires)
+    assert result.survivors_enriched == 0  # survivor wasn't NULL → not enriched
+    assert result.rsid_conflicts == 1  # own non-NULL rsid ≠ mover's → surfaced
+
+
+def test_two_movers_distinct_rsids_deterministic_pick_and_conflict(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """Two movers with distinct non-NULL rsIDs collapse to a new survivor: the
+    lowest-variant_id rsID is picked (deterministic) and the collision counted."""
+    init_databases()
+    with duckdb_connection() as conn:
+        svid = _seed_dbsnp_version(conn)
+        _seed_variant(conn, 1, ref="A", alt="A", rsid="rsAAA")  # lowest id
+        _seed_call(conn, 1, 1, source="23andme", allele_1="A", allele_2="A")
+        _seed_variant(conn, 2, ref="G", alt="G", rsid="rsBBB")
+        _seed_call(conn, 2, 2, source="ancestry", allele_1="G", allele_2="G")
+        _seed_dbsnp_annotation(conn, 1, svid, ref="A", alts=("G",))
+
+        result = canonicalize_variants(conn, no_backup=True)
+        rsid = _fetch_rsid_by_key(conn, "A", "G")
+
+    assert result.new_variant_ids_allocated == 1
+    assert rsid == "rsAAA"  # arg_min by variant_id
+    assert result.rsid_conflicts == 1  # distinct_rsids > 1
+
+
+def test_genuine_reorient_keeps_own_rsid(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """A sole reorient mover (no sibling) keeps its own rsID through the
+    new-survivor path — the non-collapsing regression."""
+    init_databases()
+    with duckdb_connection() as conn:
+        svid = _seed_dbsnp_version(conn)
+        _seed_variant(conn, 1, ref="A", alt="G", rsid="rs9")
+        _seed_call(conn, 1, 1, source="23andme", allele_1="A", allele_2="G")
+        _seed_dbsnp_annotation(conn, 1, svid, ref="G", alts=("A",))  # → reorient (G,A)
+
+        result = canonicalize_variants(conn, no_backup=True)
+        rsid = _fetch_rsid_by_key(conn, "G", "A")
+
+    assert result.rows_reoriented == 1
+    assert rsid == "rs9"
+    assert result.survivors_enriched == 0
+    assert result.rsid_conflicts == 0
+
+
+def test_all_null_rsid_movers_stay_null(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """Every mover rsid NULL → survivor stays NULL, counters 0, no crash.
+
+    Guards the empty-FILTER ``arg_min`` (returns NULL) → ``COALESCE`` fallback to
+    the (also NULL) representative rsid in the new-survivor path.
+    """
+    init_databases()
+    with duckdb_connection() as conn:
+        svid = _seed_dbsnp_version(conn)
+        _seed_variant(conn, 1, ref="A", alt="A", rsid=None)
+        _seed_call(conn, 1, 1, source="23andme", allele_1="A", allele_2="A")
+        _seed_variant(conn, 2, ref="G", alt="G", rsid=None)
+        _seed_call(conn, 2, 2, source="ancestry", allele_1="G", allele_2="G")
+        _seed_dbsnp_annotation(conn, 1, svid, ref="A", alts=("G",))
+
+        result = canonicalize_variants(conn, no_backup=True)
+        rsid = _fetch_rsid_by_key(conn, "A", "G")
+
+    assert result.new_variant_ids_allocated == 1
+    assert rsid is None
+    assert result.survivors_enriched == 0
+    assert result.rsid_conflicts == 0
+
+
 def test_result_dataclass_is_frozen() -> None:
     """``CanonicalizeResult`` is frozen + slots so it can't be mutated."""
     result = CanonicalizeResult(
@@ -751,6 +930,8 @@ def test_result_dataclass_is_frozen() -> None:
         calls_repointed=0,
         new_variant_ids_allocated=0,
         survivors_flag_updated=0,
+        survivors_enriched=0,
+        rsid_conflicts=0,
         genuine_variants_after=0,
         hom_ref_remaining=0,
         backup_path=None,

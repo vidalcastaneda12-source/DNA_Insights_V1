@@ -83,8 +83,10 @@ a regression signal.
 | Phase 4 chip+imputed overlap | 101,420 | may shift slightly | Some chip-keyed variants change orientation; the overlap join is keyed by `variant_id` post-collapse. Verify and re-lock if changed. |
 | `gnomad_matches` (index) | 101,501 | ↑ dramatically (hundreds of thousands) | Reorient doubles genuine matches; hom-only recovery makes most remaining hom-ref positions coord-matchable. Correction — the finding-018 re-lock. |
 | `clinvar_matches` (index) | 2,559 | ↑ dramatically | Same mechanism, smaller absolute (ClinVar is sparser at these positions). |
-| `gwas_matches` (index) | 66,726 | unchanged | rsid-keyed, orientation-independent. |
-| `pharmgkb_matches` (index) | 1,737 | unchanged | rsid-keyed. |
+| `gwas_matches` (index) | 66,726 | unchanged | rsid-keyed, orientation-independent — **and now collapse-preserving** (see "rsID preservation" below). |
+| `pharmgkb_matches` (index) | 1,737 | unchanged | rsid-keyed; same rsID-preservation invariant. |
+| `survivors_enriched` (`CanonicalizeResult`) | N/A (new identifier) | capture & lock | Reused survivors whose NULL rsID was filled from a colliding mover's rsID — the dominant rsID-rescue path. Was implicitly 0 (rsIDs were lost) before the fix. |
+| `rsid_conflicts` (`CanonicalizeResult`) | N/A (new identifier) | capture & lock (expected small) | Canonical keys where ≥2 distinct non-NULL rsIDs collided; lowest-`variant_id` wins, the loser is warned, never silently dropped. |
 | Index `row_count`, `is_rare`, `is_ultrarare` | 159,658 / 848 / 421 | all rise | More variants become allele-matchable, including rarer ones. |
 
 `variant_annotations_index` `gnomad_matches` and `clinvar_matches` are the
@@ -93,6 +95,40 @@ deferred PR-5 strand-flip `variants_master` collapse will move
 `strand_flip_resolutions` and the post-`align` `disagreement_resolved` count
 toward 0; this PR holds them at ~106 / ~53 respectively and tracks the
 collapse as a known deferred sub-item (see finding-005 #1).
+
+### rsID preservation — an invariant across collapse
+
+The collapse keeps one survivor row per canonical key. The first implementation
+inherited only *that one row's* `rsid` and discarded every other collapsed
+mover's — losing ~115,662 distinct rsIDs on the first real-data run and dropping
+the rsid-keyed match counts (`gwas_matches` 66,726 → 55,047, `pharmgkb_matches`
+1,737 → 1,411), the opposite of the "unchanged" re-lock above. Two collapse
+paths leaked: the **new-survivor** path copied the `MIN(old_variant_id)`
+representative's rsID (rsid-blind), and the **reuse** path adopted an existing
+sibling's `variant_id` as survivor — typically a NULL-rsID imputed-only row
+(Beagle ID `.`) — so a colliding chip swap-victim's rsID vanished (the dominant
+~100K case, matching the chip+imputed overlap of 101,420).
+
+The fix makes rsID-preservation an **invariant**: post-run rsid set ⊇ pre-run
+rsid set, except where two genuinely-distinct non-NULL rsIDs collide on one
+canonical key (unavoidable in a single-`rsid`-column schema). A connection-scoped
+`_canon_best(survivor_id, best_rsid, distinct_rsids)` TEMP table aggregates the
+best non-NULL rsID across *all* movers per survivor —
+`arg_min(rsid, variant_id) FILTER (WHERE rsid IS NOT NULL)`, lowest-`variant_id`
+wins. The new-survivor INSERT sources `COALESCE(best_rsid, rep.rsid)`; the reuse
+survivor is filled by a TX2 `UPDATE … SET rsid = COALESCE(vm.rsid, best_rsid)`
+(survivor's own non-NULL rsID always wins). That UPDATE is **not** intrinsically
+FK-safe: `rsid` carries the plain `idx_vm_rsid` index, and DuckDB delete+reinserts
+a row whenever an UPDATE touches an *indexed* column — which fires the parent-side
+`genotype_calls.variant_id` FK check on a survivor that has calls (verified against
+DuckDB 1.5.3; `_RECOMPUTE_FLAGS_SQL` is exempt only because `has_*_call` are
+unindexed). The orchestrator therefore drops `idx_vm_rsid` **committed, before TX2
+opens** (an in-TX drop is invisible to DuckDB's pre-transaction FK check — the same
+quirk that forces the TX split) and rebuilds it in a `finally`, so a TX2 failure
+can't strand the DB without the index. Conflicts (a survivor's movers disagreeing,
+or a reuse survivor's own rsID disagreeing with the pick) are counted in
+`rsid_conflicts` and emit a `canonicalize.rsid_conflicts` warning — surfaced, never
+silently dropped.
 
 ## Hom-only multi-alt surfacing caveat
 

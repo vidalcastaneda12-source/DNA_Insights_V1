@@ -192,6 +192,8 @@ class CanonicalizeResult:
     calls_repointed: int
     new_variant_ids_allocated: int
     survivors_flag_updated: int
+    survivors_enriched: int
+    rsid_conflicts: int
     genuine_variants_after: int
     hom_ref_remaining: int
     backup_path: str | None
@@ -545,6 +547,34 @@ case; one-to-one for non-collision movers).
 """
 
 
+_BUILD_CANON_BEST_SQL: Final[str] = """
+INSERT INTO _canon_best (survivor_id, best_rsid, distinct_rsids)
+SELECT
+    rm.new_variant_id                               AS survivor_id,
+    arg_min(vm.rsid, vm.variant_id)
+        FILTER (WHERE vm.rsid IS NOT NULL)          AS best_rsid,
+    COUNT(DISTINCT vm.rsid)                          AS distinct_rsids
+  FROM _canon_remap rm
+  JOIN variants_master vm ON vm.variant_id = rm.old_variant_id
+ GROUP BY rm.new_variant_id
+"""
+"""Per survivor, the best mover rsid + the distinct-rsid count.
+
+Aggregates over ``_canon_remap`` — the ready-made mover->survivor edge list, one
+row per mover — joined to the (still-present) mover rows in ``variants_master``.
+Must run in TX1 *before* ``_DELETE_OLD_VARIANTS_SQL`` (TX2) so the movers still
+exist, and before ``_INSERT_NEW_SURVIVORS_SQL`` (which LEFT JOINs this table).
+
+``arg_min(rsid, variant_id) FILTER (WHERE rsid IS NOT NULL)`` = the non-NULL rsid
+on the lowest old ``variant_id`` (deterministic via the unique PK; NULL when
+every mover rsid is NULL) — mirrors the repo idiom in ``index_refresh.py``.
+``distinct_rsids`` (``COUNT(DISTINCT)`` ignores NULLs) drives the
+``rsid_conflicts`` identifier. Both collapse paths consume ``best_rsid``: the
+new-survivor INSERT via ``COALESCE`` and the reuse survivor via the TX2
+enrichment UPDATE, closing the finding-020 rsID-loss.
+"""
+
+
 _INSERT_NEW_SURVIVORS_SQL: Final[str] = """
 INSERT INTO variants_master
     (variant_id, rsid, chrom, pos_grch38, pos_grch37,
@@ -553,7 +583,7 @@ INSERT INTO variants_master
      gene_symbols, liftover_chain, liftover_status)
 SELECT
     r.survivor_id,
-    rep.rsid,
+    COALESCE(b.best_rsid, rep.rsid),
     r.final_chrom,
     r.final_pos,
     rep.pos_grch37,
@@ -568,15 +598,21 @@ SELECT
     rep.liftover_status
   FROM _canon_resolve r
   JOIN variants_master rep ON rep.variant_id = r.representative_old_id
+  LEFT JOIN _canon_best b ON b.survivor_id = r.survivor_id
  WHERE r.survivor_is_new
 """
 """INSERT one new ``variants_master`` row per target key that has no existing
 unchanged sibling.
 
-Copies the representative's metadata (rsid, pos_grch37, variant_type, etc.)
-verbatim; only ``ref_allele`` / ``alt_allele`` are the canonical values from
-``_canon_resolve``. ``has_*_call`` flags are recomputed by :func:`_recompute_survivor_flags`
-once the FK repoint is done.
+Copies the representative's metadata (pos_grch37, variant_type, etc.) verbatim;
+only ``ref_allele`` / ``alt_allele`` are the canonical values from
+``_canon_resolve``. The ``rsid`` is the best non-NULL rsid across *all* movers
+collapsing into this survivor (``_canon_best.best_rsid``, lowest-``variant_id``
+non-NULL wins), falling back to the representative's own rsid when every mover
+is NULL — the rep is ``MIN(old_variant_id)`` and rsid-blind, so a higher-id
+mover's rsid would otherwise be lost (finding-020 rsID-preservation invariant).
+``has_*_call`` flags are recomputed by :func:`_recompute_survivor_flags` once the
+FK repoint is done.
 """
 
 
@@ -640,6 +676,38 @@ Authoritative recompute from ``genotype_calls`` rather than OR-merge — handles
 both flag-up (new calls absorbed) and flag-down (the survivor was new and has
 not been seeded with flags yet) cases. The UPDATE touches columns NOT in any
 UNIQUE constraint, so it doesn't trip the FK problem.
+"""
+
+
+_ENRICH_REUSE_RSID_SQL: Final[str] = """
+UPDATE variants_master AS vm
+   SET rsid = COALESCE(vm.rsid, b.best_rsid)
+  FROM _canon_resolve r
+  JOIN _canon_best b ON b.survivor_id = r.survivor_id
+ WHERE vm.variant_id = r.survivor_id
+   AND NOT r.survivor_is_new
+   AND vm.rsid IS NULL
+   AND b.best_rsid IS NOT NULL
+"""
+"""Fill a NULL rsid on a *reused* survivor from its movers' best rsid.
+
+The new-survivor path inherits ``best_rsid`` at INSERT time; this UPDATE is the
+reuse-path counterpart — a chip swap-victim mover carrying a real rsid collapses
+into an existing NULL-rsid imputed sibling whose ``variant_id`` is reused as the
+survivor, and without this the chip rsid is lost (the dominant ~100K case behind
+finding-020's rsID-loss). The survivor's own non-NULL rsid always wins (the
+``vm.rsid IS NULL`` guard, belt-and-suspenders with ``COALESCE``); movers only
+fill a NULL. A reuse survivor is never itself a mover (``existing_unchanged``
+filters ``variant_id NOT IN _canon_map``), so this can never touch a doomed row.
+
+Runs in TX2 next to ``_RECOMPUTE_FLAGS_SQL``, but unlike the flag recompute it is
+*not* intrinsically FK-safe: ``rsid`` carries the plain ``idx_vm_rsid`` index, and
+DuckDB delete+reinserts a row when an UPDATE touches an indexed column, firing the
+parent-side ``genotype_calls.variant_id`` FK check on a survivor that has calls.
+The orchestrator therefore drops ``idx_vm_rsid`` (committed) before TX2 and rebuilds
+it after — an *in-TX* drop is invisible to DuckDB's pre-transaction FK check, so the
+drop must precede the transaction. ``_RECOMPUTE_FLAGS_SQL`` is exempt only because
+``has_*_call`` are unindexed.
 """
 
 
@@ -738,7 +806,7 @@ def _count_fast_path(conn: DuckDBPyConnection) -> int:
 
 
 def _create_temp_tables(conn: DuckDBPyConnection) -> None:
-    """``DROP IF EXISTS`` + ``CREATE TEMP TABLE`` for the three staging tables."""
+    """``DROP IF EXISTS`` + ``CREATE TEMP TABLE`` for the four staging tables."""
     conn.execute("DROP TABLE IF EXISTS _canon_map")
     conn.execute(
         """
@@ -777,10 +845,21 @@ def _create_temp_tables(conn: DuckDBPyConnection) -> None:
         )
         """,
     )
+    conn.execute("DROP TABLE IF EXISTS _canon_best")
+    conn.execute(
+        """
+        CREATE TEMP TABLE _canon_best (
+            survivor_id    BIGINT,
+            best_rsid      VARCHAR,
+            distinct_rsids INTEGER
+        )
+        """,
+    )
 
 
 def _drop_temp_tables(conn: DuckDBPyConnection) -> None:
     """Mirror ``_create_temp_tables`` — clean up at end of transaction."""
+    conn.execute("DROP TABLE IF EXISTS _canon_best")
     conn.execute("DROP TABLE IF EXISTS _canon_remap")
     conn.execute("DROP TABLE IF EXISTS _canon_resolve")
     conn.execute("DROP TABLE IF EXISTS _canon_map")
@@ -803,6 +882,49 @@ def _count_resolve(conn: DuckDBPyConnection) -> tuple[int, int]:
     return (
         int(map_row[0]) if map_row is not None else 0,
         int(new_row[0]) if new_row is not None else 0,
+    )
+
+
+def _count_rsid_metadata(conn: DuckDBPyConnection) -> tuple[int, int]:
+    """Return ``(survivors_enriched, rsid_conflicts)`` for the rsID-inheritance fix.
+
+    Computed in TX1 while movers + pre-state reuse survivors are intact, because
+    DuckDB UPDATE reports rowcount = -1 (see the repoint count above) so the
+    reuse-UPDATE's effect must be precounted. ``survivors_enriched`` gates on the
+    reuse survivor's *own* ``vm.rsid`` (joined via ``survivor_id``, not the
+    representative), exactly mirroring ``_ENRICH_REUSE_RSID_SQL``'s WHERE clause.
+    ``rsid_conflicts`` counts survivors where the movers themselves disagree
+    (``distinct_rsids > 1``) or a reuse survivor's own non-NULL rsid disagrees
+    with the picked best — surfaced, never silently dropped (lowest-id wins).
+    """
+    enriched_row = conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM _canon_resolve r
+          JOIN _canon_best b      ON b.survivor_id = r.survivor_id
+          JOIN variants_master vm ON vm.variant_id = r.survivor_id
+         WHERE NOT r.survivor_is_new
+           AND vm.rsid IS NULL
+           AND b.best_rsid IS NOT NULL
+        """,
+    ).fetchone()
+    conflicts_row = conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM _canon_resolve r
+          JOIN _canon_best b ON b.survivor_id = r.survivor_id
+          LEFT JOIN variants_master vm
+            ON vm.variant_id = r.survivor_id AND NOT r.survivor_is_new
+         WHERE b.distinct_rsids > 1
+            OR (NOT r.survivor_is_new
+                AND vm.rsid IS NOT NULL
+                AND b.best_rsid IS NOT NULL
+                AND vm.rsid <> b.best_rsid)
+        """,
+    ).fetchone()
+    return (
+        int(enriched_row[0]) if enriched_row is not None else 0,
+        int(conflicts_row[0]) if conflicts_row is not None else 0,
     )
 
 
@@ -874,6 +996,8 @@ def _build_already_canonical_result(
         calls_repointed=0,
         new_variant_ids_allocated=0,
         survivors_flag_updated=0,
+        survivors_enriched=0,
+        rsid_conflicts=0,
         genuine_variants_after=genuine_after,
         hom_ref_remaining=hom_remaining,
         backup_path=None,
@@ -1006,6 +1130,19 @@ def canonicalize_variants(  # noqa: PLR0915 — one orchestrator, intentional ph
                 rows_collapsed=rows_collapsed,
             )
 
+            # Stage the per-survivor best mover rsid + precount the rsID-
+            # inheritance deltas. Must run here: after the mover->survivor edge
+            # list (``_canon_remap``) exists, while the movers + pre-state reuse
+            # survivors are still present (the DELETE is in TX2), and before
+            # ``_INSERT_NEW_SURVIVORS_SQL`` LEFT JOINs ``_canon_best`` below.
+            active_conn.execute(_BUILD_CANON_BEST_SQL)
+            survivors_enriched, rsid_conflicts = _count_rsid_metadata(active_conn)
+            log.info(
+                "canonicalize.rsid_inheritance_staged",
+                survivors_enriched=survivors_enriched,
+                rsid_conflicts=rsid_conflicts,
+            )
+
             # Clear the variants_master-keyed rollups that will be regenerated by
             # the post-PR-3 commands (merge + align + refresh-index).
             # ``discrepancies`` was already cleared in TX0 (it FK-references
@@ -1044,44 +1181,67 @@ def canonicalize_variants(  # noqa: PLR0915 — one orchestrator, intentional ph
             log.exception("canonicalize.tx1_failed")
             raise
 
-        # ---- TX2: DELETE now-orphan old rows + recompute flags ----
-        active_conn.begin()
+        # Drop ``idx_vm_rsid`` (committed, before TX2 opens) so the reuse-path
+        # rsid enrichment in TX2 doesn't trip DuckDB's parent-side FK check.
+        # Updating an *indexed* column on an FK-referenced row delete+reinserts
+        # the row, which fires the ``genotype_calls.variant_id`` parent check;
+        # ``has_*_call`` (``_RECOMPUTE_FLAGS_SQL``) is exempt only because those
+        # columns are unindexed. DuckDB's FK enforcement reads pre-transaction
+        # state, so an *in-TX2* DROP is invisible to the check — the drop must be
+        # committed first (same quirk that forces the TX split). Recreated in the
+        # ``finally`` so a TX2 failure can't strand the DB without the index.
+        active_conn.execute("DROP INDEX IF EXISTS idx_vm_rsid")
         try:
-            # The old mover rows are now orphan (their genotype_calls were
-            # re-pointed in TX1, downstream tables cleared). DELETE them keyed
-            # off the still-live connection-scoped ``_canon_map`` TEMP — it
-            # survives the TX1 commit and is only torn down by
-            # ``_drop_temp_tables`` below.
-            active_conn.execute(_DELETE_OLD_VARIANTS_SQL)
-            log.info("canonicalize.old_rows_deleted", count=canon_map_count)
+            # ---- TX2: DELETE now-orphan old rows + recompute flags ----
+            active_conn.begin()
+            try:
+                # The old mover rows are now orphan (their genotype_calls were
+                # re-pointed in TX1, downstream tables cleared). DELETE them keyed
+                # off the still-live connection-scoped ``_canon_map`` TEMP — it
+                # survives the TX1 commit and is only torn down by
+                # ``_drop_temp_tables`` below.
+                active_conn.execute(_DELETE_OLD_VARIANTS_SQL)
+                log.info("canonicalize.old_rows_deleted", count=canon_map_count)
 
-            # Count survivors whose flags will be recomputed (rowcount unreliable).
-            survivors_row = active_conn.execute(
-                """
-                SELECT COUNT(DISTINCT gc.variant_id)
-                  FROM genotype_calls gc
-                  JOIN _canon_resolve r ON r.survivor_id = gc.variant_id
-                """,
-            ).fetchone()
-            survivors_updated = int(survivors_row[0]) if survivors_row is not None else 0
-            active_conn.execute(_RECOMPUTE_FLAGS_SQL)
-            log.info("canonicalize.flags_recomputed", survivors=survivors_updated)
+                # Count survivors whose flags will be recomputed (rowcount unreliable).
+                survivors_row = active_conn.execute(
+                    """
+                    SELECT COUNT(DISTINCT gc.variant_id)
+                      FROM genotype_calls gc
+                      JOIN _canon_resolve r ON r.survivor_id = gc.variant_id
+                    """,
+                ).fetchone()
+                survivors_updated = int(survivors_row[0]) if survivors_row is not None else 0
+                active_conn.execute(_RECOMPUTE_FLAGS_SQL)
+                log.info("canonicalize.flags_recomputed", survivors=survivors_updated)
 
-            # The allocator assigned survivor ids explicitly as MAX + ROW_NUMBER
-            # and never advanced variant_id_seq; re-sync it so the default-
-            # nextval ingest path (writer.py / imputation.ingest) can't collide.
-            _resync_variant_id_sequence(active_conn)
+                # Enrich reused survivors' NULL rsid from their movers' best rsid
+                # — the reuse-path counterpart to the new-survivor COALESCE. FK-
+                # safe only because ``idx_vm_rsid`` was dropped above (see the
+                # note); the precount ``survivors_enriched`` mirrors this UPDATE's
+                # WHERE clause exactly.
+                active_conn.execute(_ENRICH_REUSE_RSID_SQL)
+                log.info("canonicalize.rsid_enriched", survivors_enriched=survivors_enriched)
 
-            _drop_temp_tables(active_conn)
+                # The allocator assigned survivor ids explicitly as MAX + ROW_NUMBER
+                # and never advanced variant_id_seq; re-sync it so the default-
+                # nextval ingest path (writer.py / imputation.ingest) can't collide.
+                _resync_variant_id_sequence(active_conn)
 
-            commit_and_checkpoint(
-                active_conn,
-                source_name="variants_master_canonicalize",
-            )
-        except Exception:
-            active_conn.rollback()
-            log.exception("canonicalize.tx2_failed")
-            raise
+                _drop_temp_tables(active_conn)
+
+                commit_and_checkpoint(
+                    active_conn,
+                    source_name="variants_master_canonicalize",
+                )
+            except Exception:
+                active_conn.rollback()
+                log.exception("canonicalize.tx2_failed")
+                raise
+        finally:
+            # Rebuild the rsid index regardless of TX2 outcome (autocommit; the
+            # connection is back in autocommit after commit or rollback).
+            active_conn.execute("CREATE INDEX IF NOT EXISTS idx_vm_rsid ON variants_master(rsid)")
 
         genuine_after, hom_remaining = _count_post(active_conn)
 
@@ -1097,6 +1257,8 @@ def canonicalize_variants(  # noqa: PLR0915 — one orchestrator, intentional ph
         calls_repointed=calls_repointed,
         new_variant_ids_allocated=new_survivors,
         survivors_flag_updated=survivors_updated,
+        survivors_enriched=survivors_enriched,
+        rsid_conflicts=rsid_conflicts,
         genuine_variants_after=genuine_after,
         hom_ref_remaining=hom_remaining,
         backup_path=str(backup_path) if backup_path is not None else None,
@@ -1113,11 +1275,22 @@ def canonicalize_variants(  # noqa: PLR0915 — one orchestrator, intentional ph
         calls_repointed=result.calls_repointed,
         new_variant_ids_allocated=result.new_variant_ids_allocated,
         survivors_flag_updated=result.survivors_flag_updated,
+        survivors_enriched=result.survivors_enriched,
+        rsid_conflicts=result.rsid_conflicts,
         genuine_variants_after=result.genuine_variants_after,
         hom_ref_remaining=result.hom_ref_remaining,
         backup_path=result.backup_path,
         wall_clock_seconds=round(result.wall_clock_seconds, 2),
     )
+    if result.rsid_conflicts > 0:
+        log.warning(
+            "canonicalize.rsid_conflicts",
+            rsid_conflicts=result.rsid_conflicts,
+            detail=(
+                "distinct non-NULL rsIDs collided on one canonical key; "
+                "lowest-variant_id rsid was kept, the other(s) dropped"
+            ),
+        )
     return result
 
 

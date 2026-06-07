@@ -438,6 +438,8 @@ def annotate_canonicalize_variants(
         f"calls_repointed={result.calls_repointed} "
         f"new_variant_ids_allocated={result.new_variant_ids_allocated} "
         f"survivors_flag_updated={result.survivors_flag_updated} "
+        f"survivors_enriched={result.survivors_enriched} "
+        f"rsid_conflicts={result.rsid_conflicts} "
         f"genuine_variants_after={result.genuine_variants_after} "
         f"hom_ref_remaining={result.hom_ref_remaining} "
         f"backup={result.backup_path or 'skipped'}",

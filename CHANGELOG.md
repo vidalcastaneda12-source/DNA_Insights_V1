@@ -31,8 +31,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to a coherent state (per the reload sequence in `docs/runbooks/annotations.md`).
   The shared-call concordance rate drops from 1.0000 — this is the deliberate
   re-lock event finding-018 anticipated, not a regression; see finding-020
-  for the full bedrock anchor table. Strand-flip `variants_master` collapse
-  (genotype_calls supersession) deferred to PR 5.
+  for the full bedrock anchor table. rsID preservation is an invariant across
+  the collapse: both the new-survivor and reused-survivor paths inherit the best
+  non-NULL rsID across *all* movers landing on a canonical key (lowest
+  `variant_id` wins; a `MIN(old_variant_id)` representative or a NULL-rsID
+  imputed sibling no longer drops a colliding chip mover's rsID), so the
+  rsID-keyed index match counts (`gwas_matches` 66,726 / `pharmgkb_matches`
+  1,737) stay unchanged as finding-020 intends. Two new drift identifiers —
+  `survivors_enriched` (reused survivors whose NULL rsID was filled) and
+  `rsid_conflicts` (canonical keys where distinct non-NULL rsIDs collided; the
+  loser is surfaced via a warning, never silently dropped). Strand-flip
+  `variants_master` collapse (genotype_calls supersession) deferred to PR 5.
 - Imputation rsID hygiene (finding-021). Phase-4 imputation ingest copied
   Beagle's synthetic `chrom:pos:ref:alt` VCF `ID` (emitted for panel variants with
   no dbSNP rsID) verbatim into `variants_master.rsid`, so the ~2.26M imputed-only
