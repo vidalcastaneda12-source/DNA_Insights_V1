@@ -101,6 +101,25 @@ manageable. This document tracks them so they aren't forgotten.
    `genome.annotate.supersession` and adopt it across the affected loaders.
    *Recommended fix point:* the second time the pattern shows up.
 
+9. **`pos_grch37` not coalesced across canonicalize collapse.**
+   `genome annotate canonicalize-variants`'s new-survivor INSERT
+   (`_INSERT_NEW_SURVIVORS_SQL`) inherits only the `MIN(old_variant_id)`
+   representative's `pos_grch37`. Where the rows collapsing onto one canonical
+   key carry divergent `pos_grch37` values — or where a NULL-GRCh37
+   representative (e.g. an imputed-only survivor) absorbs movers that do carry a
+   GRCh37 coordinate — the non-representative GRCh37 coordinate is dropped, not
+   coalesced. This is a deliberate deferral, not an oversight: unlike the rsID,
+   an opaque identifier the collapse can `arg_min` across movers (the retained
+   `_canon_best` coalescing), a GRCh37 coordinate is meaningless without the
+   liftover chain that produced it — coalescing one would require re-running
+   liftover to keep the coordinate bound to its
+   `(grch38, grch37, liftover-provenance)` triple. The GRCh38 coordinate (the
+   project's primary) is unaffected, and `consensus_genotypes` /
+   `variant_annotations_index` key on GRCh38; only the alongside-stored GRCh37
+   value is at issue. *Recommended fix point:* a re-liftover pass — fold into
+   PR 5 (strand architecture, which already re-derives `genotype_calls` allele
+   state via supersession) or a dedicated GRCh37-recoalesce step.
+
 ## Implication
 
 Each item is a known limitation with an identified fix point. They are not

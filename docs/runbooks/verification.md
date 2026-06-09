@@ -132,6 +132,82 @@ affected source (e.g. the gnomAD `rows_loaded`, `match_rate`, and
 per-population AF presence numbers in the
 `### gnomAD (sub-phase 5.5)` section).
 
+### Canonicalize backfill gate (PR-3 / finding-020) — VSC-User only
+
+The PR-3 canonicalize re-lock is verified on the **swept real-data DB** — the #66
+`genome imputation normalize-rsids` sweep must already have run (see the reload
+sequence in `annotations.md`). VSC-ClaudeCode does NOT run this; it runs only the
+synthetic-fixture dev-loop. Two checkpoints bracket the canonicalize run so any
+wrong number at B is attributable to canonicalize, not a bad starting state.
+
+Sequence:
+
+1. Restore the pre-canonicalize snapshot onto the swept DB; confirm the prior
+   discrepancy count.
+2. **Checkpoint A** (pre-canonicalize) — capture the merge anchors (below) and
+   assert the negative control: 942,620 chip-consensus / 120,516 `both_concordant`
+   / 821,998 `single_source` / concordance 1.0000 / `strand_flip_resolutions` 106
+   / palindromic 31. A wrong number here = STOP (bad start, or the sweep didn't
+   run).
+3. `genome annotate canonicalize-variants`  *(transiently empties `consensus_genotypes`)*
+4. `genome merge`                            *(transiently empties `variant_annotations_index`)*
+5. `genome annotate align-tier3-consensus`
+6. `genome annotate refresh-index`
+7. **Checkpoint B** (after the full sequence) — re-capture both blocks and compare
+   against finding-020's bedrock anchor table.
+
+Capture — merge anchors (`consensus_genotypes`; run at A and at B):
+
+```sql
+SELECT
+  COUNT(*) FILTER (WHERE NOT is_imputed)                                              AS chip_consensus_rows,
+  COUNT(*) FILTER (WHERE is_imputed)                                                  AS imputed_only_rows,
+  COUNT(*) FILTER (WHERE NOT is_imputed AND consensus_method='both_concordant')       AS both_concordant,
+  COUNT(*) FILTER (WHERE NOT is_imputed AND consensus_method='single_source')         AS single_source,
+  COUNT(*) FILTER (WHERE NOT is_imputed AND consensus_method='disagreement_resolved') AS disagreement_resolved
+FROM consensus_genotypes;
+```
+
+`concordance_rate`, `strand_flip_resolutions`, `genotype_mismatch`, and the
+palindromic-shared count are merge-computed — read them from the `merge.complete`
+structlog event each `genome merge` emits (at A, the prior run's locked
+1.0000 / 106 / … / 31). `survivors_enriched` and `rsid_conflicts` come from the
+`canonicalize.complete` event.
+
+Capture — index match anchors (`variant_annotations_index`, after `refresh-index`):
+
+```sql
+SELECT
+  COUNT(*)                                       AS row_count,
+  COUNT(*) FILTER (WHERE af_global IS NOT NULL)  AS gnomad_matches,
+  COUNT(*) FILTER (WHERE clinvar_count > 0)      AS clinvar_matches,
+  COUNT(*) FILTER (WHERE gwas_trait_count > 0)   AS gwas_matches,
+  COUNT(*) FILTER (WHERE has_pgx)                AS pharmgkb_matches,
+  COUNT(*) FILTER (WHERE is_rare)                AS is_rare,
+  COUNT(*) FILTER (WHERE is_ultrarare)           AS is_ultrarare
+FROM variant_annotations_index;
+```
+
+Tripwires: concordance should drop (bounded by finding-020's locked rate, for the
+documented reason); imputed-only (2,267,751) must NOT move; the recovery line —
+`gwas_matches`→66,726, `pharmgkb_matches`→1,737, `rsid_conflicts`→0, rsID
+invariant 0-lost — is the coordination tripwire. If the recovery numbers diverge
+from those targets, that is a SEMANTIC escalation (the swept-data interaction may
+have made part of the coalescing redundant) — STOP, leave the finding-020 /
+CLAUDE.md placeholder markers unfilled, and route to the planning chat.
+
+**Pre-squash placeholder check (must pass before the squash-merge).** The gate
+numbers backfill the placeholder markers planted across `finding-020` and
+`CLAUDE.md` (each written as the literal word `GATE` joined by a hyphen to
+`FILL`). Once the step-7 review validates the gate and the markers are filled,
+confirm none survive — repo-wide, no path filter:
+
+```
+git grep -nE 'GATE[-]FILL'
+# → must print nothing across the whole tree. Any hit = an un-gated number is
+#   about to ship into a durable doc. STOP; fill or remove it before squashing.
+```
+
 ## When the protocol fails
 
 If any step fails, do not attempt to fix the failure locally before

@@ -42,6 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rsid_conflicts` (canonical keys where distinct non-NULL rsIDs collided; the
   loser is surfaced via a warning, never silently dropped). Strand-flip
   `variants_master` collapse (genotype_calls supersession) deferred to PR 5.
+  Two doc re-lock corrections land with the rebase onto #66: finding-020's
+  "Concordance re-lock" drops a fabricated "high-0.99x" magnitude bound (the
+  post-canonicalize concordance is gate-measured, not bounded a priori), and
+  finding-005 gains item #9 tracking the `pos_grch37` collapse-inheritance gap
+  (the new-survivor INSERT inherits only the representative's GRCh37 coordinate;
+  fix deferred pending re-liftover). (#65)
 - Imputation rsID hygiene (finding-021). Phase-4 imputation ingest copied
   Beagle's synthetic `chrom:pos:ref:alt` VCF `ID` (emitted for panel variants with
   no dbSNP rsID) verbatim into `variants_master.rsid`, so the ~2.26M imputed-only

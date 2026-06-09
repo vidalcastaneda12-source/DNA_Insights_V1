@@ -116,6 +116,7 @@ database needs to be reloaded:
    genome annotate refresh --source gnomad
    genome annotate refresh --source dbsnp
    genome annotate refresh-aliases
+   genome imputation normalize-rsids
    genome annotate canonicalize-variants
    genome merge
    genome annotate align-tier3-consensus
@@ -127,8 +128,13 @@ The order is load-sensitive: `gnomad` builds its
 releases, so both must already be loaded; `refresh-aliases` must run
 after `--source dbsnp` (it attaches the rsID-merge map to the current
 dbSNP `source_version_id` and must be re-run after any future dbSNP
-refresh that flips that pointer); `canonicalize-variants` reads
-`dbsnp_annotations` for canonical REF/ALT and rewrites
+refresh that flips that pointer); `normalize-rsids` (the #66 imputation
+rsID-hygiene sweep) NULLs Beagle's synthetic `chr:pos:ref:alt` rsIDs on the
+imputed-only rows and must run **before** `canonicalize-variants`, so the
+latter's `vm.rsid IS NULL` enrich-guard fires and a colliding chip `rs#` is
+adopted rather than dropped — the swept-before-canonicalize precondition for the
+rsID-preservation invariant (finding-020 / finding-021); `canonicalize-variants`
+reads `dbsnp_annotations` for canonical REF/ALT and rewrites
 `variants_master` in place, so it runs after dbSNP loads; `merge`
 re-derives `consensus_genotypes` from the now-canonical variants;
 `align-tier3-consensus` deletes the non-canonical-side consensus rows

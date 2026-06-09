@@ -52,12 +52,20 @@ were always present in the raw data) surface as `genotype_mismatch`, the
 denominator grows, and **concordance drops below 1.0000**. The drop is exposure
 of biology the alphabetical keying had hidden.
 
-The exact post-backfill rate is data-dependent; it is captured on the first
-authoritative run and locked alongside the rest of the bedrock anchors below.
-Magnitude bound: with `new_mismatches ≤ rows_collapsed` and the denominator
-starting at `120,516`, the new rate lands in the high-`0.99x` range. If the
-next independent verification run sees `concordance < 1.0000`, **see this
-finding** — it is the post-PR-3 re-lock value, not a regression.
+The exact post-backfill rate is data-dependent and is captured on the first
+authoritative run, then locked alongside the rest of the bedrock anchors below.
+Its magnitude is **not** bounded a priori. The only available bound,
+`new_mismatches ≤ rows_collapsed`, puts the mismatch ceiling on the same order
+as the starting denominator (`rows_collapsed ≈ 115,726` against a `shared`
+denominator that begins at `120,516`), so it does not constrain the rate to any
+particular range — asserting a "high-0.99x" landing would assume
+`new_mismatches ≪ rows_collapsed` with nothing to justify it. What is certain is
+the *direction* (down from 1.0000) and the *cause* (the denominator now includes
+previously-split cross-chip pairs that genuinely disagree); the *value* is
+whatever the gate measures. The authoritative post-PR-3 rate is
+<!-- GATE-FILL: post-canon concordance -->. If an independent verification run
+sees `concordance < 1.0000`, **see this finding** — it is the post-PR-3 re-lock
+value, not a regression.
 
 ## Bedrock anchor re-lock (every long-standing real-data number)
 
@@ -70,24 +78,24 @@ a regression signal.
 
 | Anchor | Pre-PR-3 (locked at finding-018 / CLAUDE.md obs #3-#4) | Post-PR-3 (capture & re-lock on first authoritative run) | Framing |
 |---|---|---|---|
-| Total chip-derived consensus rows | 942,620 | ↓ by `rows_collapsed` | Collapses remove `variants_master` rows; `consensus_genotypes` is 1:1. Correction — duplicates removed. |
-| `both_concordant` | 120,516 | ~stable, possibly slight ↑ | Concordant pairs were mostly already keyed together; collapses that bring two concordant calls onto one variant add a small ↑. Largely unchanged. |
-| `single_source` | 821,998 | ↓ materially | Previously-split same-position cross-chip pairs now collapse and get compared. Correction — visibility, not regression. |
+| Total chip-derived consensus rows | 942,620 | ↓ by `rows_collapsed` — <!-- GATE-FILL: post-canon chip-consensus rows --> | Collapses remove `variants_master` rows; `consensus_genotypes` is 1:1. Correction — duplicates removed. |
+| `both_concordant` | 120,516 | ~stable, possibly slight ↑ — <!-- GATE-FILL: post-canon both_concordant --> | Concordant pairs were mostly already keyed together; collapses that bring two concordant calls onto one variant add a small ↑. Largely unchanged. |
+| `single_source` | 821,998 | ↓ materially — <!-- GATE-FILL: post-canon single_source --> | Previously-split same-position cross-chip pairs now collapse and get compared. Correction — visibility, not regression. |
 | `disagreement_resolved` (consensus method count) | 106 | ~106 then 53 after `align-tier3` | Pre-`align`: merge tier-3 still writes consensus on both sides of each pair, so the count stays. Post-`align`: the non-canonical-side row is deleted, so one consensus row per pair (53). State both. |
 | `strand_flip_resolutions` (merge counter) | 106 | ~106 | Scope-A leaves the strand-flipped `variants_master` duplicates as two rows; merge tier-3 keeps pairing them at the genotype level. The deferred PR-5 collapse will drive this toward 0 — see "Out of scope". |
-| Palindromic shared variants | 31 | possibly ↑ slightly | If hom-only recovery creates new palindromic shared sites (23andMe hom A/A + Ancestry hom T/T at same pos both → `(A,T)`, both-called, disagree → `strand_ambiguous`). Capture; small. |
-| `genotype_mismatch` | ~0 (1.0000 concordance implies negligible) | ↑ materially | The newly-compared previously-split pairs that genuinely disagree. Correction — exposes biology. |
-| Concordance rate | 1.0000 | ↓ (high-0.99x; lock actual) | See "Concordance re-lock" above. Correction — denominator now reflects shared positions, not the subset alphabetical keying co-located. |
-| Shared-call concordance (obs #3) | 1.0000 | ↓ (same number, same mechanism) | Identical row; same framing. |
+| Palindromic shared variants | 31 | possibly ↑ slightly — <!-- GATE-FILL: post-canon palindromic shared --> | If hom-only recovery creates new palindromic shared sites (23andMe hom A/A + Ancestry hom T/T at same pos both → `(A,T)`, both-called, disagree → `strand_ambiguous`). Capture; small. |
+| `genotype_mismatch` | ~0 (1.0000 concordance implies negligible) | ↑ materially — <!-- GATE-FILL: post-canon genotype_mismatch --> | The newly-compared previously-split pairs that genuinely disagree. Correction — exposes biology. |
+| Concordance rate | 1.0000 | ↓ from 1.0000 — <!-- GATE-FILL: post-canon concordance --> | See "Concordance re-lock" above. Correction — denominator now reflects shared positions, not the subset alphabetical keying co-located. |
+| Shared-call concordance (obs #3) | 1.0000 | ↓ from 1.0000 — <!-- GATE-FILL: post-canon concordance --> | Identical row; same framing. |
 | Phase 4 Beagle imputed-only consensus | 2,267,751 | likely stable | Imputed calls are upserted by variant key; canonicalize doesn't re-run imputation. Verify the count is stable as a *negative* anchor. |
-| Phase 4 chip+imputed overlap | 101,420 | may shift slightly | Some chip-keyed variants change orientation; the overlap join is keyed by `variant_id` post-collapse. Verify and re-lock if changed. |
-| `gnomad_matches` (index) | 101,501 | ↑ dramatically (hundreds of thousands) | Reorient doubles genuine matches; hom-only recovery makes most remaining hom-ref positions coord-matchable. Correction — the finding-018 re-lock. |
-| `clinvar_matches` (index) | 2,559 | ↑ dramatically | Same mechanism, smaller absolute (ClinVar is sparser at these positions). |
+| Phase 4 chip+imputed overlap | 101,420 | may shift slightly — <!-- GATE-FILL: post-canon chip+imputed overlap --> | Some chip-keyed variants change orientation; the overlap join is keyed by `variant_id` post-collapse. Verify and re-lock if changed. |
+| `gnomad_matches` (index) | 101,501 | ↑ dramatically (hundreds of thousands) — <!-- GATE-FILL: post-canon gnomad_matches --> | Reorient doubles genuine matches; hom-only recovery makes most remaining hom-ref positions coord-matchable. Correction — the finding-018 re-lock. |
+| `clinvar_matches` (index) | 2,559 | ↑ dramatically — <!-- GATE-FILL: post-canon clinvar_matches --> | Same mechanism, smaller absolute (ClinVar is sparser at these positions). |
 | `gwas_matches` (index) | 66,726 | unchanged | rsid-keyed, orientation-independent — **and now collapse-preserving** (see "rsID preservation" below). |
 | `pharmgkb_matches` (index) | 1,737 | unchanged | rsid-keyed; same rsID-preservation invariant. |
-| `survivors_enriched` (`CanonicalizeResult`) | N/A (new identifier) | capture & lock | Reused survivors whose NULL rsID was filled from a colliding mover's rsID — the dominant rsID-rescue path. Was implicitly 0 (rsIDs were lost) before the fix. |
-| `rsid_conflicts` (`CanonicalizeResult`) | N/A (new identifier) | capture & lock (expected small) | Canonical keys where ≥2 distinct non-NULL rsIDs collided; lowest-`variant_id` wins, the loser is warned, never silently dropped. |
-| Index `row_count`, `is_rare`, `is_ultrarare` | 159,658 / 848 / 421 | all rise | More variants become allele-matchable, including rarer ones. |
+| `survivors_enriched` (`CanonicalizeResult`) | N/A (new identifier) | capture & lock — <!-- GATE-FILL: survivors_enriched --> | Reused survivors whose NULL rsID was filled from a colliding mover's rsID — the dominant rsID-rescue path. Was implicitly 0 (rsIDs were lost) before the fix. |
+| `rsid_conflicts` (`CanonicalizeResult`) | N/A (new identifier) | capture & lock (expected small) — <!-- GATE-FILL: rsid_conflicts --> | Canonical keys where ≥2 distinct non-NULL rsIDs collided; lowest-`variant_id` wins, the loser is warned, never silently dropped. |
+| Index `row_count`, `is_rare`, `is_ultrarare` | 159,658 / 848 / 421 | all rise — <!-- GATE-FILL: post-canon index row_count / is_rare / is_ultrarare --> | More variants become allele-matchable, including rarer ones. |
 
 `variant_annotations_index` `gnomad_matches` and `clinvar_matches` are the
 headline numbers; the merge anchors are the most-likely-to-alarm. The
