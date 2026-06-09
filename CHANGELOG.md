@@ -15,10 +15,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `^rs[0-9]+$` predicate at the ingest assignment site stores only real dbSNP
   rsIDs (else NULL) so future imports stay clean, and a standalone idempotent
   `genome imputation normalize-rsids` sweep NULLs the already-persisted synthetic
-  strings. The sweep is positively scoped to the `chr:pos:ref:alt` format (real
-  `rs#` and chip-internal `i####` IDs untouched), guards the rewrite with a
-  pre-flight equality check, and drops/rebuilds `idx_vm_rsid` around the bulk
-  UPDATE per the DuckDB FK/indexed-column delete+reinsert quirk. NULL is lossless
+  strings. The sweep is positively scoped to the `chr:pos:ref:alt` format — real
+  `rs#`, chip-internal `i####`, and vendor chip-probe IDs (`kgp…`/`VGXS…`/`acom…`)
+  are left untouched — and NULLs exactly the coordinate-matched rows. The original
+  pre-flight *equality* check (abort unless the regex-match count equaled the
+  non-`rs`/non-`i`/non-`.` population) proved too strict against real data: chip
+  ingest legitimately carries a handful of non-`rs` probe IDs (16 in the user's
+  corpus) that are real identifiers, not synthetic, so the guard now logs that
+  leftover (count + bounded sample) on every run rather than aborting. It still
+  drops/rebuilds `idx_vm_rsid` around the bulk UPDATE per the DuckDB
+  FK/indexed-column delete+reinsert quirk. NULL is lossless
   (the coordinate is reconstructable from chrom/pos/ref/alt); `--force-reimport`
   is not the cleaning mechanism (the import upsert never rewrites an existing
   row's rsid). No schema or DDL change; data-only cleanup, no schema rebuild. (#66)

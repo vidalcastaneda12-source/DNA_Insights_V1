@@ -16,9 +16,13 @@ Safety:
 * **Positively scoped.** The sweep matches the synthetic ``chrom:pos:ref:alt``
   shape directly, never the negation of ``rs%``. Real ``rs<n>`` and chip-internal
   ``i####`` IDs carry no colon and can never match.
-* **Pre-flight equality check.** Before mutating, the count of regex-matched rows
-  must equal the non-``rs`` / non-``i`` / non-``.`` / non-NULL population; a
-  mismatch aborts (the regex must match every synthetic ID and nothing else).
+* **Leftover logged, not fatal.** The non-``rs`` / non-``i`` / non-``.`` / non-NULL
+  complement can exceed the coordinate-regex matches by a handful of rows —
+  legitimate chip-probe IDs (Illumina ``kgp…`` 1000G probe names, vendor ``VGXS…``,
+  Ancestry ``acom_…``) that ingest carries in and the regex correctly excludes. The
+  pre-flight logs ``matched``, ``complement``, the ``leftover`` count, and a bounded
+  distinct sample of those probe IDs for visibility; it does not abort or widen the
+  pattern (probe-ID recovery is deferred to ``variant_aliases``).
 * **Index drop/rebuild.** The bulk UPDATE touches the indexed (``idx_vm_rsid``),
   FK-referenced ``rsid`` column. DuckDB delete+reinserts a row when an indexed
   column changes, which trips the ``genotype_calls.variant_id`` parent FK check
@@ -60,32 +64,56 @@ _NULL_SYNTHETIC_SQL: Final[str] = (
     "UPDATE variants_master SET rsid = NULL WHERE rsid IS NOT NULL AND regexp_full_match(rsid, ?)"
 )
 
+# Bounded, stable, deduplicated peek at the complement rows the coordinate regex
+# does NOT match — legitimate chip-probe IDs (``kgp…`` / ``VGXS…`` / ``acom_…``).
+# DISTINCT + ORDER BY makes the sample deterministic; LIMIT caps the log line (the
+# real leftover is a handful of rows). The regex is the only bind parameter.
+_LEFTOVER_SAMPLE_SQL: Final[str] = (
+    "SELECT DISTINCT rsid FROM variants_master "
+    "WHERE rsid IS NOT NULL AND rsid NOT LIKE 'rs%' "
+    "AND rsid NOT LIKE 'i%' AND rsid <> '.' "
+    "AND NOT regexp_full_match(rsid, ?) "
+    "ORDER BY rsid LIMIT 20"
+)
+
 
 def _scalar(conn: DuckDBPyConnection, sql: str, params: list[str] | None = None) -> int:
     row = conn.execute(sql, params if params is not None else []).fetchone()
     return int(row[0]) if row is not None and row[0] is not None else 0
 
 
+def _sample(conn: DuckDBPyConnection, sql: str, params: list[str]) -> list[str]:
+    rows = conn.execute(sql, params).fetchall()
+    return [str(row[0]) for row in rows]
+
+
 def normalize_imputed_rsids(conn: DuckDBPyConnection) -> int:
     """NULL every synthetic ``chrom:pos:ref:alt`` rsid in ``variants_master``.
 
-    Idempotent. Returns the number of rows cleaned. Raises :class:`RuntimeError`
-    if the pre-flight count of regex-matched rows disagrees with the
-    non-``rs`` / non-``i`` / non-``.`` / non-NULL population — the regex must
-    match every synthetic ID and nothing else, so a mismatch is a stop sign, not
-    a cue to widen or narrow the pattern blindly.
+    Idempotent. Returns the number of rows cleaned. The sweep is positively scoped
+    to the coordinate shape, so it never touches real ``rs#``, chip-internal
+    ``i####``, or chip-probe IDs (``kgp…`` / ``VGXS…`` / ``acom_…``) that
+    Ancestry/23andMe ingest carries in. Those probe IDs sit in the non-``rs`` /
+    non-``i`` / non-``.`` / non-NULL complement but are *not* synthetic; the count
+    and a bounded sample of that leftover are logged for visibility (their recovery
+    is deferred to ``variant_aliases``), not treated as an error.
     """
     matched = _scalar(conn, _COUNT_SYNTHETIC_SQL, [_SYNTHETIC_RSID_REGEX])
     complement = _scalar(conn, _COUNT_COMPLEMENT_SQL)
-    if matched != complement:
-        msg = (
-            f"synthetic-rsid regex matched {matched} rows but the "
-            f"non-rs / non-i / non-'.' population is {complement}; aborting "
-            f"before mutating — the regex must match every synthetic ID and "
-            f"nothing else."
-        )
-        raise RuntimeError(msg)
-    logger.info("imputation.normalize_rsids.preflight", matched=matched)
+    # A coordinate string never starts with 'rs' or 'i' and is never '.', so the
+    # regex-matched set is a strict subset of the complement: leftover >= 0 without
+    # a third scan. The leftover is legitimate chip-probe IDs the regex excludes.
+    leftover = complement - matched
+    leftover_sample = _sample(conn, _LEFTOVER_SAMPLE_SQL, [_SYNTHETIC_RSID_REGEX])
+    # Logged before the matched == 0 early return so the chip-probe residue stays
+    # visible in steady state (every clean re-run has matched == 0).
+    logger.info(
+        "imputation.normalize_rsids.preflight",
+        matched=matched,
+        complement=complement,
+        leftover=leftover,
+        leftover_sample=leftover_sample,
+    )
     if matched == 0:
         return 0
 

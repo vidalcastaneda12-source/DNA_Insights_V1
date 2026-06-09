@@ -684,8 +684,9 @@ def imputation_normalize_rsids() -> None:
     One-time, idempotent remediation (finding-021) of imputed variants whose rsid
     carries a Beagle coordinate string instead of a real dbSNP ``rs#`` or NULL.
     Real ``rs#`` and chip-internal ``i####`` IDs are left untouched; the sweep is
-    positively scoped to the synthetic format and aborts if a pre-flight count
-    mismatch suggests the regex would over- or under-match.
+    positively scoped to the synthetic format and logs any leftover non-synthetic
+    IDs (e.g. chip-probe ``kgp…`` / ``acom…`` names) for visibility rather than
+    aborting.
     """
     with duckdb_connection() as conn:
         cleaned = normalize_imputed_rsids(conn)

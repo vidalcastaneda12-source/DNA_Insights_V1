@@ -57,9 +57,11 @@ source-level and ships in two parts, both in this PR:
    normalize-rsids`) that NULLs the already-persisted synthetic strings. The sweep
    is **positively** scoped to the `chrom:pos:ref:alt` format — never the negation
    of `^rs[0-9]+$` — so real `rs<n>` and chip-internal `i####` IDs (which carry no
-   colon) are left untouched. A pre-flight equality check proves the regex matches
-   exactly the non-`rs` / non-`i` / non-`.` / non-NULL population before any
-   mutation; a mismatch aborts. Because the bulk UPDATE rewrites the indexed
+   colon) are left untouched. The sweep NULLs exactly the regex-matched coordinate
+   rows and logs the non-matched remainder of the non-`rs` / non-`i` / non-`.` /
+   non-NULL population (count + a bounded sample) rather than aborting — that
+   remainder is legitimate chip-probe IDs, not synthetic (see **Amendment** below).
+   Because the bulk UPDATE rewrites the indexed
    (`idx_vm_rsid`), FK-referenced `rsid` column, the sweep drops the index
    (committed) before the UPDATE and rebuilds it in a `finally` — DuckDB
    delete+reinserts a row when an indexed column changes, which would otherwise
@@ -98,3 +100,28 @@ imputation rsid hygiene only — nothing chip-merge-derived — so they must not
   0-lost.
 - Deferred (no V1 action): surfacing synthetic-ID provenance is unnecessary — it
   is reconstructable on demand and unused.
+
+## Amendment — guard relaxed to positive-match-and-log (PR #66 real-data gate)
+
+The sweep originally used a pre-flight *equality* check: it aborted unless the
+coordinate-regex match count equaled the non-`rs` / non-`i` / non-`.` / non-NULL
+complement. Real-data verification showed that invariant is too strict. Against the
+user's corpus the regex matched 2,267,751 synthetic IDs while the complement was
+2,267,767 — a 16-row gap.
+
+Those 16 are **not** synthetic. They are legitimate chip probe IDs carried in by
+23andMe/Ancestry ingest — Illumina 1000G-Project probe names (`kgp1851883`,
+`kgp9989353`), a vendor probe ID (`VGXS34713`), and Ancestry.com-internal IDs
+(`acom_1kg_6_30078939`, `acom_rs201205097`, the last embedding a valid rsID). They
+are real variant identifiers, not `chrom:pos:ref:alt` strings. The coordinate regex
+correctly excludes them; the bug was the guard's invariant, not the regex.
+
+The sweep is therefore coordinate-scoped, not "all non-`rs`." The equality check is
+removed; the sweep NULLs exactly the coordinate-matched rows and **logs** the
+leftover (count + a bounded distinct sample) on the `imputation.normalize_rsids.preflight`
+event for visibility instead of aborting. The leftover is logged on every run —
+including the idempotent no-op re-run where `matched == 0` — so the chip-probe
+residue stays observable in steady state. Recovering these probe IDs to canonical
+rsIDs (`kgp`→`rs`, unwrapping `acom_rs…`) is alias-normalization, deferred to
+`variant_aliases` / PR-4; the ingest predicate `_dbsnp_rsid_or_none` is unchanged
+(it is correct and real-data-confirmed).
