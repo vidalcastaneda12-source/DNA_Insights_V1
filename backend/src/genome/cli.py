@@ -26,6 +26,7 @@ from genome.imputation import (
     import_result,
     install_panel,
     list_runs,
+    normalize_imputed_rsids,
     parse_chromosomes_filter,
     prepare_run,
     run_imputation,
@@ -674,6 +675,21 @@ def imputation_list() -> None:
             f"mean_r2={r.mean_r2 if r.mean_r2 is not None else '-'} "
             f"r2_threshold={r.r2_threshold if r.r2_threshold is not None else '-'}",
         )
+
+
+@imputation_app.command("normalize-rsids")
+def imputation_normalize_rsids() -> None:
+    """NULL synthetic ``chrom:pos:ref:alt`` strings in ``variants_master.rsid``.
+
+    One-time, idempotent remediation (finding-021) of imputed variants whose rsid
+    carries a Beagle coordinate string instead of a real dbSNP ``rs#`` or NULL.
+    Real ``rs#`` and chip-internal ``i####`` IDs are left untouched; the sweep is
+    positively scoped to the synthetic format and aborts if a pre-flight count
+    mismatch suggests the regex would over- or under-match.
+    """
+    with duckdb_connection() as conn:
+        cleaned = normalize_imputed_rsids(conn)
+    typer.echo(f"normalized {cleaned} synthetic rsid(s) to NULL")
 
 
 # -----------------------------------------------------------------------------

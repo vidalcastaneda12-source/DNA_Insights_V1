@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import TYPE_CHECKING, Final, Literal
@@ -85,6 +86,24 @@ _ESTIMATED_VARIANTS_PER_SECOND: Final[int] = 16_500
 _IMPUTABLE_CHROMS: Final[frozenset[str]] = frozenset(
     {*(str(i) for i in range(1, 23)), "X", "Y"},
 )
+
+_DBSNP_RSID_RE: Final[re.Pattern[str]] = re.compile(r"^rs[0-9]+$")
+
+
+def _dbsnp_rsid_or_none(vcf_id: str | None) -> str | None:
+    """Keep only a strict dbSNP rs identifier; NULL anything else (finding-021).
+
+    Beagle emits a synthetic ``chrom:pos:ref:alt`` string in the VCF ID field for
+    panel variants with no dbSNP rsID (e.g. ``14:29619977:C:T``). Copied verbatim
+    that coordinate string would masquerade as an rsid in ``variants_master.rsid``,
+    so store the value only when it is a real ``rs<n>`` (strict ``^rs[0-9]+$``),
+    else ``None``. NULL is lossless — the coordinate is reconstructable from
+    ``chrom`` / ``pos`` / ``ref`` / ``alt``.
+    """
+    if vcf_id is None:
+        return None
+    return vcf_id if _DBSNP_RSID_RE.match(vcf_id) else None
+
 
 # A cleanly-closed BGZF file (Beagle's .vcf.gz output) ends with this 28-byte
 # empty-block EOF marker (htslib's BGZF_EOF). Its absence on a BGZF file means
@@ -445,7 +464,7 @@ def _stream_chromosome(
                 batch,
                 chrom=chrom,
                 pos=int(v.POS),
-                rsid=None if not v.ID else str(v.ID),
+                rsid=_dbsnp_rsid_or_none(v.ID),
                 ref=str(v.REF),
                 alt=alts[0],
                 allele_1=allele_1,

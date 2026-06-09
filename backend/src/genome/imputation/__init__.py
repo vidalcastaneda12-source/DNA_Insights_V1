@@ -34,6 +34,7 @@ from genome.imputation.reference_panel import (
     install_panel,
     validate_panel,
 )
+from genome.imputation.rsid_cleanup import normalize_imputed_rsids
 from genome.imputation.runs import (
     ImputationRun,
     list_runs,
@@ -63,6 +64,7 @@ __all__ = [
     "import_result",
     "install_panel",
     "list_runs",
+    "normalize_imputed_rsids",
     "parse_chromosomes_filter",
     "prepare_run",
     "run_imputation",
