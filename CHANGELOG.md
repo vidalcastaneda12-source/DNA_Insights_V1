@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Imputation rsID hygiene (finding-021). Phase-4 imputation ingest copied
+  Beagle's synthetic `chrom:pos:ref:alt` VCF `ID` (emitted for panel variants with
+  no dbSNP rsID) verbatim into `variants_master.rsid`, so the ~2.26M imputed-only
+  rows carried a coordinate string instead of a real `rs#` or NULL — the root
+  cause behind finding-020's canonicalize rsID-loss (`gwas_matches` 66,726 →
+  55,047, `pharmgkb_matches` 1,737 → 1,411). Two parts ship here: a strict
+  `^rs[0-9]+$` predicate at the ingest assignment site stores only real dbSNP
+  rsIDs (else NULL) so future imports stay clean, and a standalone idempotent
+  `genome imputation normalize-rsids` sweep NULLs the already-persisted synthetic
+  strings. The sweep is positively scoped to the `chr:pos:ref:alt` format — real
+  `rs#`, chip-internal `i####`, and vendor chip-probe IDs (`kgp…`/`VGXS…`/`acom…`)
+  are left untouched — and NULLs exactly the coordinate-matched rows. The original
+  pre-flight *equality* check (abort unless the regex-match count equaled the
+  non-`rs`/non-`i`/non-`.` population) proved too strict against real data: chip
+  ingest legitimately carries a handful of non-`rs` probe IDs (16 in the user's
+  corpus) that are real identifiers, not synthetic, so the guard now logs that
+  leftover (count + bounded sample) on every run rather than aborting. It still
+  drops/rebuilds `idx_vm_rsid` around the bulk UPDATE per the DuckDB
+  FK/indexed-column delete+reinsert quirk. NULL is lossless
+  (the coordinate is reconstructable from chrom/pos/ref/alt); `--force-reimport`
+  is not the cleaning mechanism (the import upsert never rewrites an existing
+  row's rsid). No schema or DDL change; data-only cleanup, no schema rebuild. (#66)
 - Populate `variant_aliases` from dbSNP's `RsMergeArch.bcp.gz` rs-merge archive
   via a new standalone `genome annotate refresh-aliases` command — the first
   post-5.7 backfill (finding-019). Fills the table the dbSNP loader (5.6) left

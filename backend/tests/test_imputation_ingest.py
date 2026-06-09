@@ -23,6 +23,7 @@ from genome.imputation.archive import ImputationArchive
 from genome.imputation.ingest import (
     DryRunResult,
     ImportResult,
+    _dbsnp_rsid_or_none,
     import_result,
     parse_chromosomes_filter,
 )
@@ -793,3 +794,31 @@ def test_dry_run_also_rejects_truncated_bgzf_result_vcf(
 
     with pytest.raises(RuntimeError, match="truncated BGZF"):
         import_result(imp_id, archive_root=archive_root, dry_run=True)
+
+
+# ---------------------------------------------------------------------------
+# finding-021: strict dbSNP rsID predicate at the imputation rsid write.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("vcf_id", "expected"),
+    [
+        ("rs7412", "rs7412"),
+        ("rs1", "rs1"),
+        ("rs123456789", "rs123456789"),
+        ("14:29619977:C:T", None),  # Beagle synthetic chr:pos:ref:alt
+        ("1:12345:A:G", None),
+        (None, None),
+        (".", None),
+        ("", None),
+        ("rs", None),  # no digits
+        ("rsABC", None),
+        ("RS123", None),  # case-sensitive
+        ("rs123;rs456", None),  # multi-ID
+        (" rs123 ", None),  # no surrounding whitespace tolerated
+    ],
+)
+def test_dbsnp_rsid_or_none(vcf_id: str | None, expected: str | None) -> None:
+    """Only a strict ``rs<n>`` survives; synthetic / malformed IDs become NULL."""
+    assert _dbsnp_rsid_or_none(vcf_id) == expected
