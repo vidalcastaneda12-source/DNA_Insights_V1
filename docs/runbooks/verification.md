@@ -117,9 +117,11 @@ identifiers documented in CLAUDE.md "Real-data observations":
   61,458 (up from 101,501 / 2,559); `pharmgkb_matches` 1,737 holds;
   `gwas_matches` 66,701 — **not** unchanged, −23 from collapse-dedup
   (finding-020 recon C). The post-`align-tier3` `consensus_genotypes
-  WHERE consensus_method='disagreement_resolved'` count is **2**. (This
-  bullet previously predicted a mid-double-digit figure; that estimate
-  was stale — it assumed the tier-3 strand-flip pairs survive to merge,
+  WHERE consensus_method='disagreement_resolved'` count is **1** (2
+  post-merge; `align-tier3` deletes the non-canonical side of its 1
+  examined pair → 1 final). (This bullet previously predicted a
+  mid-double-digit figure; that estimate was stale — it assumed the
+  tier-3 strand-flip pairs survive to merge,
   but canonicalize subsumes them upstream, so 104 of the 106 post-merge
   rows reclassify to `single_source`. See finding-020 recon B.)
 
@@ -195,7 +197,8 @@ FROM variant_annotations_index;
 Tripwires (gate-measured and reconciled — these are now the *expected* values, not
 open escalations): concordance drops to **0.999776**, driven entirely by 27
 palindromic `strand_ambiguous` no-calls with `genotype_mismatch`=0 (finding-020
-recon A; the correct-unification verdict on the 27 is the one open item). The
+recon A — which VSC-User ran and **confirmed correct unification**, 27 distinct
+palindromic sites). The
 recovery line is `gwas_matches`→**66,701** (−23 from collapse-dedup, finding-020
 recon C — **not** the pre-gate 66,726), `pharmgkb_matches`→1,737 (holds),
 `rsid_conflicts`→**1** (one genuine real-rs#-vs-real-rs# collision survives the #66
@@ -212,19 +215,20 @@ numbers backfill the placeholder markers planted across `finding-020` and
 `CLAUDE.md` (each written as the literal word `GATE` joined by a hyphen to
 `FILL`). The full set is **18** markers (the prior "16" undercounted — it predates
 the `survivors_enriched` / `rsid_conflicts` tokens at finding-020:96-97). The
-step-7 re-lock pass locked **7** and **deliberately left 11 live**: the 4
-concordance + `both_concordant` + `single_source` tokens (open until the recon-A
-verdict and the recon-B per-bucket query land) and the 5 uncaptured values
-(`chip-consensus rows`, `palindromic shared`, `is_rare`, `is_ultrarare`,
-`chip+imputed overlap`) that VSC-User supplies. So immediately after the re-lock
-pass:
+gate re-lock locked **15** across two passes: the step-7 backfill, then a
+recon-results pass that locked concordance / `both_concordant` / `single_source` /
+chip-consensus once VSC-User ran recons A/B/C (A confirmed correct-unification; B
+confirmed the reorient-movers + post-align `disagreement_resolved`=1; C confirmed
+`gwas_matches` −23). **3 markers stay live**, covering the 4 still-uncaptured
+values VSC-User supplies: `palindromic shared`, `is_rare` / `is_ultrarare` (one
+shared marker), and `chip+imputed overlap`. So currently:
 
 ```
 git grep -nE 'GATE[-]FILL'
-# → prints exactly 11 markers (NOT clean yet — by design). PR #65 stays gated
-#   until the recons close and the 5 values land, at which point this must print
-#   nothing before the squash. Any UNEXPECTED hit (a value that was supposed to
-#   lock but didn't) = STOP.
+# → prints exactly 3 markers (NOT clean yet — by design). PR #65 stays gated
+#   until VSC-User supplies the 3 uncaptured counts, at which point this must
+#   print nothing before the squash. Any UNEXPECTED hit (a value that was
+#   supposed to lock but didn't) = STOP.
 ```
 
 ## When the protocol fails

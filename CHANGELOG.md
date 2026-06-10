@@ -54,15 +54,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   finding-020 / CLAUDE.md gate placeholders from the real-data run: a
   "Post-canon classification model" that closes every merge anchor
   (`gnomad_matches` 101,501 → 2,796,952, `clinvar_matches` 2,559 → 61,458,
-  `disagreement_resolved` / `strand_flip_resolutions` 106 → 2, `imputed_only`
+  `disagreement_resolved` 106 → 1 (final, post-`align-tier3`) and
+  `strand_flip_resolutions` 106 → 2 (merge counter), `imputed_only`
   2,267,751 → 2,146,324, `concordance` → 0.999776 with `genotype_mismatch` 0);
   a finding-021 amendment recording the one genuine `rsid_conflicts` that
   survives the #66 sweep (coalescing retained-and-justified); and new finding-022
   + finding-005 #10 documenting a ClinVar/GWAS loader version-label / cache-data
   decoupling (the in-DB version row carries a June label while the loaded data is
-  the May cache — data correct, label wrong; code fix deferred). Eleven gate
-  placeholders stay live by design pending VSC-User's verdict on the 27
-  palindromic no-calls and five uncaptured counts. (#65)
+  the May cache — data correct, label wrong; code fix deferred). After VSC-User
+  ran the recons (A confirmed correct unification — 27 distinct palindromic sites;
+  B confirmed the reorient-movers + post-align `disagreement_resolved`=1; C
+  confirmed `gwas_matches` −23), a recon-results pass locked concordance /
+  `both_concordant` / `single_source` / chip-consensus; **3 markers** (4 values:
+  palindromic-shared, is_rare, is_ultrarare, chip+imputed overlap) stay live by
+  design pending VSC-User's capture. (#65)
 - Imputation rsID hygiene (finding-021). Phase-4 imputation ingest copied
   Beagle's synthetic `chrom:pos:ref:alt` VCF `ID` (emitted for panel variants with
   no dbSNP rsID) verbatim into `variants_master.rsid`, so the ~2.26M imputed-only
