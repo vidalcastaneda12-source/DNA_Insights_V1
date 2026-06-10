@@ -35,9 +35,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the collapse: both the new-survivor and reused-survivor paths inherit the best
   non-NULL rsID across *all* movers landing on a canonical key (lowest
   `variant_id` wins; a `MIN(old_variant_id)` representative or a NULL-rsID
-  imputed sibling no longer drops a colliding chip mover's rsID), so the
-  rsID-keyed index match counts (`gwas_matches` 66,726 / `pharmgkb_matches`
-  1,737) stay unchanged as finding-020 intends. Two new drift identifiers —
+  imputed sibling no longer drops a colliding chip mover's rsID), so no rsID is
+  lost to the collapse. The rsID-keyed index match counts hold modulo a small
+  collapse-dedup effect the gate later measured (`gwas_matches` 66,726 → 66,701,
+  −23 from two rows sharing one rsID collapsing to a single survivor;
+  `pharmgkb_matches` 1,737 unchanged — finding-020 recon C). Two new drift
+  identifiers —
   `survivors_enriched` (reused survivors whose NULL rsID was filled) and
   `rsid_conflicts` (canonical keys where distinct non-NULL rsIDs collided; the
   loser is surfaced via a warning, never silently dropped). Strand-flip
@@ -47,7 +50,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   post-canonicalize concordance is gate-measured, not bounded a priori), and
   finding-005 gains item #9 tracking the `pos_grch37` collapse-inheritance gap
   (the new-survivor INSERT inherits only the representative's GRCh37 coordinate;
-  fix deferred pending re-liftover). (#65)
+  fix deferred pending re-liftover). The step-7 re-lock then backfills the
+  finding-020 / CLAUDE.md gate placeholders from the real-data run: a
+  "Post-canon classification model" that closes every merge anchor
+  (`gnomad_matches` 101,501 → 2,796,952, `clinvar_matches` 2,559 → 61,458,
+  `disagreement_resolved` / `strand_flip_resolutions` 106 → 2, `imputed_only`
+  2,267,751 → 2,146,324, `concordance` → 0.999776 with `genotype_mismatch` 0);
+  a finding-021 amendment recording the one genuine `rsid_conflicts` that
+  survives the #66 sweep (coalescing retained-and-justified); and new finding-022
+  + finding-005 #10 documenting a ClinVar/GWAS loader version-label / cache-data
+  decoupling (the in-DB version row carries a June label while the loaded data is
+  the May cache — data correct, label wrong; code fix deferred). Eleven gate
+  placeholders stay live by design pending VSC-User's verdict on the 27
+  palindromic no-calls and five uncaptured counts. (#65)
 - Imputation rsID hygiene (finding-021). Phase-4 imputation ingest copied
   Beagle's synthetic `chrom:pos:ref:alt` VCF `ID` (emitted for panel variants with
   no dbSNP rsID) verbatim into `variants_master.rsid`, so the ~2.26M imputed-only

@@ -112,12 +112,16 @@ identifiers documented in CLAUDE.md "Real-data observations":
 * PR-3 canonicalize step (`genome annotate canonicalize-variants` →
   `genome merge` → `genome annotate align-tier3-consensus` →
   `genome annotate refresh-index`): the bedrock anchor table in
-  finding-020 lists every post-PR-3 locked number. Headline checks:
-  `gnomad_matches` / `clinvar_matches` rise dramatically from
-  101,501 / 2,559; `gwas_matches=66,726` and `pharmgkb_matches=1,737`
-  stay unchanged; the post-`align-tier3` `consensus_genotypes WHERE
-  consensus_method='disagreement_resolved'` count drops to 53 (one per
-  pair on the canonical side) from the post-merge 106.
+  finding-020 lists every post-PR-3 locked number. Headline checks
+  (gate-measured): `gnomad_matches` 2,796,952 / `clinvar_matches`
+  61,458 (up from 101,501 / 2,559); `pharmgkb_matches` 1,737 holds;
+  `gwas_matches` 66,701 — **not** unchanged, −23 from collapse-dedup
+  (finding-020 recon C). The post-`align-tier3` `consensus_genotypes
+  WHERE consensus_method='disagreement_resolved'` count is **2**. (This
+  bullet previously predicted a mid-double-digit figure; that estimate
+  was stale — it assumed the tier-3 strand-flip pairs survive to merge,
+  but canonicalize subsumes them upstream, so 104 of the 106 post-merge
+  rows reclassify to `single_source`. See finding-020 recon B.)
 
 Drift in any of these numbers against the same input corpus is a
 regression signal, not noise. The numbers are recorded as stable
@@ -188,24 +192,39 @@ SELECT
 FROM variant_annotations_index;
 ```
 
-Tripwires: concordance should drop (bounded by finding-020's locked rate, for the
-documented reason); imputed-only (2,267,751) must NOT move; the recovery line —
-`gwas_matches`→66,726, `pharmgkb_matches`→1,737, `rsid_conflicts`→0, rsID
-invariant 0-lost — is the coordination tripwire. If the recovery numbers diverge
-from those targets, that is a SEMANTIC escalation (the swept-data interaction may
-have made part of the coalescing redundant) — STOP, leave the finding-020 /
-CLAUDE.md placeholder markers unfilled, and route to the planning chat.
+Tripwires (gate-measured and reconciled — these are now the *expected* values, not
+open escalations): concordance drops to **0.999776**, driven entirely by 27
+palindromic `strand_ambiguous` no-calls with `genotype_mismatch`=0 (finding-020
+recon A; the correct-unification verdict on the 27 is the one open item). The
+recovery line is `gwas_matches`→**66,701** (−23 from collapse-dedup, finding-020
+recon C — **not** the pre-gate 66,726), `pharmgkb_matches`→1,737 (holds),
+`rsid_conflicts`→**1** (one genuine real-rs#-vs-real-rs# collision survives the #66
+sweep, finding-021 amendment — **not** 0), rsID invariant 0-lost (held). Imputed-only
+**moved** to **2,146,324** (Δ −121,427 == `survivors_enriched`, population C — it is
+**not** the negative anchor an earlier draft assumed). These divergences from the
+pre-gate predictions *were* the SEMANTIC escalation, and the step-7 review already
+resolved them in finding-020 / finding-021; a re-run that reproduces them is
+correct. A re-run that *re-diverges* from these reconciled values is the new STOP
+signal — route to the planning chat.
 
 **Pre-squash placeholder check (must pass before the squash-merge).** The gate
 numbers backfill the placeholder markers planted across `finding-020` and
 `CLAUDE.md` (each written as the literal word `GATE` joined by a hyphen to
-`FILL`). Once the step-7 review validates the gate and the markers are filled,
-confirm none survive — repo-wide, no path filter:
+`FILL`). The full set is **18** markers (the prior "16" undercounted — it predates
+the `survivors_enriched` / `rsid_conflicts` tokens at finding-020:96-97). The
+step-7 re-lock pass locked **7** and **deliberately left 11 live**: the 4
+concordance + `both_concordant` + `single_source` tokens (open until the recon-A
+verdict and the recon-B per-bucket query land) and the 5 uncaptured values
+(`chip-consensus rows`, `palindromic shared`, `is_rare`, `is_ultrarare`,
+`chip+imputed overlap`) that VSC-User supplies. So immediately after the re-lock
+pass:
 
 ```
 git grep -nE 'GATE[-]FILL'
-# → must print nothing across the whole tree. Any hit = an un-gated number is
-#   about to ship into a durable doc. STOP; fill or remove it before squashing.
+# → prints exactly 11 markers (NOT clean yet — by design). PR #65 stays gated
+#   until the recons close and the 5 values land, at which point this must print
+#   nothing before the squash. Any UNEXPECTED hit (a value that was supposed to
+#   lock but didn't) = STOP.
 ```
 
 ## When the protocol fails

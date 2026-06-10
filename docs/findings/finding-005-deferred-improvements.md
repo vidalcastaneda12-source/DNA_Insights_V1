@@ -120,6 +120,21 @@ manageable. This document tracks them so they aren't forgotten.
    PR 5 (strand architecture, which already re-derives `genotype_calls` allele
    state via supersession) or a dedicated GRCh37-recoalesce step.
 
+10. **Loader version label decouples from cached data on a rebuild reload
+    (finding-022).** ClinVar and GWAS Catalog resolve their `version` label from a
+    live network call (`_resolve_version_via_head` / `_resolve_version_via_stats`)
+    placed *before* the skip-if-exists `download_to_cache`. On a fresh
+    `rm -rf data/` rebuild that reloads from a preserved older cache, the label
+    resolves to the *current upstream* (e.g. June) release while the loaded bytes
+    are the *cached* (e.g. May) release — and finding-014's hash fallback cannot
+    reconcile them because there is no active row yet. The DB version row is
+    mislabeled; the data is correct (finding-022 has the full mechanism + the
+    DB-vs-docs map). *Recommended fix point:* the next annotation-loader PR — bind
+    the persisted label to the loaded bytes, either via a sidecar `<file>.version`
+    written on a fresh download and read back on a cache-hit, or by generalizing
+    finding-014's `maybe_skip_on_hash_match` to adopt the label of any prior
+    `annotation_source_versions` row whose hash matches the cached file.
+
 ## Implication
 
 Each item is a known limitation with an identified fix point. They are not
