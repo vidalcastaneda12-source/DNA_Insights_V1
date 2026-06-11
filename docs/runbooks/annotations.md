@@ -116,18 +116,33 @@ database needs to be reloaded:
    genome annotate refresh --source gnomad
    genome annotate refresh --source dbsnp
    genome annotate refresh-aliases
+   genome imputation normalize-rsids
+   genome annotate canonicalize-variants
+   genome merge
+   genome annotate align-tier3-consensus
    genome annotate refresh-index
    ```
 
-The last four are order-sensitive: `gnomad` builds its
+The order is load-sensitive: `gnomad` builds its
 `(user ∪ ClinVar ∪ GWAS)` filter from the active ClinVar and GWAS
-releases, so both must already be loaded; `refresh-index` rolls up the
-four variant-linkable sources (ClinVar, GWAS, gnomAD, PharmGKB) through
-their version pointers, so it runs last. `dbsnp` reads only
-`variants_master` and is order-independent among the loaders, **but
-`refresh-aliases` must run after `--source dbsnp`** — it attaches the
-rsID-merge map to the current dbSNP `source_version_id` and must be
-re-run after any future dbSNP refresh that flips that pointer.
+releases, so both must already be loaded; `refresh-aliases` must run
+after `--source dbsnp` (it attaches the rsID-merge map to the current
+dbSNP `source_version_id` and must be re-run after any future dbSNP
+refresh that flips that pointer); `normalize-rsids` (the #66 imputation
+rsID-hygiene sweep) NULLs Beagle's synthetic `chr:pos:ref:alt` rsIDs on the
+imputed-only rows and must run **before** `canonicalize-variants`, so the
+latter's `vm.rsid IS NULL` enrich-guard fires and a colliding chip `rs#` is
+adopted rather than dropped — the swept-before-canonicalize precondition for the
+rsID-preservation invariant (finding-020 / finding-021); `canonicalize-variants`
+reads `dbsnp_annotations` for canonical REF/ALT and rewrites
+`variants_master` in place, so it runs after dbSNP loads; `merge`
+re-derives `consensus_genotypes` from the now-canonical variants;
+`align-tier3-consensus` deletes the non-canonical-side consensus rows
+for the strand-flipped duplicates that Scope-A canonicalize leaves as
+two rows; `refresh-index` rolls up the four variant-linkable sources
+(ClinVar, GWAS, gnomAD, PharmGKB) through their version pointers, so
+it runs last. `dbsnp` reads only `variants_master` and is
+order-independent among the loaders.
 
 The annotation refreshes are idempotent on
 `(source_db, version, source_file_hash)` — if upstream hasn't moved

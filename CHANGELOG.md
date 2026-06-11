@@ -6,6 +6,72 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Canonical REF/ALT backfill + hom-only recovery — the second post-5.7
+  backfill (finding-020). New `genome annotate canonicalize-variants` rewrites
+  `variants_master.(ref_allele, alt_allele)` against the currently-active
+  dbSNP source-version: re-orients the alphabetical-ordering swap victims
+  (~101,918 genuine rows), recovers hom-only `ref==alt` rows by assigning a
+  real ALT from dbSNP (closing finding-005 #1 ordering aspect and #6), and
+  collapses rows whose new canonical key collides with a sibling at the same
+  position. Companion `genome annotate align-tier3-consensus` runs after
+  `merge` to delete the non-canonical-side consensus rows for the
+  strand-flipped duplicates that Scope-A canonicalize leaves as two rows, so
+  Phase 6 reads see exactly one `variant_id` per real biallelic site. Auto
+  pre-mutation snapshot of `genome.duckdb` to `archive/canonicalize/` with
+  `--no-backup` opt-out and a documented restore one-liner. Three-transaction
+  split sidesteps DuckDB's FK enforcement reading *pre-transaction* state:
+  `discrepancies` (whose `call_a_id`/`call_b_id` FK points onto `genotype_calls`)
+  is pre-cleared in its own committed transaction before the
+  `genotype_calls.variant_id` re-point — DuckDB runs that UPDATE as
+  delete+reinsert of each row, which would otherwise trip the parent-side FK —
+  and the old `variants_master` movers are deleted only after the re-point
+  commits. It also re-syncs `variant_id_seq` past the explicitly-allocated
+  survivor ids so the next default-`nextval` ingest can't collide on the PK. No schema or DDL change; **requires re-running
+  `merge` → `align-tier3-consensus` → `refresh-index`** to bring the database
+  to a coherent state (per the reload sequence in `docs/runbooks/annotations.md`).
+  The shared-call concordance rate drops from 1.0000 — this is the deliberate
+  re-lock event finding-018 anticipated, not a regression; see finding-020
+  for the full bedrock anchor table. rsID preservation is an invariant across
+  the collapse: both the new-survivor and reused-survivor paths inherit the best
+  non-NULL rsID across *all* movers landing on a canonical key (lowest
+  `variant_id` wins; a `MIN(old_variant_id)` representative or a NULL-rsID
+  imputed sibling no longer drops a colliding chip mover's rsID), so no rsID is
+  lost to the collapse. The rsID-keyed index match counts hold modulo a small
+  collapse-dedup effect the gate later measured (`gwas_matches` 66,726 → 66,701,
+  −23 from two rows sharing one rsID collapsing to a single survivor;
+  `pharmgkb_matches` 1,737 unchanged — finding-020 recon C). Two new drift
+  identifiers —
+  `survivors_enriched` (reused survivors whose NULL rsID was filled) and
+  `rsid_conflicts` (canonical keys where distinct non-NULL rsIDs collided; the
+  loser is surfaced via a warning, never silently dropped). Strand-flip
+  `variants_master` collapse (genotype_calls supersession) deferred to PR 5.
+  Two doc re-lock corrections land with the rebase onto #66: finding-020's
+  "Concordance re-lock" drops a fabricated "high-0.99x" magnitude bound (the
+  post-canonicalize concordance is gate-measured, not bounded a priori), and
+  finding-005 gains item #9 tracking the `pos_grch37` collapse-inheritance gap
+  (the new-survivor INSERT inherits only the representative's GRCh37 coordinate;
+  fix deferred pending re-liftover). The step-7 re-lock then backfills the
+  finding-020 / CLAUDE.md gate placeholders from the real-data run: a
+  "Post-canon classification model" that closes every merge anchor
+  (`gnomad_matches` 101,501 → 2,796,952, `clinvar_matches` 2,559 → 61,458,
+  `disagreement_resolved` 106 → 1 (final, post-`align-tier3`) and
+  `strand_flip_resolutions` 106 → 2 (merge counter), `imputed_only`
+  2,267,751 → 2,146,324, `concordance` → 0.999776 with `genotype_mismatch` 0);
+  a finding-021 amendment recording the one genuine `rsid_conflicts` that
+  survives the #66 sweep (coalescing retained-and-justified); and new finding-022
+  + finding-005 #10 documenting a ClinVar/GWAS loader version-label / cache-data
+  decoupling (the in-DB version row carries a June label while the loaded data is
+  the May cache — data correct, label wrong; code fix deferred). After VSC-User
+  ran the recons (A confirmed correct unification — 27 distinct palindromic sites;
+  B confirmed the reorient-movers + post-align `disagreement_resolved`=1; C
+  confirmed `gwas_matches` −23), a recon-results pass locked concordance /
+  `both_concordant` / `single_source` / chip-consensus, and a final fill pass
+  landed the last three: `palindromic shared` held at **31** (the het,
+  both-alleles-observed definition — the hom-only-recovery reveal of 6,623 hom
+  palindromic sites is new **finding-023**), `is_rare` 848 → 163,160 /
+  `is_ultrarare` 421 → 103,261, and `chip+imputed overlap` 101,420 → 222,847.
+  **All 18 placeholders are locked and the repo-wide `git grep -nE 'GATE[-]FILL'`
+  is clean** — the PR is no longer placeholder-gated. (#65)
 - Imputation rsID hygiene (finding-021). Phase-4 imputation ingest copied
   Beagle's synthetic `chrom:pos:ref:alt` VCF `ID` (emitted for panel variants with
   no dbSNP rsID) verbatim into `variants_master.rsid`, so the ~2.26M imputed-only

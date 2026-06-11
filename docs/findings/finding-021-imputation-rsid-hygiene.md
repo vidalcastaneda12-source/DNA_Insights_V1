@@ -97,7 +97,9 @@ imputation rsid hygiene only — nothing chip-merge-derived — so they must not
   `rs<n>`; the structural anchors are unmoved.
 - PR-3 re-verification, after PR-3 rebases onto this merged fix: `gwas_matches` →
   66,726, `pharmgkb_matches` → 1,737, `rsid_conflicts` → 0, rsID invariant
-  0-lost.
+  0-lost. **Superseded by the second Amendment below** — the gate measured
+  `gwas_matches` 66,701, `rsid_conflicts` 1 (one genuine collision survives the
+  #66 sweep); `pharmgkb_matches` 1,737 and the rsID invariant held.
 - Deferred (no V1 action): surfacing synthetic-ID provenance is unnecessary — it
   is reconstructable on demand and unused.
 
@@ -125,3 +127,34 @@ residue stays observable in steady state. Recovering these probe IDs to canonica
 rsIDs (`kgp`→`rs`, unwrapping `acom_rs…`) is alias-normalization, deferred to
 `variant_aliases` / PR-4; the ingest predicate `_dbsnp_rsid_or_none` is unchanged
 (it is correct and real-data-confirmed).
+
+## Amendment — one genuine `rsid_conflicts` survives the #66 sweep (PR-3 canonicalize gate)
+
+The Follow-up above predicted PR-3 re-verification would land `rsid_conflicts → 0`
+— reasoning that once #66 NULLed the synthetic `chrom:pos:ref:alt` strings, the
+dominant collision class (a chip swap-victim's real `rs<n>` colliding with an
+imputed survivor's synthetic string) would vanish and leave the coalescing with
+nothing to do. The canonicalize gate confirmed the *dominant* half of that
+prediction and corrected the rest:
+
+- **`rsid_conflicts` = 1, not 0.** #66 removed ~115,700 *synthetic* false-collisions
+  (there the `arg_min` coalescing was choosing between a real `rs<n>` and a
+  coordinate string — never a genuine conflict). But **one genuine collision
+  remains**: a canonicalized key onto which two *distinct real* `rs<n>` values
+  collapse (the `genuine_reorient` class). The coalescing resolves it
+  deterministically (lowest-`variant_id` wins) and the loser is **warned**, never
+  silently dropped (`canonicalize.rsid_conflicts`). This is exactly the case the
+  coalescing exists for — so #66 made it *almost* redundant, not redundant.
+  **Coalescing is retained-and-justified**, answering the open question of whether
+  the #66 sweep obsoleted it.
+- **`gwas_matches` = 66,701, not 66,726.** The rsID-preservation invariant held
+  (post-run rsid set ⊇ pre-run set; zero net rsID loss), but `gwas_matches` still
+  moved −23 vs the pre-canon swept count (66,724) — a *collapse-dedup* effect
+  unrelated to rsID loss: two rows GWAS-matching on the same rsID collapse to one
+  survivor, and the index keeps one row per `variant_id`. Reconciled in
+  finding-020 "recon C", not here. `pharmgkb_matches` held at 1,737.
+
+Net: the #66 fix did its job (synthetic-ID class eliminated, no real rsID lost to
+the synthetic guard), and the residual `rsid_conflicts`=1 is a real, correctly
+handled, genuinely-distinct-rsID collapse — not a regression and not synthetic
+residue.

@@ -372,6 +372,113 @@ def annotate_refresh_aliases(
     )
 
 
+@annotate_app.command("canonicalize-variants")
+def annotate_canonicalize_variants(
+    force: Annotated[  # noqa: FBT002 — typer boolean flag, opt-in
+        bool,
+        typer.Option(
+            "--force",
+            help=(
+                "Bypass the already-canonical fast-path and run the full walk. "
+                "On idempotent re-runs this still writes nothing new (all deltas "
+                "zero); use it as a belt-and-suspenders verification step."
+            ),
+        ),
+    ] = False,
+    no_backup: Annotated[  # noqa: FBT002 — typer boolean flag, opt-in
+        bool,
+        typer.Option(
+            "--no-backup",
+            help=(
+                "Skip the pre-mutation genome.duckdb snapshot. The snapshot is "
+                "the rollback path for a successful-but-wrong backfill; only "
+                "skip it when re-running with an existing snapshot already in "
+                "archive/canonicalize/."
+            ),
+        ),
+    ] = False,
+) -> None:
+    """Canonicalize ``variants_master`` REF/ALT against dbSNP (post-5.7 backfill).
+
+    Re-orients the alphabetical-ordering swap victims and recovers hom-only
+    (``ref==alt``) rows by assigning a real ALT from the currently-active
+    dbSNP source-version. Collapses any rows whose new canonical key collides
+    with a sibling at the same position (re-pointing
+    ``genotype_calls.variant_id`` FKs to the survivor). Closes finding-005 #1
+    (ordering aspect) and #6 (hom-only recovery).
+
+    The downstream rebuilds (``genome merge`` → ``genome annotate
+    align-tier3-consensus`` → ``genome annotate refresh-index``) must run
+    next to bring the database to a fully coherent state. See finding-020.
+    """
+    from genome.annotate.canonicalize import (  # noqa: PLC0415
+        DbsnpNotLoadedError,
+        DerivedTablesNotEmptyError,
+        canonicalize_variants,
+    )
+
+    try:
+        result = canonicalize_variants(force=force, no_backup=no_backup)
+    except DbsnpNotLoadedError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except DerivedTablesNotEmptyError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
+    typer.echo(
+        f"variants_master canonicalized: "
+        f"source_version_id={result.dbsnp_source_version_id} "
+        f"already_canonical={result.already_canonical} "
+        f"rows_reoriented={result.rows_reoriented} "
+        f"rows_recovered_hom_ref={result.rows_recovered_hom_ref} "
+        f"rows_recovered_hom_ref_multialt={result.rows_recovered_hom_ref_multialt} "
+        f"rows_recovered_hom_alt={result.rows_recovered_hom_alt} "
+        f"rows_collapsed={result.rows_collapsed} "
+        f"calls_repointed={result.calls_repointed} "
+        f"new_variant_ids_allocated={result.new_variant_ids_allocated} "
+        f"survivors_flag_updated={result.survivors_flag_updated} "
+        f"survivors_enriched={result.survivors_enriched} "
+        f"rsid_conflicts={result.rsid_conflicts} "
+        f"genuine_variants_after={result.genuine_variants_after} "
+        f"hom_ref_remaining={result.hom_ref_remaining} "
+        f"backup={result.backup_path or 'skipped'}",
+    )
+
+
+@annotate_app.command("align-tier3-consensus")
+def annotate_align_tier3_consensus() -> None:
+    """Delete non-canonical-side consensus rows for tier-3 strand-flip pairs.
+
+    Companion to ``canonicalize-variants``: after ``genome merge`` rebuilds
+    ``consensus_genotypes``, this command identifies pairs of
+    ``variants_master`` rows at the same ``(chrom, pos_grch38)`` whose
+    consensus is ``disagreement_resolved`` (the merge-tier-3 shape) and
+    determines which side matches a dbSNP 4-tuple — the canonical side. The
+    non-canonical-side ``consensus_genotypes`` row is DELETEd so Phase 6
+    pipelines see exactly one ``variant_id`` per real biallelic site, with
+    annotations aligned. Run between ``genome merge`` and ``genome annotate
+    refresh-index``. See PR-3 Q1 alignment refinement.
+    """
+    from genome.annotate.align_tier3 import (  # noqa: PLC0415
+        DbsnpNotLoadedError,
+        align_tier3_consensus,
+    )
+
+    try:
+        result = align_tier3_consensus()
+    except DbsnpNotLoadedError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
+    typer.echo(
+        f"tier-3 consensus aligned: "
+        f"source_version_id={result.dbsnp_source_version_id} "
+        f"pairs_examined={result.pairs_examined} "
+        f"rows_deleted={result.rows_deleted}",
+    )
+
+
 __all__ = [
     "annotate_app",
 ]

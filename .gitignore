@@ -1,6 +1,7 @@
 # Runtime data and archives (never commit)
 data/
 archive/
+*.txt
 
 # Verification scratch — TMPDIR for scripts/verify.sh; cleared each run.
 .verify-tmp/
@@ -58,3 +59,7 @@ Thumbs.db
 .claude/*
 # Slash commands are shared project infrastructure — track them in the repo.
 !.claude/commands/
+hg19ToHg38.over.chain.gz:Zone.Identifier
+hg19ToHg38.over.chain.gz
+genome_Vidal_Castaneda_v5_Full_20260503061119.txt:Zone.Identifier
+AncestryDNA.txt:Zone.Identifier
