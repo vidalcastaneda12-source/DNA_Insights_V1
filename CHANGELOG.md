@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Document `genome status` vs egress-gate divergence for `external_calls_enabled`:
+  `status` prints the load-time `.env`/`Settings` value while every egress path
+  gates on the live `user_preferences` row, so the two can disagree after
+  `genome config set external_calls_enabled true`. Finding-only, no behavior
+  change (finding-024).
 - Fix a drifted view definition in the schema markdown:
   `schema_group_3_derived_analyses.md`'s `pgx_phenotype_drugs_v` joined
   `cpic_guidelines` on `AND cg.is_active`, a column the version-pointer refactor
