@@ -215,11 +215,11 @@ class CanonicalizeResult:
 # ---------------------------------------------------------------------------
 
 
-def _snapshot_filename(dbsnp_version: str | None) -> str:
-    """Build a self-identifying snapshot filename: dbSNP version + UTC timestamp."""
+def _snapshot_filename(dbsnp_version: str | None, *, label: str = "canonicalize") -> str:
+    """Build a self-identifying snapshot filename: operation label + dbSNP version + stamp."""
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    label = dbsnp_version or "unknown"
-    return f"genome.duckdb.pre-canonicalize.dbsnp{label}.{stamp}.bak"
+    version = dbsnp_version or "unknown"
+    return f"genome.duckdb.pre-{label}.dbsnp{version}.{stamp}.bak"
 
 
 def take_snapshot(
@@ -227,8 +227,16 @@ def take_snapshot(
     *,
     archive_root: Path,
     dbsnp_version: str | None,
+    subdir: str = _BACKUP_SUBDIR,
+    label: str = "canonicalize",
 ) -> Path:
-    """Snapshot the live DuckDB file to ``archive/canonicalize/<…>.bak``.
+    """Snapshot the live DuckDB file to ``archive/<subdir>/<…>.bak``.
+
+    Generic pre-mutation snapshot shared by every ``variants_master``-mutating
+    backfill (``canonicalize-variants`` and ``collapse-duplicate-variants``). ``subdir``
+    selects the archive subdirectory and ``label`` is embedded in the filename so
+    the snapshot names the operation that produced it; both default to the
+    canonicalize values so existing callers are unchanged.
 
     Sequence (per the plan's Q3 refinement #1 — checkpointed consistent state):
 
@@ -238,25 +246,26 @@ def take_snapshot(
     3. ``_ensure_owner_only`` to chmod 0600 (decision #6 — the backup inherits
        the same FDE/perms posture as the live file).
 
-    The destination is under ``archive/canonicalize/`` (gitignored snapshots
-    subdir per CLAUDE.md "Common file locations"). Auto-cleanup is manual:
-    finding-020 and the runbook state the operator deletes the snapshot once
-    the backfill is verified merged. Returns the absolute backup path.
+    The destination is under ``archive/<subdir>/`` (gitignored snapshots subdir
+    per CLAUDE.md "Common file locations"). Auto-cleanup is manual: the finding +
+    runbook state the operator deletes the snapshot once the backfill is verified
+    merged. Returns the absolute backup path.
     """
     with duckdb_connection(db_path) as conn:
         conn.execute("CHECKPOINT")
 
-    backup_dir = archive_root / _BACKUP_SUBDIR
+    backup_dir = archive_root / subdir
     backup_dir.mkdir(parents=True, exist_ok=True)
-    backup_path = backup_dir / _snapshot_filename(dbsnp_version)
+    backup_path = backup_dir / _snapshot_filename(dbsnp_version, label=label)
     shutil.copy2(db_path, backup_path)
     _ensure_owner_only(backup_path)
     size = backup_path.stat().st_size
     logger.info(
-        "canonicalize.backup.created",
+        "snapshot.created",
         path=str(backup_path),
         size_bytes=size,
         dbsnp_version=dbsnp_version,
+        label=label,
     )
     return backup_path
 

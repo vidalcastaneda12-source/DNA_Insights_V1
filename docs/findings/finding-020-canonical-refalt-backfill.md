@@ -208,6 +208,22 @@ unrelated calls). The result was the former, so concordance **0.999776 is locked
 
 ### Recon B — canonicalize subsumes tier-3 strand-flip upstream
 
+> **Correction (PR 5b / finding-026, measured).** This section's framing of the
+> single surviving `disagreement_resolved` pair as one of the *"strand-flipped
+> pairs where the two chips stored complementary allele sets"* was **unmeasured and
+> wrong**. PR 5b's read-only measurement identified that pair as
+> **chr4:185229100, a hom-OPPOSITE-strand case** (ancestry `(G,G)` non-canonical,
+> genotype `G/G` + 23andme `(C,T)` canonical, genotype `C/C` — `G/G` complements to
+> `C/C`), *not* a clean complementary-allele-set biallelic pair. The cardinality
+> ("1 pair", `strand_flip_resolutions = 2`) is right; the characterization is not.
+> Moreover, the merge counter saw **only** that pair: ≈684 *other* genuine same-SNP
+> `variants_master` duplicates survive that merge's tier-3 never pairs (chip+imputed
+> swaps/flips and no-call `(N,N)` placeholders — neither is a both-chip-single-source
+> complement pair). The "canonicalize subsumed the strand-flip population" claim is
+> directionally right for the chip+chip tier-3 set but does **not** mean one
+> duplicate survives — see finding-026's measured five-mechanism taxonomy. The
+> deferred PR-5 collapse therefore removes ≈684 rows, not 1.
+
 The 106 → 2 (post-merge) drop is population B: ~104 of the reorient-moved rows
 re-classify to `single_source`, **not** collapsed away (`rows_collapsed` is fully
 consumed by C + A, leaving no room for a collapse explanation). VSC-User's partition

@@ -16,18 +16,23 @@ manageable. This document tracks them so they aren't forgotten.
    *Recommended fix point:* the post-5.7 backfills slot — with dbSNP canonical
    REF/ALT loaded (5.6), a normalization step can consolidate the
    strand-flipped duplicates.
-   *Status:* **partially shipped in PR 3 (finding-020)** — the ordering
-   aspect (the ~101,918 alphabetical-swap victims dominant in finding-018) is
-   canonicalized by `genome annotate canonicalize-variants`. The
-   complement/strand-flip aspect — the 106 tier-3 cases where the two chips
-   stored complementary allele sets at the same position — is **deferred to
-   PR 5 (chrX/strand architecture)** as a sub-item: a full
-   `variants_master` collapse there requires complementing
-   `genotype_calls.allele_1/2` via row-grain supersession, which is the PR 5
-   scope. PR 3 leaves these as two `variants_master` rows; merge tier-3
-   keeps pairing them at the genotype level, and the new
-   `align-tier3-consensus` post-merge step deletes the non-canonical-side
-   consensus so Phase 6 reads see exactly one consensus row per pair.
+   *Status:* **closed — ordering aspect in PR 3 (finding-020), duplicate
+   collapse in PR 5b (finding-026/027).** PR 3's `canonicalize-variants`
+   canonicalized the ordering aspect (the ~101,918 alphabetical-swap victims
+   dominant in finding-018). The residual duplicate aspect was **mis-scoped here
+   as "the 106 tier-3 cases where the two chips stored complementary allele
+   sets"** — that population was dissolved by PR-3 canonicalize + hom-recovery.
+   Read-only measurement (finding-026) found the real post-canon residual is
+   ≈684 duplicates across **five** mechanisms, dominated by **no-call `(N,N)`
+   placeholders (≈661)**, not clean chip+chip strand-flips (of which there are
+   **zero**): 660 no-call repoints + 1 no-call DROP + 10 chip+imputed REF/ALT
+   swaps + 5 chip+imputed strand-flips + 5 hom-opposite-strand (incl. the single
+   chr4 `disagreement_resolved`) + 3 hom-same-strand. PR 5b's
+   `collapse-duplicate-variants` collapses all of them via per-edge
+   reconciliation (repoint / complement via supersession / drop), leaving legit
+   multi-allelics protected; the chip+imputed origin is finding-027. (PR 3 had
+   left these as duplicate rows with `align-tier3-consensus` deleting the
+   non-canonical-side consensus as an interim patch — now a no-op backstop.)
 
 2. **Profile-level QC rollup.** The current `sample_qc` table is
    per-ingestion-run. A profile-level rollup that combines per-source

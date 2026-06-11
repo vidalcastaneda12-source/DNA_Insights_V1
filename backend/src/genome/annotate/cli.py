@@ -480,6 +480,101 @@ def annotate_align_tier3_consensus() -> None:
     )
 
 
+@annotate_app.command("collapse-duplicate-variants")
+def annotate_collapse_duplicate_variants(
+    dry_run: Annotated[  # noqa: FBT002 — typer boolean flag, opt-in
+        bool,
+        typer.Option(
+            "--dry-run",
+            help=(
+                "Identify the actionable duplicate edges and print the per-mechanism "
+                "breakdown WITHOUT mutating. Run this first and confirm it reports the "
+                "expected counts (and zero genotype_mismatch / source_collision) "
+                "before the real collapse."
+            ),
+        ),
+    ] = False,
+    force: Annotated[  # noqa: FBT002 — typer boolean flag, opt-in
+        bool,
+        typer.Option(
+            "--force",
+            help=(
+                "Proceed (snapshot + clear the regenerated downstream rollups) "
+                "even when nothing is actionable. Mirrors canonicalize-variants' "
+                "--force; the collapse itself only runs when an edge is found."
+            ),
+        ),
+    ] = False,
+    no_backup: Annotated[  # noqa: FBT002 — typer boolean flag, opt-in
+        bool,
+        typer.Option(
+            "--no-backup",
+            help=(
+                "Skip the pre-mutation genome.duckdb snapshot. The snapshot is the "
+                "rollback path; only skip it when an existing snapshot is already "
+                "in archive/strand-collapse/."
+            ),
+        ),
+    ] = False,
+) -> None:
+    """Collapse same-SNP duplicate ``variants_master`` rows (closes finding-005 #1).
+
+    Each physical SNP stored as ≥2 rows at one ``(chrom, pos)`` — a no-call ``(N,N)``
+    placeholder, a REF/ALT swap, a strand-flip, or a hom opposite/same-strand row —
+    is collapsed onto one survivor (repoint / complement via row-grain supersession /
+    drop), while legit multi-allelic alts are protected. dbSNP must be loaded. Depends
+    on the PR-5b-pre consensus_v1 chip-no-call fix. Run in the reload sequence:
+    ``canonicalize-variants`` → ``collapse-duplicate-variants`` → ``genome merge`` →
+    ``align-tier3-consensus`` (now a no-op) → ``refresh-index``. See finding-005 #1 +
+    finding-026/027.
+    """
+    from genome.annotate.strand_collapse import (  # noqa: PLC0415
+        DbsnpNotLoadedError,
+        collapse_duplicate_variants,
+    )
+
+    try:
+        result = collapse_duplicate_variants(dry_run=dry_run, force=force, no_backup=no_backup)
+    except DbsnpNotLoadedError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
+    prefix = "[dry-run] " if result.dry_run else ""
+    typer.echo(
+        f"{prefix}duplicate collapse: "
+        f"source_version_id={result.dbsnp_source_version_id} "
+        f"actionable_edges={result.actionable_edges} "
+        f"no_call_repointed={result.no_call_repointed} "
+        f"no_call_dropped={result.no_call_dropped} "
+        f"swaps={result.swaps_collapsed} "
+        f"strandflips={result.strandflips_collapsed} "
+        f"hom_opp={result.hom_opp_collapsed} "
+        f"hom_same={result.hom_same_collapsed} "
+        f"legit_multiallelic_skipped={result.legit_multiallelic_skipped} "
+        f"genotype_mismatch_skipped={result.genotype_mismatch_skipped} "
+        f"source_collision_skipped={result.source_collision_skipped} "
+        f"degenerate_skipped={result.degenerate_skipped}",
+    )
+    if result.dry_run:
+        for edge in result.edges:
+            typer.echo(
+                f"  survivor={edge.survivor_id} ({edge.survivor_ref}/{edge.survivor_alt}) "
+                f"mechanism={edge.mechanism} dead={list(edge.dead_variant_ids)} "
+                f"dead_rsids={list(edge.dead_rsids)} "
+                f"calls_to_complement={edge.calls_complemented}",
+            )
+        return
+
+    typer.echo(
+        f"  calls_complemented={result.calls_complemented} "
+        f"calls_repointed={result.calls_repointed} "
+        f"variants_master_deleted={result.variants_master_deleted} "
+        f"rsid_coalesced={result.rsid_coalesced} "
+        f"rsid_conflicts={result.rsid_conflicts} "
+        f"backup={result.backup_path or 'skipped'}",
+    )
+
+
 __all__ = [
     "annotate_app",
 ]
