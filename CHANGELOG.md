@@ -65,9 +65,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ran the recons (A confirmed correct unification — 27 distinct palindromic sites;
   B confirmed the reorient-movers + post-align `disagreement_resolved`=1; C
   confirmed `gwas_matches` −23), a recon-results pass locked concordance /
-  `both_concordant` / `single_source` / chip-consensus; **3 markers** (4 values:
-  palindromic-shared, is_rare, is_ultrarare, chip+imputed overlap) stay live by
-  design pending VSC-User's capture. (#65)
+  `both_concordant` / `single_source` / chip-consensus, and a final fill pass
+  landed the last three: `palindromic shared` held at **31** (the het,
+  both-alleles-observed definition — the hom-only-recovery reveal of 6,623 hom
+  palindromic sites is new **finding-023**), `is_rare` 848 → 163,160 /
+  `is_ultrarare` 421 → 103,261, and `chip+imputed overlap` 101,420 → 222,847.
+  **All 18 placeholders are locked and the repo-wide `git grep -nE 'GATE[-]FILL'`
+  is clean** — the PR is no longer placeholder-gated. (#65)
 - Imputation rsID hygiene (finding-021). Phase-4 imputation ingest copied
   Beagle's synthetic `chrom:pos:ref:alt` VCF `ID` (emitted for panel variants with
   no dbSNP rsID) verbatim into `variants_master.rsid`, so the ~2.26M imputed-only

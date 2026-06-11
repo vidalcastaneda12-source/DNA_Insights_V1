@@ -204,7 +204,10 @@ recon C — **not** the pre-gate 66,726), `pharmgkb_matches`→1,737 (holds),
 `rsid_conflicts`→**1** (one genuine real-rs#-vs-real-rs# collision survives the #66
 sweep, finding-021 amendment — **not** 0), rsID invariant 0-lost (held). Imputed-only
 **moved** to **2,146,324** (Δ −121,427 == `survivors_enriched`, population C — it is
-**not** the negative anchor an earlier draft assumed). These divergences from the
+**not** the negative anchor an earlier draft assumed). `palindromic shared` holds
+at **31** (the het, both-alleles-observed definition); the post-canon *site-level*
+palindromic count (6,681, incl. hom-only-recovery reveals) is **not** the anchor —
+see finding-023. These divergences from the
 pre-gate predictions *were* the SEMANTIC escalation, and the step-7 review already
 resolved them in finding-020 / finding-021; a re-run that reproduces them is
 correct. A re-run that *re-diverges* from these reconciled values is the new STOP
@@ -215,20 +218,19 @@ numbers backfill the placeholder markers planted across `finding-020` and
 `CLAUDE.md` (each written as the literal word `GATE` joined by a hyphen to
 `FILL`). The full set is **18** markers (the prior "16" undercounted — it predates
 the `survivors_enriched` / `rsid_conflicts` tokens at finding-020:96-97). The
-gate re-lock locked **15** across two passes: the step-7 backfill, then a
+gate re-lock filled all **18** across three passes: the step-7 backfill; a
 recon-results pass that locked concordance / `both_concordant` / `single_source` /
 chip-consensus once VSC-User ran recons A/B/C (A confirmed correct-unification; B
 confirmed the reorient-movers + post-align `disagreement_resolved`=1; C confirmed
-`gwas_matches` −23). **3 markers stay live**, covering the 4 still-uncaptured
-values VSC-User supplies: `palindromic shared`, `is_rare` / `is_ultrarare` (one
-shared marker), and `chip+imputed overlap`. So currently:
+`gwas_matches` −23); and a final fill pass for the last 3 markers
+(`palindromic shared` held at 31 — see finding-023; `is_rare` 163,160 /
+`is_ultrarare` 103,261; `chip+imputed overlap` 222,847). The check is now clean:
 
 ```
 git grep -nE 'GATE[-]FILL'
-# → prints exactly 3 markers (NOT clean yet — by design). PR #65 stays gated
-#   until VSC-User supplies the 3 uncaptured counts, at which point this must
-#   print nothing before the squash. Any UNEXPECTED hit (a value that was
-#   supposed to lock but didn't) = STOP.
+# → prints nothing across the whole tree. All 18 gate numbers are locked; the PR
+#   is no longer placeholder-gated. Any hit = an un-gated number about to ship into
+#   a durable doc — STOP and fill or remove it before squashing.
 ```
 
 ## When the protocol fails
