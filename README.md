@@ -207,12 +207,10 @@ pytest
 
 ## Status
 
-Phases 1–4 complete (foundation, ingestion, merge & discrepancy detection,
-local imputation via Beagle 5.5). Phase 5 (reference annotation loaders) is
-in progress: sub-phases 5.0 (scaffold), 5.1a (PharmGKB), 5.1b (CPIC),
-5.2 (ClinVar), 5.3 (GWAS Catalog), 5.4 (PGS Catalog metadata),
-5.5 (gnomAD filtered), and 5.6 (dbSNP filtered) have shipped;
-5.7 (`variant_annotations_index` refresh) is the only remaining sub-phase
-and closes the phase. See
-`ROADMAP.md` for the full sub-phase breakdown and `CHANGELOG.md` for
-release-level detail.
+Phases 1–5 complete (foundation, ingestion, merge & discrepancy detection, local
+imputation via Beagle 5.5, and the reference annotation loaders — Phase 5 closed with
+the `variant_annotations_index` rollup, sub-phase 5.7). The project is now executing a
+short pre-Phase-6 cleanup sequence (PRs 1–3 landed; PR 4 next) that clears the
+dbSNP-dependent backfills and the deferred-item backlog before the Phase 6 analysis
+pipelines begin. See `ROADMAP.md` for the sub-phase / PR breakdown and `CHANGELOG.md`
+for release-level detail.

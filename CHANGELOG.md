@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Docs/comment hygiene for the post-5.7 / pre-Phase-6 frontier: `ROADMAP.md`
+  now states Phase 5 is closed and replaces the old "Post-5.7 backfills" slot
+  with the formalized 13-PR "Pre-Phase-6 sequence" (the single source of truth
+  for the cleanup run, with the former not-phase-bound follow-ups folded in as
+  numbered PRs); `README.md` "Status" advances to Phases 1–5 complete; and the
+  `canonicalize.py` Phase-4 mutation comment is corrected from "TWO transactions"
+  to "three", matching its own module/function docstrings. Docs + one comment
+  only — no schema, DDL, data, or code-logic change.
 - Canonical REF/ALT backfill + hom-only recovery — the second post-5.7
   backfill (finding-020). New `genome annotate canonicalize-variants` rewrites
   `variants_master.(ref_allele, alt_allele)` against the currently-active

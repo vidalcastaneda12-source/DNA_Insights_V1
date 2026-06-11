@@ -2,7 +2,7 @@
 
 Phases are sequential. Do not start phase N+1 until phase N's verification passes.
 
-**Current phase:** Phase 5 (reference annotation loaders) — in progress.
+**Current phase:** Phase 5 closed; executing the pre-Phase-6 cleanup sequence (PRs 1–3 landed, PR 4 next) before Phase 6 begins.
 
 ## Phase 1 — Foundation (this is the bootstrap)
 
@@ -72,26 +72,104 @@ Sub-phase status:
 - [x] 5.6 — dbSNP filtered (surrogate BIGINT PKs PR #57; filtered loader PR #59)
 - [x] 5.7 — `variant_annotations_index` refresh (closes Phase 5; PR #62). Joins ClinVar / GWAS / gnomAD / PharmGKB into one sparse row per variant via `genome annotate refresh-index`. Ships with the VEP columns + `is_acmg_sf` NULL (Phase 6's VEP runner / ACMG SF detection backfill them via a later rollup refresh) and `is_curated` from ClinVar/PharmGKB only (CPIC excluded at variant level — no gene→variant mapping yet).
 
-Follow-ups (not phase-bound; slot when convenient):
-- PharmGKB / CPIC `already_current=True` cosmetic cleanup (finding-010 #12)
-- HEAD-request-failure version-label fallback behavior — capture as its own finding (finding-010 #13)
-- Cleanup of orphan rows under superseded `source_version_id`s (finding-010 #14)
-- Cross-source generalization of the version-pointer pattern (finding-010 #15)
-- `MAPPED_TRAIT_URI` truncation entry for finding-005 (deferred from sub-phase 5.3)
+Follow-ups (not phase-bound): the version-pointer / truncation follow-ups formerly
+listed here are now numbered PRs in the pre-Phase-6 sequence — PharmGKB/CPIC cosmetic
+cleanup + `MAPPED_TRAIT_URI` (finding-010 #12) → PR 8, orphan-row cleanup procedure
+(finding-010 #14) → PR 9, HEAD-failure version-label policy (finding-010 #13) → PR 10.
+The one remaining non-actionable item, cross-source generalization of the version-pointer
+pattern (finding-010 #15), is tracked under "Deliberately deferred" in that sequence.
 
 Deferred to later phases:
-- Genes / traits / pathways dictionary tables — primarily serve insight generation and rendering; defer to Phase 7. The loaders we ship in Phase 5 carry gene symbols and trait IDs inline, so the index does not need the dictionaries to do its joins.
+- Genes / traits / pathways dictionary tables — primarily serve insight generation and rendering; defer to Phase 7. The loaders we ship in Phase 5 carry gene symbols and trait IDs inline, so the index does not need the dictionaries to do its joins. (The minimal FK-satisfying genes seed — gene symbols only, enough to unblock the four NOT NULL genes FKs — lands earlier as PR 6 in the pre-Phase-6 sequence; only the full genes / traits / pathways dictionaries with descriptions and rendering metadata defer to Phase 7.)
 
 **Verification:** all seven annotation source loaders complete (ClinVar, GWAS Catalog, PharmGKB, CPIC, PGS Catalog metadata, gnomAD, dbSNP); `variant_annotations_index` populated with the expected per-variant join across them (VEP columns NULL pending Phase 6's VEP runner); queries against `variant_full_v` view return joined annotations.
 
-## Post-5.7 backfills
+## Pre-Phase-6 sequence
 
-Re-derivations of `variants_master` / `consensus_genotypes` content enabled by the loaded dbSNP build (5.6). Not loaders, not analyses — they slot after 5.7 closes Phase 5 and before the Phase 6 analyses begin. Gated on dbSNP canonical REF/ALT, and on `variant_aliases` being populated (5.6 PR B shipped `dbsnp_annotations` only and left `variant_aliases` empty — see finding-016 #8; these backfills populate and consume it).
+**Status:** in progress — PRs 1–3 landed (#63, #64, #65); PR 4 is next.
 
-- [x] Canonical REF/ALT for strand-flip dedupe (finding-005 #1) — **ordering aspect**; `genome annotate canonicalize-variants` + companion `genome annotate align-tier3-consensus` (finding-020). Strand-flip `variants_master` collapse (the ~106 tier-3 pairs that need `genotype_calls` allele complementing via supersession) is deferred to PR 5; finding-005 #1 tracks it as a deferred sub-item.
-- [x] `variant_aliases` population from dbSNP RsMergeArch — `genome annotate refresh-aliases` (finding-019). The data dependency for the item below; attaches to the current dbSNP epoch (no pointer flip).
-- Tier-2 rsID matching via `variant_aliases` (finding-005 #4) — consumes the populated map above
-- [x] Hom-only recovery via canonical REF/ALT (finding-005 #6) — shipped together with the canonicalize step above (same `genome annotate canonicalize-variants` command; mapping_kind `hom_ref_recover` / `hom_ref_recover_multialt` / `hom_alt_recover`).
+A 13-PR run that clears every dbSNP-dependent backfill, deferred-cleanup item,
+and FK blocker before the Phase 6 analyses begin, so Phase 6 starts with no open
+deferred items. Replaces the former "Post-5.7 backfills" slot and absorbs the
+non-phase-bound follow-ups previously tracked under Phase 5. Sequence positions
+("PR N") are stable references and are distinct from GitHub PR numbers.
+
+**Backfills cluster** — data re-derivation of `variants_master` / `consensus_genotypes`
+content, gated on the loaded dbSNP build (5.6) and on `variant_aliases` being populated
+(the 5.6 loader shipped `dbsnp_annotations` only and left `variant_aliases` empty —
+finding-016 #8):
+
+- [x] **PR 1** — Pre-Phase-6 cleanup (docs + operational): off-by-one phase-number
+  docstrings, the `annotations.md` "after a schema rebuild" reload sequence (gnomAD/
+  dbSNP/refresh-index steps were missing), a hard-fail BGZF-EOF ingest guard
+  (finding-008), and a `verify.sh` TMPDIR prelude. Docs/ops only. (#63)
+- [x] **PR 2** — `variant_aliases` population from dbSNP `RsMergeArch` via
+  `genome annotate refresh-aliases` (finding-019). Fills the table the 5.6 loader left
+  empty (finding-016 #8); attaches to the current dbSNP `source_version_id` (no pointer
+  flip). The data dependency for PR 4. (#64)
+- [x] **PR 3** — Canonical REF/ALT backfill + hom-only recovery + tier-3 consensus
+  align (finding-020). `genome annotate canonicalize-variants` re-orients the
+  alphabetical-ordering swap victims, recovers hom-only `ref==alt` rows from dbSNP,
+  collapses same-canonical-key siblings, and repoints `genotype_calls` FKs; companion
+  `genome annotate align-tier3-consensus` runs after `merge`. Closes finding-005 #1
+  (ordering aspect) and #6. Deliberate concordance re-lock to 0.999776 (finding-018
+  anticipated this; not a regression). The strand-flip `variants_master` collapse is
+  deferred to PR 5. (#65)
+- [ ] **PR 4** — Tier-2 rsID matching in `refresh-index`, consuming the `variant_aliases`
+  map from PR 2 (finding-005 #4).  **← next**
+
+**Remaining cleanup** — clears the deferred backlog so Phase 6 opens clean:
+
+- [ ] **PR 5** — chrX resolution, Option B (sex-aware non-PAR/PAR regions; finding-008)
+  **+** the deferred strand-flip `variants_master` collapse: the tier-3 strand-flipped
+  pairs that Scope-A canonicalize (PR 3) leaves as two rows, requiring `genotype_calls`
+  allele complementing via supersession (finding-005 #1, deferred sub-item).
+- [ ] **PR 6** — Minimal `genes` seed, Option A: the gene-symbol union of the
+  ACMG SF v3.x, PGx, and carrier gene lists. Enough rows to satisfy the
+  `NOT NULL REFERENCES genes(gene_symbol)` FKs on `derived_pgx_phenotypes`,
+  `derived_carrier_findings`, `derived_acmg_sf_findings`, and `derived_compound_het`,
+  which otherwise block every Phase 6 insert into those tables. This is the
+  FK-satisfying subset only — the full `genes` / `traits` / `pathways` dictionaries
+  (descriptions, rendering metadata) remain deferred to Phase 7.
+- [ ] **PR 7** — finding-015 orphan gnomAD cleanup, **Option C**: one-off
+  `DELETE` of the pre-existing orphan `annotation_source_versions` rows (gnomAD
+  v6/v7/v8/v10, zero `gnomad_frequencies` references each). Distinct from PR #53, which
+  shipped finding-015 Option B (loader hardening to prevent *future* orphans) but
+  deliberately left these rows in place.
+- [ ] **PR 8** — Deferred docs/cosmetic batch: the `MAPPED_TRAIT_URI` truncation finding
+  entry (finding-005, deferred from 5.3), the imputation docstring filename fix, and the
+  PharmGKB/CPIC `already_current=True` cosmetic cleanup (finding-010 #12).
+- [ ] **PR 9** — finding-010 #14: orphan-row cleanup *procedure* for rows under
+  superseded `source_version_id`s, plus a runbook entry (covers `variant_aliases`
+  orphans too). General/ongoing, vs. PR 7's one-off gnomAD-specific delete.
+- [ ] **PR 10** — finding-010 #13: HEAD-request-failure version-label policy — write
+  its own finding, decide refuse-vs-fallback, implement.
+- [ ] **PR 11** — finding-008: `register-existing-result` CLI command, collapsing
+  the full-archive rebuild workflow.
+- [ ] **PR 12** — Top-level CLI test module for `init` / `status` / `config get|set` /
+  `version` (audit item 3.2; currently uncovered).
+- [ ] **PR 13** — gnomAD total-reopen drift sentinel on the `gnomad.refresh.complete`
+  event (finding-012 #12).
+
+**Out-of-sequence fix that landed mid-run** (not a numbered slot):
+
+- [x] **#66** — Imputation rsID hygiene (finding-021): a strict `^rs[0-9]+$` ingest
+  predicate plus a standalone `genome imputation normalize-rsids` sweep, NULLing the
+  ~2.26M synthetic Beagle `chr:pos:ref:alt` rsIDs that were the root cause of PR 3's
+  rsID-loss. Merged between #64 and #65; PR 3 was rebased onto it before landing.
+
+**Deliberately deferred** — NOT in the sequence; each is gated on a future signal that
+hasn't arrived, tracked in findings for when it does:
+
+- Cross-source generalization of the version-pointer pattern (finding-010 #15)
+- Generalize the hash-match fallback into a shared helper
+- Hash-as-canonical-identity refactor
+- `annotate inspect --source URL` schema-inspection helper
+
+**Phase 6 entry is gated on:** PRs 4–6 in particular (tier-2 rsID matching, chrX
+Option B, minimal `genes` seed), plus the locked conventions — supersession-over-update,
+operation-level provenance without schema changes, and the PyArrow / INSERT-SELECT
+bulk-load pattern.
 
 ## Phase 6 — Analysis pipelines
 - Load `pgs_score_weights` (per-variant PGS weights, overlapping-only per locked decision #5) → PRS computation against PGS Catalog
