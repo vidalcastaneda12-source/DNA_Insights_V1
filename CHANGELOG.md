@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- PR 4 (pre-Phase-6): tier-2 rsID matching in `genome annotate refresh-index`.
+  The GWAS Catalog and PharmGKB (rsID-keyed) index legs now canonicalize both the
+  user-side and source-side rsIDs through the dbSNP `variant_aliases` merge map
+  before joining, so variants carrying a merged-away rsID match annotations keyed
+  on the current rsID (and vice-versa). Real-data: `gwas_matches` 66,701 → 66,764,
+  `pharmgkb_matches` 1,737 → 1,738 (64 variants recovered); coord-keyed counts
+  unchanged. Adds dbSNP to the index `refresh_versions` provenance and a
+  `tier2_rsid_lifts` diagnostic. Closes finding-005 #4 (finding-025, #70).
 - Document `genome status` vs egress-gate divergence for `external_calls_enabled`:
   `status` prints the load-time `.env`/`Settings` value while every egress path
   gates on the live `user_preferences` row, so the two can disagree after

@@ -194,6 +194,18 @@ SELECT
 FROM variant_annotations_index;
 ```
 
+**PR 4 (tier-2 rsID matching, finding-025) re-locks the rsid-keyed anchors only.**
+`gwas_matches` **66,701 → 66,764** (+63) and `pharmgkb_matches` **1,737 → 1,738**
+(+1); `row_count` **2,824,229 → 2,824,236** (+7). The coord-keyed anchors
+(`gnomad_matches` 2,796,952 / `clinvar_matches` 61,458 / `is_rare` 163,160 /
+`is_ultrarare` 103,261) **must not move** — rsID merges don't touch a coordinate
+join, so any movement is a STOP. Pre-run, two integrity checks on the active
+dbSNP alias map must both be 0 (single-hop terminal-survivor; one survivor per
+alias), and the exact per-leg delta is pre-derivable as canonical-match-set −
+raw-match-set at variant grain (a tens-of-thousands rise = over-collapse = STOP).
+`refresh-index` ~120 s here is commit-dominated (2.8M-row rebuild), not a PR-4
+regression.
+
 Tripwires (gate-measured and reconciled — these are now the *expected* values, not
 open escalations): concordance drops to **0.999776**, driven entirely by 27
 palindromic `strand_ambiguous` no-calls with `genotype_mismatch`=0 (finding-020

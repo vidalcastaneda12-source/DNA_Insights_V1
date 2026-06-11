@@ -65,10 +65,19 @@ _VARIANT_LINKABLE_SOURCES: Final[tuple[str, ...]] = (
 )
 """The four sources that contribute a column to ``variant_annotations_index``.
 
-PGS Catalog (score-level) and dbSNP (rsID canonicalization via the still-empty
-``variant_aliases``) are loaded but contribute no rollup column, so they are
-absent here. ``refresh_versions`` records only the sources that actually feed
-the index.
+PGS Catalog (score-level) contributes no rollup column, so it is absent here.
+dbSNP contributes no column either, but its ``variant_aliases`` map now drives
+tier-2 rsID matching on the GWAS/PharmGKB legs (finding-005 #4 / finding-019),
+so its version is captured for provenance via :data:`_PROVENANCE_SOURCES`.
+"""
+
+_PROVENANCE_SOURCES: Final[tuple[str, ...]] = (*_VARIANT_LINKABLE_SOURCES, "dbsnp")
+"""Sources whose active version the index build depends on (for ``refresh_versions``).
+
+The four column contributors plus dbSNP: tier-2 rsID matching resolves both the
+user-side and source-side rsIDs through the dbSNP-epoch ``variant_aliases`` map,
+so two index builds under different dbSNP pointers can differ. Recording dbSNP's
+version keeps the per-row ``refresh_versions`` snapshot reproducible.
 """
 
 # The build statement. Four per-source rollup CTEs (each unique on
@@ -87,7 +96,33 @@ INSERT INTO variant_annotations_index (
     has_pgx, pgx_drug_count, pgx_drugs,
     is_acmg_sf, is_curated, last_refreshed, refresh_versions
 )
-WITH clinvar_roll AS (
+WITH alias_map AS (
+    -- Tier-2 rsID merge map (finding-005 #4 / finding-019), filtered to the
+    -- active dbSNP epoch via the annotation_sources pointer. GROUP BY makes the
+    -- map provably 1:1 on alias_rsid even though the table carries no UNIQUE
+    -- constraint there (the loader dedups at write time, but that is a runtime
+    -- invariant, not a DB guarantee); ANY_VALUE is therefore deterministic.
+    -- Single-hop resolution is complete because current_rsid is dbSNP's
+    -- pre-collapsed transitive survivor (finding-019: rsCurrent, not rsLow).
+    -- When dbSNP is unloaded this CTE is empty and both rsID legs below reduce
+    -- exactly to the prior tier-1 join vm.rsid = source.rsid (graceful degrade).
+    SELECT alias_rsid, ANY_VALUE(current_rsid) AS current_rsid
+    FROM variant_aliases va
+    JOIN annotation_sources va_src
+        ON va_src.source_db = 'dbsnp'
+       AND va_src.current_source_version_id = va.source_version_id
+    GROUP BY alias_rsid
+),
+vm_canon AS (
+    -- variants_master with each rsID canonicalized to its merge survivor.
+    -- Non-rs / synthetic / NULL rsIDs find no alias and pass through unchanged.
+    SELECT vm.variant_id,
+           COALESCE(am.current_rsid, vm.rsid) AS canon_rsid
+    FROM variants_master vm
+    LEFT JOIN alias_map am ON am.alias_rsid = vm.rsid
+    WHERE vm.rsid IS NOT NULL
+),
+clinvar_roll AS (
     SELECT
         vm.variant_id,
         arg_max(
@@ -123,7 +158,7 @@ WITH clinvar_roll AS (
 ),
 gwas_roll AS (
     SELECT
-        vm.variant_id,
+        vmc.variant_id,
         COUNT(DISTINCT gw.trait_name) AS gwas_trait_count,
         MIN(gw.p_value) AS gwas_min_p_value,
         list_sort(list_distinct(
@@ -134,9 +169,10 @@ gwas_roll AS (
     JOIN annotation_sources gw_src
         ON gw_src.source_db = 'gwas_catalog'
        AND gw_src.current_source_version_id = gw.source_version_id
-    JOIN variants_master vm
-        ON vm.rsid = gw.rsid
-    GROUP BY vm.variant_id
+    LEFT JOIN alias_map gam ON gam.alias_rsid = gw.rsid
+    JOIN vm_canon vmc
+        ON vmc.canon_rsid = COALESCE(gam.current_rsid, gw.rsid)
+    GROUP BY vmc.variant_id
 ),
 gnomad_roll AS (
     SELECT
@@ -166,7 +202,7 @@ gnomad_roll AS (
 ),
 pharmgkb_roll AS (
     SELECT
-        vm.variant_id,
+        vmc.variant_id,
         COUNT(DISTINCT pg.drug_name) AS pgx_drug_count,
         list_sort(list_distinct(
             array_agg(pg.drug_name) FILTER (WHERE pg.drug_name IS NOT NULL)
@@ -175,10 +211,11 @@ pharmgkb_roll AS (
     JOIN annotation_sources pg_src
         ON pg_src.source_db = 'pharmgkb'
        AND pg_src.current_source_version_id = pg.source_version_id
-    JOIN variants_master vm
-        ON vm.rsid = pg.rsid
+    LEFT JOIN alias_map pam ON pam.alias_rsid = pg.rsid
+    JOIN vm_canon vmc
+        ON vmc.canon_rsid = COALESCE(pam.current_rsid, pg.rsid)
     WHERE pg.rsid IS NOT NULL
-    GROUP BY vm.variant_id
+    GROUP BY vmc.variant_id
 ),
 all_variants AS (
     SELECT variant_id FROM clinvar_roll
@@ -233,6 +270,19 @@ SELECT
 FROM variant_annotations_index
 """
 
+_TIER2_LIFTS_SQL: Final = """
+SELECT COUNT(DISTINCT vai.variant_id)
+FROM variant_annotations_index vai
+JOIN variants_master vm
+    ON vm.variant_id = vai.variant_id
+JOIN variant_aliases va
+    ON va.alias_rsid = vm.rsid
+JOIN annotation_sources va_src
+    ON va_src.source_db = 'dbsnp'
+   AND va_src.current_source_version_id = va.source_version_id
+WHERE vai.gwas_trait_count > 0 OR vai.has_pgx
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class IndexRefreshResult:
@@ -244,7 +294,13 @@ class IndexRefreshResult:
     columns: ``clinvar``/``gwas`` from their count columns, ``gnomad`` from
     ``af_global IS NOT NULL``, ``pharmgkb`` from ``has_pgx`` (exact).
     ``refresh_versions`` is the pre-serialization ``{source_db: version}``
-    snapshot stamped on every row.
+    snapshot stamped on every row. ``tier2_rsid_lifts`` is a direction-1
+    path-fired sentinel — indexed variants whose own rsID is a merged-away dbSNP
+    alias and that carry a GWAS/PharmGKB annotation. It proves the tier-2 path
+    fired but is **not** the recovered-variant count and is not a clean bound on
+    it: it misses direction-2 lifts (where the *source* carried the stale rsID)
+    and counts any direction-1 variant that already matched under tier-1. The
+    recovered count is the per-leg ``*_matches`` delta vs the prior build.
     """
 
     row_count: int
@@ -253,6 +309,7 @@ class IndexRefreshResult:
     gnomad_matches: int
     pharmgkb_matches: int
     curated_count: int
+    tier2_rsid_lifts: int
     refresh_versions: dict[str, str]
     elapsed_ms: int
 
@@ -266,7 +323,7 @@ def _collect_refresh_versions(conn: DuckDBPyConnection) -> dict[str, str]:
     actually feed this build.
     """
     versions: dict[str, str] = {}
-    for source_db in _VARIANT_LINKABLE_SOURCES:
+    for source_db in _PROVENANCE_SOURCES:
         current = get_current_version(conn, source_db)
         if current is not None:
             versions[source_db] = current.version
@@ -290,6 +347,21 @@ def _summarize_index(conn: DuckDBPyConnection) -> tuple[int, int, int, int, int,
         int(row[4]),
         int(row[5]),
     )
+
+
+def _count_tier2_lifts(conn: DuckDBPyConnection) -> int:
+    """Count indexed variants carrying a merged-away rsID with an rsID annotation.
+
+    Direction-1 path-fired sentinel (see :class:`IndexRefreshResult`): distinct
+    index variants whose own rsID is a merged-away alias under the active dbSNP
+    epoch and that carry a GWAS or PharmGKB annotation. ``> 0`` proves the
+    tier-2 path fired. It is **not** the recovered-variant count: it excludes
+    direction-2 lifts (source-side stale rsID) and includes any direction-1
+    variant that already matched under tier-1. Returns 0 when
+    dbSNP/``variant_aliases`` is absent (the alias join yields no rows).
+    """
+    row = conn.execute(_TIER2_LIFTS_SQL).fetchone()
+    return int(row[0]) if row is not None else 0
 
 
 def refresh_index(
@@ -344,6 +416,7 @@ def refresh_index(
             pharmgkb_matches,
             curated_count,
         ) = _summarize_index(active_conn)
+        tier2_rsid_lifts = _count_tier2_lifts(active_conn)
 
     elapsed_ms = int((time.monotonic() - started) * 1000)
     log.info(
@@ -354,6 +427,7 @@ def refresh_index(
         gnomad_matches=gnomad_matches,
         pharmgkb_matches=pharmgkb_matches,
         curated_count=curated_count,
+        tier2_rsid_lifts=tier2_rsid_lifts,
         versions=versions,
         elapsed_ms=elapsed_ms,
     )
@@ -364,6 +438,7 @@ def refresh_index(
         gnomad_matches=gnomad_matches,
         pharmgkb_matches=pharmgkb_matches,
         curated_count=curated_count,
+        tier2_rsid_lifts=tier2_rsid_lifts,
         refresh_versions=versions,
         elapsed_ms=elapsed_ms,
     )

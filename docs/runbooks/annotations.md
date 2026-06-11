@@ -140,8 +140,9 @@ re-derives `consensus_genotypes` from the now-canonical variants;
 `align-tier3-consensus` deletes the non-canonical-side consensus rows
 for the strand-flipped duplicates that Scope-A canonicalize leaves as
 two rows; `refresh-index` rolls up the four variant-linkable sources
-(ClinVar, GWAS, gnomAD, PharmGKB) through their version pointers, so
-it runs last. `dbsnp` reads only `variants_master` and is
+(ClinVar, GWAS, gnomAD, PharmGKB) through their version pointers —
+resolving merged-away rsIDs on the GWAS/PharmGKB legs through
+`variant_aliases` (tier-2, finding-025) — so it runs last. `dbsnp` reads only `variants_master` and is
 order-independent among the loaders.
 
 The annotation refreshes are idempotent on
@@ -1736,7 +1737,14 @@ with REF/ALT swapped (un-canonicalized REF/ALT, finding-005 #1). This is
 expected, not a regression: re-running `refresh-index` after the post-5.7
 canonical-REF/ALT backfill is expected to materially raise the coord-keyed
 counts; capture and re-lock then. The rsid-keyed counts (GWAS, PharmGKB) are
-unaffected by REF/ALT and are stable now.
+unaffected by REF/ALT.
+
+**Tier-2 rsID matching (PR 4, finding-025)** is the separate event that lifts the
+rsid-keyed counts: `refresh-index` now resolves merged-away rsIDs on both the user
+and source sides through the dbSNP `variant_aliases` map, so `gwas_matches`
+66,701 → 66,764 and `pharmgkb_matches` 1,737 → 1,738 (coord-keyed counts
+unchanged). `refresh-aliases` must have populated `variant_aliases` first — it
+precedes `refresh-index` in the reload sequence above.
 
 **Troubleshooting.**
 
