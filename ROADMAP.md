@@ -2,7 +2,7 @@
 
 Phases are sequential. Do not start phase N+1 until phase N's verification passes.
 
-**Current phase:** Phase 5 closed; executing the pre-Phase-6 cleanup sequence (PRs 1–3 landed, PR 4 next) before Phase 6 begins.
+**Current phase:** Phase 5 closed; executing the pre-Phase-6 cleanup sequence (PRs 1–4 landed, PR 5 next) before Phase 6 begins.
 
 ## Phase 1 — Foundation (this is the bootstrap)
 
@@ -86,7 +86,7 @@ Deferred to later phases:
 
 ## Pre-Phase-6 sequence
 
-**Status:** in progress — PRs 1–3 landed (#63, #64, #65); PR 4 is next.
+**Status:** in progress — PRs 1–4 landed (#63, #64, #65, #70); PR 5 is next.
 
 A 13-PR run that clears every dbSNP-dependent backfill, deferred-cleanup item,
 and FK blocker before the Phase 6 analyses begin, so Phase 6 starts with no open
@@ -115,12 +115,14 @@ finding-016 #8):
   (ordering aspect) and #6. Deliberate concordance re-lock to 0.999776 (finding-018
   anticipated this; not a regression). The strand-flip `variants_master` collapse is
   deferred to PR 5. (#65)
-- [ ] **PR 4** — Tier-2 rsID matching in `refresh-index`, consuming the `variant_aliases`
-  map from PR 2 (finding-005 #4).  **← next**
+- [x] **PR 4** — Tier-2 rsID matching in `refresh-index`, consuming the `variant_aliases`
+  map from PR 2 (finding-005 #4). Both user-side and source-side rsIDs canonicalize
+  through the dbSNP alias map; real-data lift `gwas_matches` 66,701→66,764 /
+  `pharmgkb_matches` 1,737→1,738, coord-keyed counts unchanged (finding-025). (#70)
 
 **Remaining cleanup** — clears the deferred backlog so Phase 6 opens clean:
 
-- [ ] **PR 5** — chrX resolution, Option B (sex-aware non-PAR/PAR regions; finding-008)
+- [ ] **PR 5** — chrX resolution, Option B (sex-aware non-PAR/PAR regions; finding-008)  **← next**
   **+** the deferred strand-flip `variants_master` collapse: the tier-3 strand-flipped
   pairs that Scope-A canonicalize (PR 3) leaves as two rows, requiring `genotype_calls`
   allele complementing via supersession (finding-005 #1, deferred sub-item).

@@ -227,6 +227,46 @@ def _seed_cpic(
     )
 
 
+def _seed_alias(
+    conn: DuckDBPyConnection,
+    sv_id: int,
+    *,
+    alias_id: int,
+    alias_rsid: str,
+    current_rsid: str,
+) -> None:
+    """Insert one ``variant_aliases`` row (dbSNP rsID merge map; tier-2)."""
+    conn.execute(
+        """
+        INSERT INTO variant_aliases
+            (alias_id, alias_rsid, current_rsid, alias_type,
+             source_version_id, retrieval_date)
+        VALUES (?, ?, ?, 'merged', ?, CURRENT_TIMESTAMP)
+        """,
+        [alias_id, alias_rsid, current_rsid, sv_id],
+    )
+
+
+def _activate_dbsnp_aliases(
+    conn: DuckDBPyConnection,
+    *,
+    aliases: Sequence[tuple[str, str]],
+    version: str = "157",
+    hash_char: str = "f",
+) -> int:
+    """Seed ``variant_aliases`` rows under a fresh dbSNP version and activate it.
+
+    ``aliases`` is a sequence of ``(alias_rsid, current_rsid)`` pairs. Returns the
+    dbSNP ``source_version_id``. dbSNP's two tables share one ``annotation_sources``
+    pointer, so activating via ``dbsnp_annotations`` also governs ``variant_aliases``.
+    """
+    sv = _new_version(conn, source_db="dbsnp", version=version, hash_char=hash_char)
+    for alias_id, (alias_rsid, current_rsid) in enumerate(aliases, start=1):
+        _seed_alias(conn, sv, alias_id=alias_id, alias_rsid=alias_rsid, current_rsid=current_rsid)
+    _activate(conn, source_db="dbsnp", table="dbsnp_annotations", sv_id=sv)
+    return sv
+
+
 def _fetch_index_rows(conn: DuckDBPyConnection) -> list[dict[str, Any]]:
     """Return every ``variant_annotations_index`` row as a name→value dict.
 
@@ -946,3 +986,191 @@ def test_refresh_index_opens_own_connection(
     with duckdb_connection(read_only=True) as conn:
         rows = _fetch_index_rows(conn)
     assert len(rows) == 1
+
+
+# ---------------------------------------------------------------------------
+# Tier-2 rsID matching — resolve merged-away rsIDs through variant_aliases
+# (PR 4 / finding-005 #4 / finding-019). Only the GWAS + PharmGKB (rsid-keyed)
+# legs are affected; ClinVar / gnomAD (coord-keyed) are untouched.
+# ---------------------------------------------------------------------------
+
+
+def test_tier2_direction1_user_stale_rsid_lifts_gwas(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """User carries a merged-away rsID; GWAS row carries the survivor → lift."""
+    init_databases()
+    with duckdb_connection() as conn:
+        _seed_variant(conn, 1, rsid="rs111")  # stale (merged-away) rsID
+        _activate_dbsnp_aliases(conn, aliases=[("rs111", "rs222")])
+        gw = _new_version(conn, source_db="gwas_catalog", version="gw1", hash_char="b")
+        _seed_gwas(conn, gw, association_id=1, rsid="rs222", trait_name="Height", p_value=1e-8)
+        _activate(conn, source_db="gwas_catalog", table="gwas_catalog_associations", sv_id=gw)
+        result = refresh_index(conn)
+        rows = _fetch_index_rows(conn)
+
+    assert len(rows) == 1
+    assert rows[0]["variant_id"] == 1
+    assert rows[0]["gwas_trait_count"] == 1  # 0 under tier-1 (rs111 != rs222)
+    assert rows[0]["gwas_strongest_trait"] == "Height"
+    assert result.tier2_rsid_lifts == 1
+
+
+def test_tier2_direction1_user_stale_rsid_lifts_pharmgkb(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """Direction-1 lift on the PharmGKB leg: has_pgx + is_curated flip true."""
+    init_databases()
+    with duckdb_connection() as conn:
+        _seed_variant(conn, 1, rsid="rs111")
+        _activate_dbsnp_aliases(conn, aliases=[("rs111", "rs222")])
+        pg = _new_version(conn, source_db="pharmgkb", version="pg1", hash_char="d")
+        _seed_pharmgkb(conn, pg, pharmgkb_id=1, rsid="rs222", drug_name="warfarin")
+        _activate(conn, source_db="pharmgkb", table="pharmgkb_annotations", sv_id=pg)
+        result = refresh_index(conn)
+        rows = _fetch_index_rows(conn)
+
+    assert len(rows) == 1
+    assert rows[0]["has_pgx"] is True
+    assert rows[0]["pgx_drugs"] == ["warfarin"]
+    assert rows[0]["is_curated"] is True  # via PharmGKB
+    assert result.tier2_rsid_lifts == 1
+
+
+def test_tier2_direction2_source_stale_rsid_lifts(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """User carries the current rsID; source row carries the stale one → lift.
+
+    The metric is direction-1-scoped, so ``tier2_rsid_lifts`` is 0 here even
+    though the annotation was recovered (the user is not the stale carrier).
+    """
+    init_databases()
+    with duckdb_connection() as conn:
+        _seed_variant(conn, 1, rsid="rs222")  # current (survivor) rsID
+        _activate_dbsnp_aliases(conn, aliases=[("rs111", "rs222")])
+        pg = _new_version(conn, source_db="pharmgkb", version="pg1", hash_char="d")
+        _seed_pharmgkb(conn, pg, pharmgkb_id=1, rsid="rs111", drug_name="warfarin")  # stale
+        _activate(conn, source_db="pharmgkb", table="pharmgkb_annotations", sv_id=pg)
+        result = refresh_index(conn)
+        rows = _fetch_index_rows(conn)
+
+    assert len(rows) == 1
+    assert rows[0]["has_pgx"] is True
+    assert rows[0]["pgx_drugs"] == ["warfarin"]
+    assert result.tier2_rsid_lifts == 0  # user carries current rsID, not the stale one
+
+
+def test_tier2_degrades_to_tier1_without_aliases(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """Same fixtures as direction-1 but no dbSNP/aliases loaded → no lift.
+
+    Paired with test_tier2_direction1_*: proves the lift is caused by the map,
+    and that the build reduces exactly to the prior tier-1 join when dbSNP is
+    absent (graceful degradation).
+    """
+    init_databases()
+    with duckdb_connection() as conn:
+        _seed_variant(conn, 1, rsid="rs111")
+        gw = _new_version(conn, source_db="gwas_catalog", version="gw1", hash_char="b")
+        _seed_gwas(conn, gw, association_id=1, rsid="rs222", trait_name="Height", p_value=1e-8)
+        _activate(conn, source_db="gwas_catalog", table="gwas_catalog_associations", sv_id=gw)
+        result = refresh_index(conn)
+        rows = _fetch_index_rows(conn)
+
+    assert rows == []  # rs111 never matches rs222 under tier-1
+    assert result.tier2_rsid_lifts == 0
+
+
+def test_tier2_preserves_plain_tier1_match(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """A plain rs1=rs1 match still matches when an unrelated alias is loaded."""
+    init_databases()
+    with duckdb_connection() as conn:
+        _seed_variant(conn, 1, rsid="rs1")
+        _activate_dbsnp_aliases(conn, aliases=[("rs111", "rs222")])  # unrelated
+        gw = _new_version(conn, source_db="gwas_catalog", version="gw1", hash_char="b")
+        _seed_gwas(conn, gw, association_id=1, rsid="rs1", trait_name="Height", p_value=1e-8)
+        _activate(conn, source_db="gwas_catalog", table="gwas_catalog_associations", sv_id=gw)
+        result = refresh_index(conn)
+        rows = _fetch_index_rows(conn)
+
+    assert len(rows) == 1
+    assert rows[0]["gwas_trait_count"] == 1  # monotonic: no tier-1 match lost
+    assert result.tier2_rsid_lifts == 0  # rs1 is not a stale alias
+
+
+def test_tier2_duplicate_alias_rsid_resolves_to_one_survivor(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """GROUP BY alias_rsid + ANY_VALUE bound a corrupt two-survivor alias to one.
+
+    A single ``alias_rsid`` mapping to two different ``current_rsid``s is data the
+    loader forbids (it dedups on ``alias_rsid``) and the verification gate flags,
+    but the table has no UNIQUE constraint, so the build must not fan a variant
+    into *both* survivors' annotations. (A duplicate alias to the *same* survivor
+    is harmless — the COUNT(DISTINCT)/list_distinct aggregates already absorb it.)
+    """
+    init_databases()
+    with duckdb_connection() as conn:
+        _seed_variant(conn, 1, rsid="rs111")
+        _activate_dbsnp_aliases(conn, aliases=[("rs111", "rs222"), ("rs111", "rs333")])
+        gw = _new_version(conn, source_db="gwas_catalog", version="gw1", hash_char="b")
+        _seed_gwas(conn, gw, association_id=1, rsid="rs222", trait_name="Height", p_value=1e-8)
+        _seed_gwas(conn, gw, association_id=2, rsid="rs333", trait_name="BMI", p_value=1e-8)
+        _activate(conn, source_db="gwas_catalog", table="gwas_catalog_associations", sv_id=gw)
+        result = refresh_index(conn)
+        rows = _fetch_index_rows(conn)
+
+    assert len(rows) == 1  # not fanned into two rows
+    assert rows[0]["gwas_trait_count"] == 1  # exactly one survivor's trait, not both
+    assert result.tier2_rsid_lifts == 1
+
+
+def test_tier2_only_active_dbsnp_version_resolves(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """Aliases under a superseded dbSNP version do not resolve; only the active map."""
+    init_databases()
+    with duckdb_connection() as conn:
+        _seed_variant(conn, 1, chrom="1", pos=1000, rsid="rsOLDA")
+        _seed_variant(conn, 2, chrom="1", pos=2000, rsid="rsOLDB")
+        old = _new_version(conn, source_db="dbsnp", version="156", hash_char="e")
+        _seed_alias(conn, old, alias_id=1, alias_rsid="rsOLDA", current_rsid="rsNEWA")
+        _activate(conn, source_db="dbsnp", table="dbsnp_annotations", sv_id=old)
+        new = _new_version(conn, source_db="dbsnp", version="157", hash_char="f")
+        _seed_alias(conn, new, alias_id=2, alias_rsid="rsOLDB", current_rsid="rsNEWB")
+        _activate(conn, source_db="dbsnp", table="dbsnp_annotations", sv_id=new)
+        gw = _new_version(conn, source_db="gwas_catalog", version="gw1", hash_char="b")
+        _seed_gwas(conn, gw, association_id=1, rsid="rsNEWA", trait_name="TraitA", p_value=1e-8)
+        _seed_gwas(conn, gw, association_id=2, rsid="rsNEWB", trait_name="TraitB", p_value=1e-8)
+        _activate(conn, source_db="gwas_catalog", table="gwas_catalog_associations", sv_id=gw)
+        result = refresh_index(conn)
+        rows = _fetch_index_rows(conn)
+
+    by_id = {r["variant_id"]: r for r in rows}
+    # Variant 1's alias is under the superseded version → no lift, not in index.
+    assert 1 not in by_id
+    # Variant 2's alias is under the active pointer → lifts.
+    assert by_id[2]["gwas_trait_count"] == 1
+    assert result.tier2_rsid_lifts == 1
+
+
+def test_tier2_records_dbsnp_provenance_and_metric(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """refresh_versions names dbSNP (matching provenance) and the metric populates."""
+    init_databases()
+    with duckdb_connection() as conn:
+        _seed_variant(conn, 1, rsid="rs111")
+        _activate_dbsnp_aliases(conn, aliases=[("rs111", "rs222")], version="157")
+        gw = _new_version(conn, source_db="gwas_catalog", version="gw-v", hash_char="b")
+        _seed_gwas(conn, gw, association_id=1, rsid="rs222", trait_name="Height", p_value=1e-8)
+        _activate(conn, source_db="gwas_catalog", table="gwas_catalog_associations", sv_id=gw)
+        result = refresh_index(conn)
+
+    assert result.refresh_versions["dbsnp"] == "157"
+    assert result.refresh_versions["gwas_catalog"] == "gw-v"
+    assert result.tier2_rsid_lifts == 1

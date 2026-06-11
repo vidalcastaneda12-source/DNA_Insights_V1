@@ -319,7 +319,8 @@ def annotate_refresh_index(
         f"variant_annotations_index rebuilt: rows={result.row_count} "
         f"clinvar={result.clinvar_matches} gwas={result.gwas_matches} "
         f"gnomad={result.gnomad_matches} pharmgkb={result.pharmgkb_matches} "
-        f"curated={result.curated_count} versions={result.refresh_versions} "
+        f"curated={result.curated_count} tier2_rsid_lifts={result.tier2_rsid_lifts} "
+        f"versions={result.refresh_versions} "
         f"elapsed_ms={result.elapsed_ms}",
     )
 
