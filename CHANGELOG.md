@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Fix a drifted view definition in the schema markdown:
+  `schema_group_3_derived_analyses.md`'s `pgx_phenotype_drugs_v` joined
+  `cpic_guidelines` on `AND cg.is_active`, a column the version-pointer refactor
+  (#43/#44) removed from that table — the markdown referenced a non-existent
+  column and would fail if created as written. Corrected to the
+  `annotation_sources` version-pointer subquery, mirroring the already-correct
+  committed DDL (`ddl/group_3_derived.sql`). Docs-only: the live DDL is
+  unchanged, `git diff ddl/` is empty, and no database rebuild is required. Root
+  cause (and the absence of an automated markdown→DDL extraction step) recorded
+  as finding-010 #16. (#68)
 - Docs/comment hygiene for the post-5.7 / pre-Phase-6 frontier: `ROADMAP.md`
   now states Phase 5 is closed and replaces the old "Post-5.7 backfills" slot
   with the formalized 13-PR "Pre-Phase-6 sequence" (the single source of truth
