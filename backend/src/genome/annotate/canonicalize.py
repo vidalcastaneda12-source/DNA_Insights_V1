@@ -1080,8 +1080,8 @@ def canonicalize_variants(  # noqa: PLR0915 — one orchestrator, intentional ph
             dbsnp_version=current.version,
         )
 
-    # ---- Phase 4: mutation. TWO transactions; see module docstring on the
-    # DuckDB FK enforcement that forces the split. Both run inside the same
+    # ---- Phase 4: mutation. three transactions; see module docstring on the
+    # DuckDB FK enforcement that forces the split. All three run inside the same
     # owned-or-borrowed connection so a test that wants to inspect intermediate
     # state can pass conn=... and reuse it.
     mutation_ctx: contextlib.AbstractContextManager[DuckDBPyConnection] = (
