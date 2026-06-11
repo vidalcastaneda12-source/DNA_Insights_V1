@@ -180,3 +180,25 @@
     helper module already gates `table` against a whitelist
     (`_SUPERSESSION_TABLES`); adding a parallel whitelist for a new
     source category is a small addition.
+
+16. **Markdown drift — `pgx_phenotype_drugs_v` left on `cg.is_active`.**
+    PR #43 ("PR 1 — version-pointer supersession (no docs)") hand-edited
+    `ddl/group_3_derived.sql` to filter `cpic_guidelines` via the
+    `annotation_sources` scalar subquery (items 7–8) but deferred every
+    markdown change. The PR #44 docs-reconcile rewrote
+    `schema_group_2_reference_annotations.md` to drop `is_active` from the
+    annotation tables, but its two-line touch to
+    `schema_group_3_derived_analyses.md` missed the `pgx_phenotype_drugs_v`
+    view JOIN, which had carried `AND cg.is_active` unchanged since the
+    original schema upload. The result was a markdown view referencing a
+    column the same document's PR-#44 edit removed from `cpic_guidelines` —
+    a view that would fail if created as written. The committed DDL was
+    correct and *ahead of its source*: because there is no automated
+    markdown→DDL extraction step (the DDL headers' "Extracted verbatim
+    from …" is a manual convention), a re-extraction of the stale markdown
+    would have regenerated the wrong DDL, and nothing flagged the
+    divergence. PR #68 corrects only the markdown view JOIN to mirror the
+    committed DDL; `git diff ddl/` is empty, the live schema is unchanged,
+    and no database rebuild is required. A re-extraction tool — or a CI
+    check that each fenced SQL block matches `ddl/` — would have caught this
+    at PR #43 time.
