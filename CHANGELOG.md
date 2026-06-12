@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- PR 5b-pre (pre-Phase-6): `consensus_v1` chip-no-call completion — a chip
+  *no-call* must not clobber a real imputed genotype. `merge/consensus.py:resolve()`
+  gains a guard so that when a real `beagle_imputed` call is present and the only
+  chip calls are no-calls, the imputed genotype is the consensus (`imputed_only`)
+  with the chip no-calls appended as `contributing_calls` + `no_call_diff`
+  discrepancies, instead of being held as a no-call `single_source`/`both_concordant`
+  with imputation demoted to evidence. The `{imputed-real + chip-no-call}`
+  configuration has zero rows pre-collapse (it is materialized by the PR-5b
+  duplicate collapse), so the fix is a verified no-op on the current corpus and
+  lands first; rule label stays `consensus_v1`. Latent-bug fix that also unblocks
+  the PR-5b no-call dedup (finding-028).
 - PR 4 (pre-Phase-6): tier-2 rsID matching in `genome annotate refresh-index`.
   The GWAS Catalog and PharmGKB (rsID-keyed) index legs now canonicalize both the
   user-side and source-side rsIDs through the dbSNP `variant_aliases` merge map
