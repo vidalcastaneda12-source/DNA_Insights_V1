@@ -38,6 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Depends on PR 5b-pre — the collapse re-merges through the fixed merge. Closes
   finding-005 #1 (finding-026; the chip+imputed/no-call duplication mechanism is
   finding-027). No schema change.
+- PR 5b (follow-up): the `collapse-duplicate-variants` palindromic-survivor guard is
+  now **per-edge** rather than per-bucket — strand-sensitive mechanisms (swap /
+  strand-flip / hom-opposite / hom-same) are still skipped, but the strand-invariant
+  no-call edge is exempted so its repoint proceeds. Recovers 8 stranded no-call edges
+  whose survivor was palindromic and adds a `palindromic_skipped` counter to the
+  dry-run breakdown and structlog line (PR #71, finding-026).
 - PR 4 (pre-Phase-6): tier-2 rsID matching in `genome annotate refresh-index`.
   The GWAS Catalog and PharmGKB (rsID-keyed) index legs now canonicalize both the
   user-side and source-side rsIDs through the dbSNP `variant_aliases` merge map

@@ -553,6 +553,7 @@ def annotate_collapse_duplicate_variants(
         f"legit_multiallelic_skipped={result.legit_multiallelic_skipped} "
         f"genotype_mismatch_skipped={result.genotype_mismatch_skipped} "
         f"source_collision_skipped={result.source_collision_skipped} "
+        f"palindromic_skipped={result.palindromic_skipped} "
         f"degenerate_skipped={result.degenerate_skipped}",
     )
     if result.dry_run:

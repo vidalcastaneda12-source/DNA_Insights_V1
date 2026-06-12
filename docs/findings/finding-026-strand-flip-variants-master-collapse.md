@@ -100,7 +100,11 @@ the edge — counted `genotype_mismatch_skipped`, not guessed.
 * **Source-collision** — a reconciliation that would give the survivor two *active*
   calls of one `source` skips the edge (`source_collision_skipped`). **Measured 0**
   corpus-wide (incl. the 4 `both_concordant` deads — imputed-only survivors).
-* **Palindromic survivors** (A/T, C/G) are skipped (swap vs flip undecidable).
+* **Palindromic survivors** (A/T, C/G) — the guard is **per-edge**: strand-sensitive
+  mechanisms (swap / strand-flip / hom-opp / hom-same) are skipped (counted
+  `palindromic_skipped`, swap vs flip undecidable), but the strand-invariant no-call
+  edge is exempted so its repoint proceeds. Corpus: the 8 palindromic edges present
+  were all no-call (7× T/A, 1× C/G), now recovered; `palindromic_skipped = 0`.
 * There is **no** no-imputed-call guard (the original code's): imputed calls
   relocate to the survivor exactly like chip calls.
 
