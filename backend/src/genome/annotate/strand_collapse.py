@@ -48,10 +48,12 @@ each call's observed alleles must agree; a call that resolves under neither stra
 
 **Guards.** A reconciliation that would give the survivor two *active* calls of the
 same ``source`` (the one-active-per-``(variant, source)`` invariant) skips the edge
-and is counted ``source_collision_skipped``. Palindromic survivors (A/T, C/G) are
-skipped (swap vs strand-flip is undecidable from genotype). There is **no**
-no-imputed-call guard (the prior code's): imputed calls relocate to the survivor
-exactly like chip calls.
+and is counted ``source_collision_skipped``. At a palindromic survivor (A/T, C/G)
+the guard is **per-edge**: the strand-sensitive mechanisms (swap / strand-flip /
+hom-opposite / hom-same) are skipped and counted ``palindromic_skipped`` (swap vs
+strand-flip is undecidable from genotype), but the strand-invariant no-call edge is
+exempted and repoints as usual. There is **no** no-imputed-call guard (the prior
+code's): imputed calls relocate to the survivor exactly like chip calls.
 
 **Dependency.** The no-call repoints re-merge to ``imputed_only`` (genotype
 preserved) only because the ``consensus_v1`` chip-no-call fix (finding-028, PR
@@ -171,6 +173,7 @@ class StrandCollapseResult:
     legit_multiallelic_skipped: int
     genotype_mismatch_skipped: int
     source_collision_skipped: int
+    palindromic_skipped: int
     degenerate_skipped: int
     backup_path: str | None
     wall_clock_seconds: float
@@ -264,6 +267,7 @@ class _Counters:
     legit_multiallelic_skipped: int = 0
     genotype_mismatch_skipped: int = 0
     source_collision_skipped: int = 0
+    palindromic_skipped: int = 0
     degenerate_skipped: int = 0
 
     def bump(self, mechanism: str) -> None:
@@ -647,8 +651,7 @@ def _classify_bucket(  # noqa: C901, PLR0912 — one branch per survivor/skip ca
             key=lambda m: (not _has_active_chip(calls_by_vid.get(m.variant_id, [])), m.variant_id),
         )
 
-    if is_palindromic_site(survivor.ref, survivor.alt):
-        return (None, [], next_call_id, counters)
+    survivor_palindromic = is_palindromic_site(survivor.ref, survivor.alt)
 
     survivor_sources = {c.source for c in calls_by_vid.get(survivor.variant_id, [])}
     deads: list[_DeadEdge] = []
@@ -659,6 +662,12 @@ def _classify_bucket(  # noqa: C901, PLR0912 — one branch per survivor/skip ca
         mechanism = _edge_mechanism(survivor, n)
         if mechanism is None:
             continue  # legit multi-allelic / unrelated sibling — leave untouched
+        if survivor_palindromic and mechanism != "no_call":
+            # Strand-sensitive (swap/strandflip/hom_opp/hom_same) is undecidable at a
+            # palindromic survivor (A/T, C/G). The no-call edge is strand-invariant
+            # (empty call repointed as-is) so it is exempted.
+            counters.palindromic_skipped += 1
+            continue
         n_calls = calls_by_vid.get(n.variant_id, [])
         if survivor_sources & {c.source for c in n_calls}:
             counters.source_collision_skipped += 1
@@ -705,6 +714,7 @@ def _accumulate(total: _Counters, local: _Counters) -> None:
     total.legit_multiallelic_skipped += local.legit_multiallelic_skipped
     total.genotype_mismatch_skipped += local.genotype_mismatch_skipped
     total.source_collision_skipped += local.source_collision_skipped
+    total.palindromic_skipped += local.palindromic_skipped
     total.degenerate_skipped += local.degenerate_skipped
 
 
@@ -972,6 +982,7 @@ def collapse_duplicate_variants(
             legit_multiallelic_skipped=plan.counters.legit_multiallelic_skipped,
             genotype_mismatch_skipped=plan.counters.genotype_mismatch_skipped,
             source_collision_skipped=plan.counters.source_collision_skipped,
+            palindromic_skipped=plan.counters.palindromic_skipped,
             degenerate_skipped=plan.counters.degenerate_skipped,
         )
 
@@ -1145,6 +1156,7 @@ def _result(  # noqa: PLR0913 — flat keyword surface assembles the frozen resu
         legit_multiallelic_skipped=c.legit_multiallelic_skipped,
         genotype_mismatch_skipped=c.genotype_mismatch_skipped,
         source_collision_skipped=c.source_collision_skipped,
+        palindromic_skipped=c.palindromic_skipped,
         degenerate_skipped=c.degenerate_skipped,
         backup_path=str(backup_path) if backup_path is not None else None,
         wall_clock_seconds=wall,

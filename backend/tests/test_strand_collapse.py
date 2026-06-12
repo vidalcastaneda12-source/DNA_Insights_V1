@@ -558,6 +558,65 @@ def test_palindromic_survivor_skipped(isolated_settings: dict[str, str]) -> None
         assert _variant_ids(conn) == [1, 2]
 
 
+def test_no_call_collapses_at_palindromic_survivor(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """A no-call at a palindromic survivor (T/A) still collapses.
+
+    The per-edge guard exempts the no-call edge: it is strand-invariant (the empty
+    call is repointed as-is, no complement decision), so the prior bucket-level skip
+    that stranded it was wrong. Regression guard for that fix.
+    """
+    init_databases()
+    with duckdb_connection() as conn:
+        svid = _seed_dbsnp_version(conn)
+        _seed_dbsnp_annotation(conn, 1, svid, ref="T", alts=("A",))
+        _seed_variant(conn, 1, ref="T", alt="A", rsid=None)  # palindromic, canonical survivor
+        _seed_variant(conn, 2, ref="N", alt="N", rsid="rs1")  # no-call placeholder
+        _seed_call(conn, 10, 1, source="ancestry", allele_1="T", allele_2="A")
+        _seed_nocall(conn, 20, 2, source="23andme")
+
+        result = collapse_duplicate_variants(conn)
+        assert result.actionable_edges == 1
+        assert result.no_call_repointed == 1
+        assert result.palindromic_skipped == 0
+        assert result.calls_complemented == 0
+        assert result.variants_master_deleted == 1
+        assert _variant_ids(conn) == [1]
+        assert _dangling_calls(conn) == 0
+        # the no-call moved to the palindromic survivor, still a no-call
+        assert _variant_id_of_call(conn, 20) == 1
+        # the real rsID is recovered onto the (previously NULL) survivor
+        assert _rsid_of(conn, 1) == "rs1"
+        assert result.rsid_coalesced == 1
+
+
+def test_swap_skipped_at_palindromic_survivor(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """A strand-sensitive edge at a palindromic survivor is still skipped — now counted.
+
+    A genuine strand-flip at a palindromic survivor is structurally a swap (the
+    complement of {T,A} is {T,A}), so ``swap`` is the honest mechanism here, and swap
+    vs strand-flip is undecidable at A/T — the edge is left un-collapsed and counted
+    ``palindromic_skipped`` (the intended behavior the no-call exemption preserves).
+    """
+    init_databases()
+    with duckdb_connection() as conn:
+        svid = _seed_dbsnp_version(conn)
+        _seed_dbsnp_annotation(conn, 1, svid, ref="T", alts=("A",))
+        _seed_variant(conn, 1, ref="T", alt="A")  # palindromic, canonical survivor
+        _seed_variant(conn, 2, ref="A", alt="T")  # swap: same alleles reversed, non-canonical
+        _seed_call(conn, 10, 1, source="23andme", allele_1="T", allele_2="A")
+        _seed_call(conn, 20, 2, source="ancestry", allele_1="A", allele_2="T")
+
+        result = collapse_duplicate_variants(conn)
+        assert result.actionable_edges == 0
+        assert result.palindromic_skipped == 1
+        assert result.swaps_collapsed == 0
+        assert _variant_ids(conn) == [1, 2]  # both rows survive untouched
+
+
 def test_degenerate_no_survivor_skipped(isolated_settings: dict[str, str]) -> None:  # noqa: ARG001
     """A (N,N) + a real-hom with no biallelic row: nothing to collapse onto — skip+warn."""
     init_databases()
