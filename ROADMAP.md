@@ -122,17 +122,11 @@ finding-016 #8):
 
 **Remaining cleanup** — clears the deferred backlog so Phase 6 opens clean:
 
-- [ ] **PR 5** — chrX resolution, Option B (sex-aware non-PAR/PAR regions; finding-008)
-  **+** the deferred same-SNP duplicate `variants_master` collapse (5b). Re-scoped
-  after measurement: the post-canon residual is ≈684 duplicates across five
-  mechanisms — no-call `(N,N)` placeholders, REF/ALT swaps, strand-flips, hom
-  opposite/same-strand — not the assumed strand-flip pairs (finding-005 #1 corrected;
-  finding-026/027). `genome annotate collapse-duplicate-variants` reconciles each
-  duplicate edge (repoint / complement via supersession / drop), leaving legit
-  multi-allelics protected. **Prerequisite: PR 5b-pre** — a `consensus_v1`
-  chip-no-call fix (finding-028) that must land first so the no-call repoints
-  re-merge to `imputed_only` (genotype preserved) rather than clobbering ≈523 imputed
-  survivors. 5a (chrX) and 5b are independent.
+- [ ] **PR 5** — chrX resolution + same-SNP duplicate collapse (two independent halves)
+    [x] **5b-pre** + **5b** — `consensus_v1` chip-no-call fix + `collapse-duplicate-variants`
+      (≈684 duplicates across five mechanisms reconciled; finding-005 #1 closed;
+      findings 026/027/028). Merged; new anchor variants_master/consensus 3,088,233.
+    [ ] **5a** — chrX resolution, Option B (sex-aware non-PAR/PAR regions; finding-008)
 - [ ] **PR 6** — Minimal `genes` seed, Option A: the gene-symbol union of the
   ACMG SF v3.x, PGx, and carrier gene lists. Enough rows to satisfy the
   `NOT NULL REFERENCES genes(gene_symbol)` FKs on `derived_pgx_phenotypes`,
