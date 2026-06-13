@@ -17,6 +17,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   duplicate collapse), so the fix is a verified no-op on the current corpus and
   lands first; rule label stays `consensus_v1`. Latent-bug fix that also unblocks
   the PR-5b no-call dedup (finding-028).
+- PR 5b (pre-Phase-6): generalized same-SNP duplicate `variants_master` collapse
+  via new `genome annotate collapse-duplicate-variants` (module
+  `backend/src/genome/annotate/strand_collapse.py`). Re-scoped from the original
+  strand-flip-only design after read-only real-data measurement showed the corpus
+  residual is ~684 duplicates across five mechanisms — no-call `(N,N)` placeholders,
+  REF/ALT swaps, strand-flips, and hom opposite/same-strand — not the assumed clean
+  biallelic strand-flips (only 5 of which exist). Per-EDGE identification (not
+  per-bucket): each row at a same-position bucket is classified as legit
+  multi-allelic (protected, never touched) or a duplicate; one survivor is picked
+  and each duplicate is reconciled by repointing (no-call / same-strand / swap),
+  complementing onto the survivor's strand via row-grain supersession (strand-flip /
+  hom-opposite), or dropping (a no-call at a multi-allelic position with no single
+  survivor). Fixes two root causes in the prior code: the `complement_pair`-only
+  predicate (missed swaps + hom rows) and the `ACGT`-before-`COUNT` candidate-set
+  filter that hid the ~660 no-call duplicates. Drops the no-imputed-call guard
+  (imputed calls relocate to the survivor) and adds a source-collision guard. Reuses
+  the TX0/TX1/TX2 + `idx_vm_rsid` drop-dance scaffold, rsID coalesce, and snapshot
+  (`archive/strand-collapse/`). `--dry-run` prints the per-mechanism breakdown.
+  Depends on PR 5b-pre — the collapse re-merges through the fixed merge. Closes
+  finding-005 #1 (finding-026; the chip+imputed/no-call duplication mechanism is
+  finding-027). No schema change.
+- PR 5b (follow-up): the `collapse-duplicate-variants` palindromic-survivor guard is
+  now **per-edge** rather than per-bucket — strand-sensitive mechanisms (swap /
+  strand-flip / hom-opposite / hom-same) are still skipped, but the strand-invariant
+  no-call edge is exempted so its repoint proceeds. Recovers 8 stranded no-call edges
+  whose survivor was palindromic and adds a `palindromic_skipped` counter to the
+  dry-run breakdown and structlog line (PR #71, finding-026).
 - PR 4 (pre-Phase-6): tier-2 rsID matching in `genome annotate refresh-index`.
   The GWAS Catalog and PharmGKB (rsID-keyed) index legs now canonicalize both the
   user-side and source-side rsIDs through the dbSNP `variant_aliases` merge map

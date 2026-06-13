@@ -118,6 +118,7 @@ database needs to be reloaded:
    genome annotate refresh-aliases
    genome imputation normalize-rsids
    genome annotate canonicalize-variants
+   genome annotate collapse-duplicate-variants
    genome merge
    genome annotate align-tier3-consensus
    genome annotate refresh-index
@@ -135,11 +136,23 @@ latter's `vm.rsid IS NULL` enrich-guard fires and a colliding chip `rs#` is
 adopted rather than dropped — the swept-before-canonicalize precondition for the
 rsID-preservation invariant (finding-020 / finding-021); `canonicalize-variants`
 reads `dbsnp_annotations` for canonical REF/ALT and rewrites
-`variants_master` in place, so it runs after dbSNP loads; `merge`
-re-derives `consensus_genotypes` from the now-canonical variants;
-`align-tier3-consensus` deletes the non-canonical-side consensus rows
-for the strand-flipped duplicates that Scope-A canonicalize leaves as
-two rows; `refresh-index` rolls up the four variant-linkable sources
+`variants_master` in place, so it runs after dbSNP loads;
+`collapse-duplicate-variants` (PR 5b, finding-005 #1 / finding-026/027) then
+collapses the remaining same-SNP duplicates — each physical SNP stored as ≥2
+`variants_master` rows at one `(chrom, pos)`: a no-call `(N,N)` placeholder, a
+REF/ALT swap, a strand-flip, or a hom opposite/same-strand row — onto a single
+survivor (repoint / complement via row-grain supersession / drop), leaving legit
+multi-allelic alts untouched, so it reads the post-canonicalize `variants_master`
++ dbSNP classification and runs **before** `merge`. It **depends on the PR-5b-pre
+`consensus_v1` chip-no-call fix (finding-028)** being in the merge code: the
+no-call repoints re-merge to `imputed_only` (genotype preserved) rather than
+clobbering an imputed survivor. Run `collapse-duplicate-variants --dry-run` first
+and confirm the per-mechanism counts plus zero `genotype_mismatch_skipped` /
+`source_collision_skipped`. With the duplicates collapsed, `align-tier3-consensus`
+finds no `disagreement_resolved` pair and is a **no-op** (`rows_deleted=0`) — it
+stays in the sequence as a defensive backstop. `merge`
+re-derives `consensus_genotypes` from the now-canonical, now-collapsed
+variants; `refresh-index` rolls up the four variant-linkable sources
 (ClinVar, GWAS, gnomAD, PharmGKB) through their version pointers —
 resolving merged-away rsIDs on the GWAS/PharmGKB legs through
 `variant_aliases` (tier-2, finding-025) — so it runs last. `dbsnp` reads only `variants_master` and is
