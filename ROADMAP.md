@@ -123,10 +123,10 @@ finding-016 #8):
 **Remaining cleanup** — clears the deferred backlog so Phase 6 opens clean:
 
 - [ ] **PR 5** — chrX resolution + same-SNP duplicate collapse (two independent halves)
-    [x] **5b-pre** + **5b** — `consensus_v1` chip-no-call fix + `collapse-duplicate-variants`
+    - [x] **5b-pre** + **5b** — `consensus_v1` chip-no-call fix + `collapse-duplicate-variants`
       (≈684 duplicates across five mechanisms reconciled; finding-005 #1 closed;
       findings 026/027/028). Merged; new anchor variants_master/consensus 3,088,233.
-    [ ] **5a** — chrX resolution, Option B (sex-aware non-PAR/PAR regions; finding-008)
+    - [ ] **5a** — chrX resolution, Option B (sex-aware non-PAR/PAR regions; finding-008)
 - [ ] **PR 6** — Minimal `genes` seed, Option A: the gene-symbol union of the
   ACMG SF v3.x, PGx, and carrier gene lists. Enough rows to satisfy the
   `NOT NULL REFERENCES genes(gene_symbol)` FKs on `derived_pgx_phenotypes`,
