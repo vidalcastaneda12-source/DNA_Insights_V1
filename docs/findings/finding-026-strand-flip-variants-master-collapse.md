@@ -123,32 +123,41 @@ TX2 (rsID coalesce; DELETE orphan reconciled + dropped rows; recompute `has_*_ca
 + the `idx_vm_rsid` drop dance. Pre-mutation snapshot to `archive/strand-collapse/`.
 No schema change; no `variant_id_seq` resync (allocates no new `variant_id`s).
 
-## Predicted deltas (regression anchor; GATE-FILL; conditioned on PR 5b-pre)
+## Verified deltas (real-data gate, 2026-06-13; PR 5b-pre in place)
 
-Author the model/sign; **VSC-User fills the exact gate numbers** post-run.
+Measured on the gate run. Three lines came in off the round model prediction —
+flagged inline; all benign and reconciled.
 
-| Quantity | Baseline | Model → predicted |
+| Quantity | Baseline | Verified |
 |---|---|---|
-| `variants_master` rows | 3,088,917 | one dead per edge → **−≈684** (GATE-FILL) |
-| `genotype_calls` total | — | **+≈10** (complemented inserts; repoints add 0) |
-| `consensus_total` | 3,088,916 | **−≈684** (one per deleted dead; chr4 dead had none) |
-| `single_source` | 822,048 | **−≈657** (no-call 1-chip deads; strandflip/hom flips cancel) |
-| `imputed_only` | 2,146,324 | **−≈22** (10 swap deads + 12 survivors flipping to single_source); the ≈523 no-call survivors **stay** imputed_only (PR 5b-pre) |
-| `both_concordant` | 120,516 | **−≈3** = −4 (no-call 2-chip deads) +1 (chr4) |
+| `variants_master` rows | 3,088,917 | **3,088,233 (−684)** |
+| `genotype_calls` | 3,434,778 active | **+10 complemented inserts; active −1 (→3,434,777, the size-3 dropped call); 689 calls repointed (variant_id only)** |
+| `consensus_total` | 3,088,916 | **3,088,233 (−683)** — *not −684: the chr4 hom_opp dead carried no consensus row; post-collapse `consensus_total` now equals `variants_master`* |
+| `single_source` | 822,048 | **821,391 (−657)** |
+| `imputed_only` | 2,146,324 | **2,146,302 (−22)** |
+| `both_concordant` | 120,516 | **120,513 (−3)** = −4 (no-call 2-chip deads) +1 (chr4) |
 | `disagreement_resolved` (post-align) | 1 | **0** (chr4 → both_concordant) |
 | `strand_flip_resolutions` (merge counter) | 2 | **0** |
 | `align-tier3 rows_deleted` | 1 | **0** |
-| `genotype_mismatch` (gate-anchored) | 0 | **0** (measured: all edges reconcile) |
-| `discrepancies` (only `genotype_mismatch` anchored) | — | reshuffle: `platform_unique` ↓≈657, `no_call_diff` ↑≈660, `strand_flip_resolved` −1 (GATE-FILL) |
-| concordance (gate-anchored) | 0.999776 | **0.999776 (held)** — discordant side (0 mismatch + 27 strand_ambiguous) untouched; the shared side shifts by a handful against ~120,540, so the 6-figure rate does not move. A drop ⇒ a spurious `genotype_mismatch` ⇒ stop-and-investigate. |
-| index `row_count` | finding-025 | **−≈97** (the 97 dead index rows deleted; rsID-keyed annotations relocate onto survivors) |
-| index coord-keyed (`gnomad`/`clinvar`/`is_rare`/`is_ultrarare`) | finding-025 | **≈ unchanged** (deads non-canonical/`(N,N)` — never coord-matched) |
-| index rsID-keyed (`gwas`/`pharmgkb`) | finding-025 | relocated, ≈held or small rise (GATE-FILL) |
+| `genotype_mismatch` (gate-anchored) | 0 | **0** |
+| discrepancies (only `genotype_mismatch` anchored) | — | `platform_unique` 822,048→821,254; `no_call_diff` 0→664; `strand_flip_resolved` 2→0; `strand_ambiguous` 27 (held) |
+| concordance (gate-anchored) | 0.999776017254967 | **0.9997760079641613** — 6-figure 0.999776 held; moved only at the 8th decimal as the *shared* numerator shrank by 5 (`120,513/120,540` vs `120,518/120,545`); discordant side untouched (mismatch 0, strand_ambiguous 27) |
+| index `row_count` | 2,824,236 | **2,824,130 (−106)** — *not −97: 97 no-call-dead index rows + ~9 genotype-bearing-dead index rows (swap/strandflip/hom)* |
+| index coord-keyed | gnomad 2,796,952 / clinvar 61,458 | **gnomad 2,796,942 (−10)** (genotype-bearing deads that coord-matched) / **clinvar 61,458 (unchanged)** |
+| index rsID-keyed | gwas 66,764 / pharmgkb 1,738 | **gwas 66,742 (−22) / pharmgkb 1,737 (−1)** — dedup, not loss: distinct `variants_master.rsid` count flat pre/post (`rsid_conflicts=0`), every dead rsID relocated onto its survivor or matched one already present |
 
-**Dry-run gate:** ≈684 actionable = `no_call_repointed ≈660` + `no_call_dropped = 1`
-+ 10 swap + 5 strandflip + 5 hom_opp + 3 hom_same; `legit_multiallelic_skipped ≈
-10,014`; `genotype_mismatch_skipped = 0`; `source_collision_skipped = 0`;
-`degenerate_skipped ≈ 1`. `variants_master_deleted` equals the sum.
+**Collapse counters (mutation run):** actionable_edges 684, no_call_repointed 660,
+no_call_dropped 1, swaps 10, strandflips 5, hom_opp 5, hom_same 3,
+legit_multiallelic_skipped 10,015, genotype_mismatch_skipped 0,
+source_collision_skipped 0, palindromic_skipped 0, degenerate_skipped 1;
+calls_complemented 10, calls_repointed 689, variants_master_deleted 684,
+rsid_coalesced 535, rsid_conflicts 0. Snapshot:
+`archive/strand-collapse/genome.duckdb.pre-strand-collapse.dbsnp157.20260613T183003Z.bak`.
+
+(Bucket reconciliation: 684 actionable + 10,015 `legit_multiallelic_skipped` + 1
+`degenerate_skipped` = 10,700. The counter's 10,015 = 10,014 protected positions +
+the 1 size-3 position, which is both protected for its two alts and the source of
+`no_call_dropped=1` — the per-edge model counts it on both axes.)
 
 ## Verification
 
