@@ -13,8 +13,10 @@ consensus rows can be regenerated from history when the rule changes.
 Three sources feed the merge: the two chip platforms (`23andme`, `ancestry`)
 and the Phase 4 imputed source (`beagle_imputed`). The chip platforms are
 resolved exactly as in Phase 3; the imputed source is treated as confirming
-evidence when at least one chip call is also active at the same variant, or
-as the sole evidence (`imputed_only`) when no chip call is present.
+evidence when at least one chip call produces a *real* genotype at the same
+variant, or as the sole evidence (`imputed_only`) when no real chip call is
+present — either no chip call at all, or only chip *no-calls* (a chip no-call
+carries no genotype and must not clobber a real imputed call; finding-028).
 `topmed_imputed` is still in the enum but no longer ingested — the local
 Beagle workflow superseded it (see `finding-006`).
 
@@ -77,7 +79,8 @@ Phase 4 extension — imputed source:
 | --------- | ---------- | ---------------- | ---------- |
 | absent    | absent     | called           | `imputed_only` using the imputed call's alleles; `is_imputed = true`; `consensus_r2` carries the imputed call's `imputation_r2`. No discrepancy. |
 | absent    | absent     | no-call          | `imputed_only` with `is_no_call = true`; `is_imputed = true`; `consensus_r2` carries the imputed call's `imputation_r2`. No discrepancy. |
-| any chip call present | (any) | present          | The chip-only resolution above prevails byte-for-byte (method, alleles, dosage, `is_imputed = false`). The imputed call's `call_id` is appended to `contributing_calls` as confirming evidence. No new discrepancy is emitted. |
+| no-call (and/or absent) | no-call (and/or absent) | called | **finding-028:** a real imputed call with *no real chip call* — `imputed_only` using the imputed alleles (`is_imputed = true`, `consensus_r2` carried). Each present chip no-call is appended to `contributing_calls` and surfaced as a `no_call_diff` discrepancy (`source_a = beagle_imputed`, the chip no-call as `source_b`, `resolution = 'taken_from_imputed'`). A chip no-call must not clobber a real imputed genotype. |
+| any *real* chip call present | (any) | present          | The chip-only resolution above prevails byte-for-byte (method, alleles, dosage, `is_imputed = false`). The imputed call's `call_id` is appended to `contributing_calls` as confirming evidence. No new discrepancy is emitted. |
 
 After the per-row resolve, a tier-3 pass detects strand-flip partners across
 `variants_master` rows at the same `(chrom, pos_grch38)`. Matched pairs have
@@ -104,16 +107,25 @@ site, the consensus method stays `single_source`. In all three cases an
 active `beagle_imputed` call at the same variant is appended to
 `contributing_calls` so the dashboard can show that imputation independently
 re-derived the same genotype, but the consensus's method, alleles, dosage,
-and `is_imputed` flag are not touched. Imputation only becomes the consensus
-when no chip call is active — the `imputed_only` branch, by far the most
-common shape in real-data merges (~2.3M of ~3.2M consensus rows on the
-user's corpus).
+and `is_imputed` flag are not touched. Imputation becomes the consensus when
+no chip call is active — the `imputed_only` branch, by far the most common
+shape in real-data merges (~2.3M of ~3.2M consensus rows on the user's
+corpus) — **and** when the only chip calls present are *no-calls*
+(finding-028): a chip no-call carries no genotype, so it must not hold the
+consensus as a no-call and demote a real imputed call to evidence. That
+configuration has zero rows in the pre-collapse corpus — it is materialized by
+the PR-5b duplicate collapse, which re-points a chip no-call onto an imputed
+survivor — so the rule is an in-place completion of the Phase-4 extension and
+is a no-op on existing data.
 
 The rule label remains `consensus_v1` because the chip-only branches are
 unchanged byte-for-byte. The extension was anticipated by Phase 3's
 forward-pointing language — `imputed_only` was already an enum member of
 `consensus_method_enum` and `beagle_imputed` already an enum member of
-`source_enum`. No schema migration was required.
+`source_enum`. No schema migration was required. The finding-028 chip-no-call
+completion likewise keeps `consensus_v1`: it changes no realized consensus row
+on the corpus (zero `{imputed-real + chip-no-call}` rows pre-collapse), exactly
+the same "unchanged byte-for-byte" criterion.
 
 ## Discrepancy type catalog
 

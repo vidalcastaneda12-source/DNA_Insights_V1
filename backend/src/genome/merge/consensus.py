@@ -11,6 +11,16 @@ a chip call is present, and as the sole evidence (``imputed_only``) when no
 chip call is present at the variant. The rule label remains ``consensus_v1``
 — no version bump — because the chip-only resolutions are unchanged
 byte-for-byte.
+
+A later in-place completion (finding-028) closes the chip-no-call gap the Phase-4
+extension left open: when a *real* imputed call is present and the only chip
+calls at the variant are no-calls, the imputed genotype is the consensus rather
+than being clobbered by the chip no-call (the pre-fix path routed a chip no-call
+into the chip branch and held the consensus as a no-call, demoting imputation to
+a contributing call). The label stays ``consensus_v1`` — no realized corpus
+consensus row changes, because the ``{imputed-real + chip-no-call}`` configuration
+has zero rows pre-collapse; it is materialized only by the PR-5b duplicate
+collapse, which is why this fix lands first.
 """
 
 from __future__ import annotations
@@ -468,6 +478,57 @@ def _resolve_imputed_only(pair: VariantPair, imputed: CallView) -> ConsensusRow:
     )
 
 
+def _resolve_imputed_over_chip_nocalls(
+    pair: VariantPair,
+    imputed: CallView,
+    chip_no_calls: tuple[CallView, ...],
+) -> tuple[ConsensusRow, list[DiscrepancyRow]]:
+    """A real imputed call with no *real* chip call — imputation is the genotype.
+
+    finding-028: a chip *no-call* must not preempt a real imputed genotype. The
+    imputed genotype becomes the consensus (``imputed_only``); each present chip
+    no-call is appended to ``contributing_calls`` as evidence and surfaced as a
+    ``no_call_diff`` discrepancy (imputation called the site; the chip reported
+    no-call). When no chip call is present at all (the ordinary imputed-only
+    case) this returns byte-identical output — no extra contributing ids and no
+    discrepancies — so re-merging the pre-collapse corpus is a no-op.
+    """
+    consensus = _resolve_imputed_only(pair, imputed)
+    if not chip_no_calls:
+        return (consensus, [])
+    consensus = ConsensusRow(
+        variant_id=consensus.variant_id,
+        consensus_allele_1=consensus.consensus_allele_1,
+        consensus_allele_2=consensus.consensus_allele_2,
+        is_no_call=consensus.is_no_call,
+        dosage=consensus.dosage,
+        consensus_method=consensus.consensus_method,
+        is_imputed=consensus.is_imputed,
+        consensus_r2=consensus.consensus_r2,
+        contributing_calls=(
+            *consensus.contributing_calls,
+            *(c.call_id for c in chip_no_calls),
+        ),
+        resolution_rule=consensus.resolution_rule,
+        confidence=consensus.confidence,
+    )
+    discrepancies = [
+        _discrepancy(
+            variant_id=pair.variant_id,
+            dtype="no_call_diff",
+            severity="minor",
+            source_a=imputed.source,
+            call_a=imputed,
+            source_b=c.source,
+            call_b=c,
+            resolution="taken_from_imputed",
+            reason=f"imputation called this site; {c.source} reported no-call",
+        )
+        for c in chip_no_calls
+    ]
+    return (consensus, discrepancies)
+
+
 def resolve(pair: VariantPair) -> tuple[ConsensusRow, list[DiscrepancyRow]]:
     """Apply ``consensus_v1`` to one variant pair.
 
@@ -476,19 +537,36 @@ def resolve(pair: VariantPair) -> tuple[ConsensusRow, list[DiscrepancyRow]]:
 
     Branch order:
 
-    1. If any chip call (``23andme`` and/or ``ancestry``) is active, the
-       chip-only Phase 3 resolution runs unchanged. If an active
-       ``beagle_imputed`` call is also present at the same variant, it is
-       appended to the resulting consensus's ``contributing_calls`` as
-       confirming evidence — the consensus method, alleles, dosage, and
-       ``is_imputed`` flag are not touched.
-    2. If only the imputed call is active, produce an ``imputed_only``
+    1. If a *real* imputed call is present and **no real chip call** is (the
+       chip calls, if any, are no-calls), the imputed genotype is the consensus
+       (``imputed_only``); each present chip no-call is appended to
+       ``contributing_calls`` and surfaced as a ``no_call_diff`` discrepancy. A
+       chip no-call must not clobber a real imputed genotype (finding-028). With
+       no chip call present this is the ordinary imputed-only path, byte-identical
+       to the pre-fix output.
+    2. Else, if a chip call (real or no-call) is present, the chip-only Phase 3
+       resolution runs unchanged; an active ``beagle_imputed`` call is appended
+       to ``contributing_calls`` as confirming evidence — the consensus method,
+       alleles, dosage, and ``is_imputed`` flag are not touched.
+    3. Else, if only an imputed call is present, produce an ``imputed_only``
        consensus carrying the imputed call's alleles and ``imputation_r2``.
-    3. Otherwise defensively produce an ``unresolvable`` no-call.
+    4. Otherwise defensively produce an ``unresolvable`` no-call.
     """
     a = pair.twentythree
     b = pair.ancestry
     imputed = pair.imputed
+
+    a_real = a is not None and not a.is_no_call
+    b_real = b is not None and not b.is_no_call
+
+    # finding-028: a real imputed genotype must win over chip-no-calls-only.
+    # Without this, a chip no-call falls into the chip branches below and holds
+    # the consensus as a no-call, demoting the real imputed genotype to a mere
+    # contributing call. Fires only for {imputed-real + chip-no-call(s)-only};
+    # the pure imputed-only case (no chip call present) is byte-identical.
+    if imputed is not None and not imputed.is_no_call and not a_real and not b_real:
+        chip_no_calls = tuple(c for c in (a, b) if c is not None)
+        return _resolve_imputed_over_chip_nocalls(pair, imputed, chip_no_calls)
 
     if a is not None and b is not None:
         consensus, discs = _resolve_both_present(pair, a, b)

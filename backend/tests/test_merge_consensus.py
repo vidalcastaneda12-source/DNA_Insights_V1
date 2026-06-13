@@ -393,3 +393,105 @@ def test_chip_disagreement_resolved_plus_imputed_preserves_resolution() -> None:
     assert consensus.is_imputed is False
     assert len(discrepancies) == 1
     assert discrepancies[0].discrepancy_type == "strand_flip_resolved"
+
+
+# ----------------------------------------------------------------------------
+# finding-028 — a chip *no-call* must not clobber a real imputed genotype. The
+# {imputed-real + chip-no-call} configuration has zero rows pre-collapse; it is
+# materialized by the PR-5b duplicate collapse, so this fix lands first and must
+# be a no-op on the pre-collapse corpus.
+# ----------------------------------------------------------------------------
+
+
+def test_imputed_real_survives_one_chip_nocall() -> None:
+    """A real beagle call beside a single 23andme no-call: imputation is the genotype.
+
+    Pre-fix this routed into the chip branch and held the consensus as a no-call
+    ``single_source``, demoting the imputed genotype to a contributing call.
+    """
+    pair = _pair(
+        twentythree=_call(call_id=1, source="23andme", a1=None, a2=None, is_no_call=True),
+        ancestry=None,
+        imputed=_call(call_id=10, source="beagle_imputed", a1="A", a2="G", imputation_r2=0.92),
+    )
+    consensus, discrepancies = resolve(pair)
+    assert consensus.consensus_method == "imputed_only"
+    assert consensus.is_no_call is False
+    assert (consensus.consensus_allele_1, consensus.consensus_allele_2) == ("A", "G")
+    assert consensus.is_imputed is True
+    assert consensus.consensus_r2 == 0.92
+    assert consensus.dosage == 1
+    # imputed call first, the chip no-call appended as evidence
+    assert consensus.contributing_calls == (10, 1)
+    assert len(discrepancies) == 1
+    disc = discrepancies[0]
+    assert disc.discrepancy_type == "no_call_diff"
+    assert disc.severity == "minor"
+    assert disc.source_a == "beagle_imputed"
+    assert disc.source_b == "23andme"
+    assert disc.genotype_a == "A/G"
+    assert disc.genotype_b == "--"
+    assert disc.call_b_id == 1
+
+
+def test_imputed_real_survives_two_chip_nocall() -> None:
+    """A real beagle call beside both chips reporting no-call: imputation wins."""
+    pair = _pair(
+        twentythree=_call(call_id=1, source="23andme", a1=None, a2=None, is_no_call=True),
+        ancestry=_call(call_id=2, source="ancestry", a1=None, a2=None, is_no_call=True),
+        imputed=_call(call_id=10, source="beagle_imputed", a1="A", a2="G", imputation_r2=0.9),
+    )
+    consensus, discrepancies = resolve(pair)
+    assert consensus.consensus_method == "imputed_only"
+    assert consensus.is_no_call is False
+    assert (consensus.consensus_allele_1, consensus.consensus_allele_2) == ("A", "G")
+    assert consensus.is_imputed is True
+    assert consensus.contributing_calls == (10, 1, 2)
+    assert len(discrepancies) == 2
+    assert {d.discrepancy_type for d in discrepancies} == {"no_call_diff"}
+    assert {d.source_b for d in discrepancies} == {"23andme", "ancestry"}
+
+
+def test_imputed_real_no_chip_call_is_byte_identical_imputed_only() -> None:
+    """The guard must not perturb the pure imputed-only path (the no-op proof).
+
+    Same input as :func:`test_imputed_only_called_resolves_to_imputed_only`: with
+    no chip call present the guard returns exactly ``_resolve_imputed_only`` — no
+    extra contributing ids, no discrepancies — so re-merging the pre-collapse
+    corpus is a no-op.
+    """
+    pair = _pair(
+        twentythree=None,
+        ancestry=None,
+        imputed=_call(call_id=10, source="beagle_imputed", a1="A", a2="G", imputation_r2=0.92),
+    )
+    consensus, discrepancies = resolve(pair)
+    assert consensus.consensus_method == "imputed_only"
+    assert consensus.contributing_calls == (10,)
+    assert consensus.is_imputed is True
+    assert consensus.consensus_r2 == 0.92
+    assert discrepancies == []
+
+
+def test_real_chip_with_chip_nocall_and_imputed_stays_chip_dominated() -> None:
+    """The guard fires only when NO real chip call is present.
+
+    ``{23andme real + ancestry no-call + beagle real}``: a real chip call exists,
+    so the chip resolution prevails (``single_source`` on the real call,
+    ``no_call_diff`` for the ancestry no-call) and the imputed call is appended as
+    confirming evidence — unchanged from the pre-fix behavior.
+    """
+    pair = _pair(
+        twentythree=_call(call_id=1, source="23andme", a1="A", a2="G"),
+        ancestry=_call(call_id=2, source="ancestry", a1=None, a2=None, is_no_call=True),
+        imputed=_call(call_id=10, source="beagle_imputed", a1="A", a2="G", imputation_r2=0.9),
+    )
+    consensus, discrepancies = resolve(pair)
+    assert consensus.consensus_method == "single_source"
+    assert consensus.is_imputed is False
+    assert (consensus.consensus_allele_1, consensus.consensus_allele_2) == ("A", "G")
+    assert consensus.contributing_calls == (1, 10)
+    assert len(discrepancies) == 1
+    assert discrepancies[0].discrepancy_type == "no_call_diff"
+    assert discrepancies[0].source_a == "23andme"
+    assert discrepancies[0].source_b == "ancestry"
