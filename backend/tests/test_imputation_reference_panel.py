@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 import pytest
+import structlog
 
 from genome.db import init_databases
 from genome.db.sqlite_conn import sqlcipher_connection
@@ -26,8 +27,12 @@ from genome.imputation.reference_panel import (
     GENETIC_MAP_URL,
     PANEL_CHROMOSOMES,
     ReferencePanel,
+    _normalize_map_file,
+    _normalize_on_disk_maps,
+    _remove_doubled_map_files,
     default_panel_root,
     install_panel,
+    normalize_map_chrom,
     validate_panel,
 )
 from genome.privacy.external_client import ExternalCallsDisabledError
@@ -229,7 +234,8 @@ def test_validate_panel_partial_install_reports_only_missing(
     # Plant the JAR + some maps + some panels.
     panel.beagle_jar.write_bytes(b"jar")
     panel.map_for_chrom("1").write_bytes(b"map1")
-    panel.map_for_chrom("X").write_bytes(b"mapX")
+    # chrX map column 1 must read 'chrX' (PR 5a validate_panel assertion).
+    panel.map_for_chrom("X").write_bytes(b"chrX\t.\t0.0\t1\n")
     p1 = panel.panel_for_chrom("1")
     assert p1 is not None
     p1.write_bytes(b"vcf1")
@@ -252,7 +258,8 @@ def test_validate_panel_complete_install_returns_empty(
     panel.ensure_layout()
     panel.beagle_jar.write_bytes(b"jar")
     for c in PANEL_CHROMOSOMES:
-        panel.map_for_chrom(c).write_bytes(b"m")
+        # Realistic column-1 label so the chrX-col1 assertion (PR 5a) passes.
+        panel.map_for_chrom(c).write_bytes(f"chr{c}\t.\t0.0\t1\n".encode("ascii"))
         p = panel.panel_for_chrom(c)
         assert p is not None
         p.write_bytes(b"v")
@@ -532,3 +539,131 @@ def test_install_panel_chr_prefix_rewrite_preserves_existing_chr(
             col1 = line.split("\t", 1)[0]
             assert col1.startswith("chr")
             assert not col1.startswith("chrchr")
+
+
+# -----------------------------------------------------------------------------
+# Genetic-map column-1 normalization (PR 5a — Beagle exact-string matching).
+# -----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("col1", "expected"),
+    [
+        ("chrX", "chrX"),  # already canonical — a byte-identical no-op
+        ("X", "chrX"),
+        ("23", "chrX"),  # PLINK numeric sex label
+        ("chr23", "chrX"),
+        ("chrchrX", "chrX"),  # repair a doubled prefix
+        ("1", "chr1"),
+        ("22", "chr22"),
+        ("chr1", "chr1"),
+        ("chrchr1", "chr1"),
+        ("24", "chrY"),  # PLINK numeric Y — not in the panel, but the map is total
+        ("chr24", "chrY"),
+    ],
+)
+def test_normalize_map_chrom_canonicalizes(col1: str, expected: str) -> None:
+    assert normalize_map_chrom(col1) == expected
+
+
+@pytest.mark.parametrize(
+    "col1",
+    ["chrX", "X", "23", "chr23", "chrchrX", "1", "chrchr1", "24"],
+)
+def test_normalize_map_chrom_is_a_fixed_point(col1: str) -> None:
+    once = normalize_map_chrom(col1)
+    assert normalize_map_chrom(once) == once
+    assert not once.startswith("chrchr")
+
+
+def test_normalize_map_file_rewrites_bare_and_doubled_labels(tmp_path: Path) -> None:
+    log = structlog.get_logger("test")
+    mapfile = tmp_path / "plink.chrX.GRCh38.map"
+    mapfile.write_text("23\t.\t0.0\t1\n23\t.\t1.0\t1000\n")
+
+    assert _normalize_map_file(mapfile, log) is True
+    assert mapfile.read_text() == "chrX\t.\t0.0\t1\nchrX\t.\t1.0\t1000\n"
+
+    # Second pass: nothing to do, byte-identical.
+    before = mapfile.read_bytes()
+    assert _normalize_map_file(mapfile, log) is False
+    assert mapfile.read_bytes() == before
+
+
+def test_normalize_map_file_passes_comments_and_blanks_through(tmp_path: Path) -> None:
+    log = structlog.get_logger("test")
+    mapfile = tmp_path / "plink.chr1.GRCh38.map"
+    mapfile.write_text("# header comment\n\n1\t.\t0.0\t1\n")
+    _normalize_map_file(mapfile, log)
+    assert mapfile.read_text() == "# header comment\n\nchr1\t.\t0.0\t1\n"
+
+
+def test_normalize_on_disk_maps_repairs_existing(
+    panel_root: Path,  # noqa: ARG001
+) -> None:
+    log = structlog.get_logger("test")
+    panel = ReferencePanel.resolve()
+    panel.ensure_layout()
+    for c in PANEL_CHROMOSOMES:
+        col1 = "23" if c == "X" else c
+        panel.map_for_chrom(c).write_text(f"{col1}\t.\t0.0\t1\n")
+
+    _normalize_on_disk_maps(panel, log)
+
+    assert panel.map_for_chrom("X").read_text().split("\t", 1)[0] == "chrX"
+    assert panel.map_for_chrom("1").read_text().split("\t", 1)[0] == "chr1"
+
+
+def test_remove_doubled_map_files(
+    panel_root: Path,  # noqa: ARG001
+) -> None:
+    log = structlog.get_logger("test")
+    panel = ReferencePanel.resolve()
+    panel.ensure_layout()
+    good = panel.map_for_chrom("1")
+    good.write_text("chr1\t.\t0.0\t1\n")
+    stray_x = panel.genetic_map_dir / "plink.chrchrX.GRCh38.map"
+    stray_1 = panel.genetic_map_dir / "plink.chrchr1.GRCh38.map"
+    stray_x.write_text("junk")
+    stray_1.write_text("junk")
+
+    _remove_doubled_map_files(panel, log)
+
+    assert not stray_x.exists()
+    assert not stray_1.exists()
+    assert good.exists()
+
+
+def test_validate_panel_flags_wrong_chrx_map_col1(
+    panel_root: Path,  # noqa: ARG001
+) -> None:
+    panel = ReferencePanel.resolve()
+    panel.ensure_layout()
+    panel.beagle_jar.write_bytes(b"jar")
+    for c in PANEL_CHROMOSOMES:
+        # chrX carries the WRONG (bare PLINK numeric) label; the rest are fine.
+        col1 = "23" if c == "X" else f"chr{c}"
+        panel.map_for_chrom(c).write_text(f"{col1}\t.\t0.0\t1\n")
+        p = panel.panel_for_chrom(c)
+        assert p is not None
+        p.write_bytes(b"v")
+
+    problems = validate_panel(panel)
+    assert any("chrX genetic map column 1" in p for p in problems)
+
+
+def test_install_maps_chrx_label_to_chrx(
+    panel_root: Path,  # noqa: ARG001
+    mock_transport: dict[str, list[httpx.Request]],  # noqa: ARG001 — keeps the patch active
+) -> None:
+    """End-to-end: install rewrites the chrX map's bare ``23`` to ``chrX``."""
+    init_databases()
+    _enable_external_calls()
+    panel = ReferencePanel.resolve()
+
+    install_panel(panel)
+
+    chrx_col1 = panel.map_for_chrom("X").read_text().splitlines()[0].split("\t", 1)[0]
+    assert chrx_col1 == "chrX"
+    # A real install therefore satisfies the validate_panel chrX assertion.
+    assert validate_panel(panel) == []

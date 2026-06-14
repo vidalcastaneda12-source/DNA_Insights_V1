@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- PR 5a (pre-Phase-6): chrX imputation via the **M1** panel-diploidization
+  mechanic (`finding-029`, closing `finding-008`). New `genome imputation panel
+  prepare-chrx` rewrites male non-PAR haploid genotypes in the 1000G chrX panel
+  to homozygous-diploid (probe-validated `bgzip | awk | bgzip` stream, non-PAR
+  gated, asserts haploid-free) so Beagle 5.5's uniform-ploidy reference loader
+  accepts it; the runner points the chrX `ref=` at `chrX.diploidized.vcf.gz` and
+  fails chrX clearly when it is absent. Adds: a minimal in-SQL sex mechanism
+  (`imputation/sex.py` + `--sex {M,F,auto}` on `prepare`/`run`, no DB column);
+  `genome/par_regions.py`; the **`consensus_chrx_dosage_v`** view (the only
+  schema/DDL touch — corrects male non-PAR dosage 2→1/0→0 and flags
+  `male_nonpar_het_anomaly`) materialized via a targeted `CREATE OR REPLACE VIEW`
+  — **view-only ⇒ no `rm -rf data/` rebuild** (PR #68 precedent), still compiled
+  through `genome init`; and a post-merge male-non-PAR-het guard recorded on the
+  imputed `sample_qc.qc_notes`. Also lands the `finding-008` safety fixes
+  (shared `imputation/bgzf.py`; the runner unlinks partial output and re-imputes
+  an EOF-less BGZF instead of skipping it; the import refuses a cleanly-empty
+  chromosome with a non-trivial manifest count) and genetic-map hardening
+  (idempotent `normalize_map_chrom` with `23→X`/`24→Y`, stray `chrchr*` cleanup,
+  a chrX-map column-1 assertion in `validate_panel`).
 - PR 5b-pre (pre-Phase-6): `consensus_v1` chip-no-call completion — a chip
   *no-call* must not clobber a real imputed genotype. `merge/consensus.py:resolve()`
   gains a guard so that when a real `beagle_imputed` call is present and the only

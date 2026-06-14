@@ -33,6 +33,7 @@ from genome.config import get_settings
 from genome.db.duckdb_conn import duckdb_connection
 from genome.imputation.archive import ImputationArchive, restrict_file
 from genome.imputation.runs import insert_run
+from genome.imputation.sex import profile_sex_label
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -94,6 +95,7 @@ class PreparedUpload:
     variants_per_chrom: dict[str, int]
     manifest_path: Path
     input_run_ids: tuple[int, ...]
+    profile_sex: str
 
 
 def _input_run_ids(conn: DuckDBPyConnection) -> tuple[int, ...]:
@@ -262,12 +264,14 @@ def _write_manifest(  # noqa: PLR0913 — manifest covers every provenance field
     pipeline_version: str,
     variants_per_chrom: dict[str, int],
     input_run_ids: tuple[int, ...],
+    profile_sex: str,
 ) -> Path:
     """Write a JSON manifest of the prepare step's output.
 
     The manifest is what a re-running session reads to recover the run
     parameters without re-querying the DB. It is the on-disk source of truth
-    for "what did this run upload".
+    for "what did this run upload". ``profile_sex`` is recorded as transient
+    provenance for the chrX path (PR 5a) — no DB column is written.
     """
     payload: dict[str, object] = {
         "imputation_id": imputation_id,
@@ -278,6 +282,7 @@ def _write_manifest(  # noqa: PLR0913 — manifest covers every provenance field
         "pipeline_version": pipeline_version,
         "build": "GRCh38",
         "compression": "gzip",
+        "profile_sex": profile_sex,
         "variants_per_chrom": variants_per_chrom,
         "variants_total": sum(variants_per_chrom.values()),
         "chromosomes_exported": sorted(variants_per_chrom),
@@ -314,6 +319,7 @@ def prepare_run(
     duckdb_path: Path | None = None,
     archive_root: Path | None = None,
     force_new: bool = False,
+    sex: str | None = None,
 ) -> PreparedUpload:
     """Build the per-chromosome upload VCFs and create an ``imputation_runs`` row.
 
@@ -328,6 +334,10 @@ def prepare_run(
     duckdb_path : override the analytical DB path; defaults to settings.
     archive_root : override the archive root; defaults to settings.
     force_new : create a new run even if an in-flight run exists.
+    sex : explicit ``'M'`` / ``'F'`` override, or ``None`` for ``auto`` (resolve
+        from chip ``sample_qc``). Recorded in the manifest as transient chrX
+        provenance only — no DB column is written, and an ambiguous result does
+        not block the prepare (the export itself is sex-independent under R1).
     """
     settings = get_settings()
     archive_root = archive_root or settings.archive_path
@@ -352,6 +362,11 @@ def prepare_run(
                 "raw export before running `genome imputation prepare`"
             )
             raise RuntimeError(msg)
+
+        # Resolved softly (never raises on ambiguity): the export is
+        # sex-independent under R1, so this is recorded as manifest provenance
+        # only — it must not block an ambiguous-sex profile from preparing.
+        profile_sex = profile_sex_label(conn, sex)
 
         # Compute totals up front so the imputation_runs row records the right number.
         variants_per_chrom: dict[str, int] = {}
@@ -405,6 +420,7 @@ def prepare_run(
         pipeline_version=EXPORT_PIPELINE_VERSION,
         variants_per_chrom=variants_per_chrom,
         input_run_ids=input_run_ids,
+        profile_sex=profile_sex,
     )
 
     log.info(
@@ -412,6 +428,7 @@ def prepare_run(
         imputation_id=imputation_id,
         variants_total=total_variants,
         chroms_exported=sorted(variants_per_chrom),
+        profile_sex=profile_sex,
     )
     return PreparedUpload(
         imputation_id=imputation_id,
@@ -421,4 +438,5 @@ def prepare_run(
         variants_per_chrom=dict(variants_per_chrom),
         manifest_path=manifest,
         input_run_ids=input_run_ids,
+        profile_sex=profile_sex,
     )

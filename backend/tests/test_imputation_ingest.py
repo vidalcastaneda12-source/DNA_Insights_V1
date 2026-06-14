@@ -13,6 +13,7 @@ a guard against regression.
 from __future__ import annotations
 
 import gzip
+import json
 import time
 from typing import TYPE_CHECKING
 
@@ -822,3 +823,88 @@ def test_dry_run_also_rejects_truncated_bgzf_result_vcf(
 def test_dbsnp_rsid_or_none(vcf_id: str | None, expected: str | None) -> None:
     """Only a strict ``rs<n>`` survives; synthetic / malformed IDs become NULL."""
     assert _dbsnp_rsid_or_none(vcf_id) == expected
+
+
+# ---------------------------------------------------------------------------
+# Pre-Phase-6: manifest-robust empty-output guard (finding-008 #2).
+#
+# The BGZF EOF guard above catches a *truncated* result; this one catches a
+# *cleanly-closed-yet-empty* result by cross-checking the prepare manifest's
+# per-chromosome upload count.
+# ---------------------------------------------------------------------------
+
+
+def _write_upload_manifest(archive: ImputationArchive, variants_per_chrom: dict[str, int]) -> None:
+    """Write a minimal prepare ``MANIFEST.json`` carrying ``variants_per_chrom``."""
+    archive.upload_dir.mkdir(parents=True, exist_ok=True)
+    archive.upload_manifest.write_text(
+        json.dumps({"variants_per_chrom": variants_per_chrom}),
+        encoding="utf-8",
+    )
+
+
+def test_import_raises_on_empty_chrom_with_nontrivial_manifest(
+    isolated_settings: dict[str, str],
+) -> None:
+    """Zero output records for a chromosome the manifest says had input → raise.
+
+    A cleanly-closed (plain-gzip, header-only) result VCF slips past the BGZF
+    EOF guard but is still a silent Beagle failure when the prepare manifest
+    recorded uploaded variants for that chromosome.
+    """
+    init_databases()
+    archive_root = isolated_settings_archive_root(isolated_settings)
+    imp_id = _seed_completed_run(archive_root=archive_root)
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+
+    _write_upload_manifest(archive, {"1": 5})
+    _write_synthetic_vcf(archive.result_dir / "chr1.dose.vcf.gz", chrom="chr1", n_variants=0)
+
+    with pytest.raises(RuntimeError, match="streamed zero variant records"):
+        import_result(imp_id, archive_root=archive_root)
+
+
+def test_import_empty_chrom_without_manifest_is_not_raised(
+    isolated_settings: dict[str, str],
+) -> None:
+    """Without a manifest the empty guard is skipped — the same empty output
+    that raises *with* a manifest must import quietly *without* one
+    (the explicit_vcf_paths / non-standard-layout case).
+    """
+    init_databases()
+    archive_root = isolated_settings_archive_root(isolated_settings)
+    imp_id = _seed_completed_run(archive_root=archive_root)
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+
+    # No manifest written.
+    _write_synthetic_vcf(archive.result_dir / "chr1.dose.vcf.gz", chrom="chr1", n_variants=0)
+
+    result = import_result(imp_id, archive_root=archive_root)
+    assert isinstance(result, ImportResult)
+    assert result.variants_total == 0
+
+
+def test_import_all_below_threshold_does_not_trip_empty_guard(
+    isolated_settings: dict[str, str],
+) -> None:
+    """All-below-R²-threshold is a legitimate zero-*kept* result, not an empty
+    one: the chromosome still streamed raw records, so the guard stays quiet.
+    """
+    init_databases()
+    archive_root = isolated_settings_archive_root(isolated_settings)
+    imp_id = _seed_completed_run(archive_root=archive_root)
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+
+    _write_upload_manifest(archive, {"1": 5})
+    # Five variants, all at R²=0.25 — below the default 0.3 import threshold.
+    _write_synthetic_vcf(
+        archive.result_dir / "chr1.dose.vcf.gz",
+        chrom="chr1",
+        n_variants=5,
+        r2_low_count=5,
+    )
+
+    result = import_result(imp_id, archive_root=archive_root)
+    assert isinstance(result, ImportResult)
+    assert result.variants_total == 0
+    assert result.variants_below_threshold == 5

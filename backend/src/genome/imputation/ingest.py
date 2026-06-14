@@ -44,7 +44,7 @@ Schema fields we write:
 from __future__ import annotations
 
 import contextlib
-import os
+import json
 import re
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -56,6 +56,7 @@ import structlog
 from genome.config import get_settings
 from genome.db.duckdb_conn import duckdb_connection
 from genome.imputation.archive import ImputationArchive
+from genome.imputation.bgzf import is_truncated_bgzf
 from genome.imputation.runs import (
     ImputationRun,
     fetch_run,
@@ -105,23 +106,6 @@ def _dbsnp_rsid_or_none(vcf_id: str | None) -> str | None:
     return vcf_id if _DBSNP_RSID_RE.match(vcf_id) else None
 
 
-# A cleanly-closed BGZF file (Beagle's .vcf.gz output) ends with this 28-byte
-# empty-block EOF marker (htslib's BGZF_EOF). Its absence on a BGZF file means
-# the writer died mid-stream — the truncated result/chrX.vcf.gz of
-# finding-008 #2, which cyvcf2 reads as zero variants with only a
-# "[W::bgzf_read_block] EOF marker is absent" warning rather than an error.
-_BGZF_EOF_MARKER: Final[bytes] = bytes.fromhex(
-    "1f8b08040000000000ff0600424302001b0003000000000000000000",
-)
-# A BGZF block starts with the gzip+deflate magic (1f 8b 08) and sets the
-# FEXTRA flag (0x04) for its per-block size subfield. Plain gzip — our synthetic
-# fixtures and the prepare-step upload VCFs — leaves FEXTRA unset, so this
-# distinguishes real Beagle BGZF output from plain gzip and limits the
-# EOF-marker check to the former.
-_GZIP_DEFLATE_MAGIC: Final[bytes] = b"\x1f\x8b\x08"
-_GZIP_FLG_FEXTRA: Final[int] = 0x04
-
-
 @dataclass(slots=True)
 class _ImportCounters:
     """Mutable accumulators threaded through the streaming ingest."""
@@ -140,6 +124,11 @@ class _ImportCounters:
     x_het: int = 0
     y_called: int = 0
     per_chrom: dict[str, int] = field(default_factory=dict)
+    # Records actually read from each chromosome's VCF *before* any biallelic /
+    # R²-threshold filter. The empty-output guard (finding-008 #2) keys on this:
+    # a chromosome whose file streamed zero raw records despite a non-trivial
+    # prepare-manifest upload count is a silent Beagle failure.
+    raw_per_chrom: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -269,38 +258,6 @@ def _extract_r2(info: _cyvcf2_typing.INFO) -> float | None:
     return None
 
 
-def _is_bgzf(path: Path) -> bool:
-    """Return True if ``path`` is a BGZF file (vs. plain gzip / uncompressed).
-
-    Beagle writes BGZF; our synthetic test fixtures and the prepare-step upload
-    VCFs use plain ``gzip.open``. Only BGZF carries the EOF marker checked by
-    :func:`_has_bgzf_eof`, so plain gzip is exempt from the truncation guard.
-    """
-    try:
-        with path.open("rb") as fh:
-            head = fh.read(4)
-    except OSError:
-        return False
-    return (
-        head.startswith(_GZIP_DEFLATE_MAGIC)
-        and len(head) > len(_GZIP_DEFLATE_MAGIC)
-        and bool(head[3] & _GZIP_FLG_FEXTRA)
-    )
-
-
-def _has_bgzf_eof(path: Path) -> bool:
-    """Return True if BGZF ``path`` ends with the canonical 28-byte EOF marker."""
-    marker_len = len(_BGZF_EOF_MARKER)
-    try:
-        if path.stat().st_size < marker_len:
-            return False
-        with path.open("rb") as fh:
-            fh.seek(-marker_len, os.SEEK_END)
-            return fh.read(marker_len) == _BGZF_EOF_MARKER
-    except OSError:
-        return False
-
-
 def _assert_result_vcf_intact(path: Path) -> None:
     """Refuse a truncated BGZF result VCF (finding-008 #2).
 
@@ -309,7 +266,7 @@ def _assert_result_vcf_intact(path: Path) -> None:
     file as zero (or partially-zero) variants with only a warning, so a broken
     run would otherwise import as a silent empty success. Raise instead.
     """
-    if _is_bgzf(path) and not _has_bgzf_eof(path):
+    if is_truncated_bgzf(path):
         msg = (
             f"result VCF {path} is a truncated BGZF file (missing its EOF "
             "marker); the imputation runner almost certainly failed mid-write "
@@ -439,6 +396,11 @@ def _stream_chromosome(
                 # silently. Beagle should never produce this, but a misnamed
                 # file would otherwise corrupt the per-chrom counters.
                 continue
+            # Count the raw record *before* the biallelic / R² filters so the
+            # empty-output guard can tell "Beagle produced nothing" (a silent
+            # failure) apart from "every variant fell below the R² threshold"
+            # (legitimate — raw > 0).
+            counters.raw_per_chrom[chrom] = counters.raw_per_chrom.get(chrom, 0) + 1
             alts = tuple(str(a) for a in v.ALT or [])
             if not _is_biallelic_snv(str(v.REF), alts):
                 continue
@@ -1024,6 +986,67 @@ def _plan_import(  # noqa: PLR0913 — option set comes from the public API surf
     return _ImportPlan(run=run, archive=archive, vcf_inputs=vcf_inputs)
 
 
+def _load_manifest_variants_per_chrom(archive: ImputationArchive) -> dict[str, int] | None:
+    """Read ``variants_per_chrom`` from the prepare ``MANIFEST.json``, or ``None``.
+
+    Returns ``None`` (guard disabled) when the manifest is absent or unparseable
+    — the ``explicit_vcf_paths`` / non-standard-layout case where there is no
+    prepare manifest to trust. A present, well-formed manifest yields the
+    per-chromosome *upload* counts the empty-output guard compares against. Keys
+    are the unprefixed chromosome labels the prepare step writes (``"X"``,
+    ``"1"``), matching the import loop's ``chrom``.
+    """
+    try:
+        raw = archive.upload_manifest.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        payload: object = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    per_chrom = payload.get("variants_per_chrom")
+    if not isinstance(per_chrom, dict):
+        return None
+    out: dict[str, int] = {}
+    for key, value in per_chrom.items():
+        with contextlib.suppress(TypeError, ValueError):
+            out[str(key)] = int(value)
+    return out
+
+
+def _assert_chrom_not_silently_empty(
+    *,
+    chrom: str,
+    raw_records: int,
+    manifest_per_chrom: dict[str, int] | None,
+) -> None:
+    """Refuse a cleanly-closed-yet-empty imputed result for a non-trivial input.
+
+    finding-008 #2 can leave a result VCF that cyvcf2 reads as zero variants
+    without raising. :func:`_assert_result_vcf_intact` catches the *truncated*
+    (missing-BGZF-EOF) shape; this guard catches the *cleanly-closed-empty*
+    shape by cross-checking the prepare manifest: if Beagle was handed >0
+    variants for ``chrom`` but its output streamed none, the run failed
+    silently. Skipped when no manifest is available (no trusted input count).
+    An all-below-R²-threshold chromosome is unaffected — it still streamed
+    ``raw_records > 0`` before the threshold dropped them.
+    """
+    if manifest_per_chrom is None:
+        return
+    expected = manifest_per_chrom.get(chrom, 0)
+    if raw_records == 0 and expected > 0:
+        msg = (
+            f"imputed result for chr{chrom} streamed zero variant records, but the "
+            f"prepare manifest recorded {expected} uploaded variant(s) for it — the "
+            f"Beagle run for this chromosome almost certainly failed (finding-008). "
+            f"Re-run `genome imputation run <id>`, or import the intact chromosomes "
+            f"with `--chromosomes` (excluding chr{chrom})."
+        )
+        raise RuntimeError(msg)
+
+
 def _execute_import(  # noqa: PLR0913 — options pass through directly to the writers
     imputation_id: int,
     plan: _ImportPlan,
@@ -1060,6 +1083,9 @@ def _execute_import(  # noqa: PLR0913 — options pass through directly to the w
                 variants_no_call=0,
                 variants_imputed=0,
             )
+            manifest_per_chrom = _load_manifest_variants_per_chrom(plan.archive)
+            if manifest_per_chrom is None:
+                log.info("imputation.import.empty_guard.skipped_no_manifest")
             new_master_total = 0
             deactivated_total = 0
             for chrom, path in plan.vcf_inputs:
@@ -1073,6 +1099,11 @@ def _execute_import(  # noqa: PLR0913 — options pass through directly to the w
                     imputation_panel=imputation_panel,
                     r2_threshold=r2_threshold,
                     batch_size=batch_size,
+                )
+                _assert_chrom_not_silently_empty(
+                    chrom=chrom,
+                    raw_records=counters.raw_per_chrom.get(chrom, 0),
+                    manifest_per_chrom=manifest_per_chrom,
                 )
                 new_master_total += new_master
                 deactivated_total += deactivated

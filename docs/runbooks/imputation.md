@@ -245,6 +245,69 @@ The consensus needs to be refreshed across all three sources now that
 After this step, the entire downstream pipeline (Phases 5+) operates on
 the unified imputed set.
 
+## chrX imputation (M1 diploidized panel)
+
+chrX needs one extra step. The 1000 Genomes panel stores male non-PAR chrX
+**haploid**, and Beagle 5.5's reference loader requires uniform ploidy per
+sample across the whole chromosome — it aborts at the first non-PAR position
+(`HG00096 … chrX:2785078 is haploid`). PR 5a resolves this with the **M1**
+mechanic (`finding-029`): a one-time transform rewrites male non-PAR haploid
+genotypes in the panel to homozygous-diploid so Beagle accepts it.
+
+### Step 0.5: prepare the chrX panel (one-time)
+
+```
+genome imputation panel prepare-chrx
+```
+
+What this does:
+
+- Streams the installed `chrX.vcf.gz` through `bgzip | awk | bgzip`, doubling
+  every male non-PAR haploid genotype into a phased homozygote (PAR1 / PAR2 are
+  already diploid and are left untouched). Needs `bgzip` and `awk` on PATH.
+- Writes `chrX.diploidized.vcf.gz` beside the panel and asserts the whole
+  chromosome is haploid-free before it can be used.
+- Idempotent — an existing diploidized panel is reused; pass `--force` to
+  rebuild. This is a gated long operation (it scans the whole chromosome).
+
+`genome imputation run` with chrX in scope points the chrX `ref=` at this file
+and refuses to start (with an actionable message) if it is missing.
+
+### Sex (`--sex`)
+
+`genome imputation prepare` and `genome imputation run` take `--sex {M,F,auto}`
+(default `auto`). `auto` resolves the profile sex from the chip `sample_qc`
+rows; `prepare` records it in the manifest as provenance, and a chrX `run`
+**requires** a determinate sex (it corrects male non-PAR dosage downstream). If
+the chip aggregate is ambiguous, pass `--sex M` or `--sex F`. Nothing is
+persisted to the database.
+
+### Corrected dosage + het guard
+
+Under M1 the user's male non-PAR chrX is stored homozygous-diploid (lossless).
+The `consensus_chrx_dosage_v` view maps that back to the true hemizygous copy
+number (`corrected_dosage`: 2→1, 0→0) for a male profile and flags any
+biologically-impossible male non-PAR het (`male_nonpar_het_anomaly`). After
+`genome merge`, the male-non-PAR-het guard counts those anomalies and records
+the count on the imputed `sample_qc.qc_notes` (`[chrx_male_nonpar_het=N]`); a
+non-trivial count is the signal to revisit the mechanic (see `finding-029`).
+
+### The full chrX reload sequence
+
+When loading chrX for the first time, fold in the PR-5b duplicate-collapse chain
+so the chip+imputed duplicates surface on chrX:
+
+```
+genome imputation panel prepare-chrx
+genome imputation prepare --sex auto
+genome imputation run <id> --chromosomes X
+genome imputation import <id> --chromosomes X
+genome annotate collapse-duplicate-variants
+genome merge
+genome annotate align-tier3-consensus
+genome annotate refresh-index
+```
+
 ## Rebuilding from a preserved archive
 
 PRs that touch `docs/schemas/` or `ddl/` require the schema-change
@@ -339,50 +402,24 @@ coverage. If the runner emits a `no panel for chrY` warning and skips Y,
 that is expected and not a bug. The merged set will continue to carry
 the chip-derived Y calls.
 
-### Known issues: chrX hemizygous-haploid Beagle failure
+### chrX hemizygous-haploid Beagle failure (resolved — PR 5a)
 
-chrX imputation against the 1000 Genomes Phase 3 GRCh38 reference panel
-(EBI's high-coverage phased release) currently fails in Beagle 5.5
-with:
+Historically chrX imputation failed in Beagle 5.5 with:
 
     java.lang.IllegalArgumentException: Reference sample HG00096 has an
     inconsistent number of alleles. The first genotype is diploid, but
     the genotype at position chrX:2785078 is haploid
 
-`HG00096` is a male 1000 Genomes reference sample; `chrX:2785078` sits
-just outside PAR1 (PAR1 ends at chrX:2,781,479 on GRCh38). The 1000G
-panel correctly represents non-PAR chrX as haploid for males and
-diploid for females, but Beagle 5.5's reference loader requires uniform
-ploidy per sample across the whole chromosome and rejects the panel at
-the first non-PAR position.
+The 1000G panel represents male non-PAR chrX as haploid, and Beagle's reference
+loader requires uniform ploidy per sample across the whole chromosome. PR 5a
+resolves this with the **M1** mechanic — see "chrX imputation (M1 diploidized
+panel)" above and `docs/findings/finding-029-chrx-imputation-m1.md`. Run
+`genome imputation panel prepare-chrx` once before any chrX run.
 
-Operational symptoms:
-
-- The chrX Beagle subprocess exits with returncode 1 after writing a
-  truncated `result/chrX.vcf.gz` (no BGZF EOF marker).
-- The downstream `genome imputation import <id>` reads the truncated
-  file via cyvcf2, which emits `[W::bgzf_read_block] EOF marker is
-  absent. The input may be truncated` and iterates zero variants
-  without raising.
-- Autosomes (chr1–chr22) succeed normally. Because chrX failed while
-  the autosomes succeeded, `imputation_runs.status` stays at
-  `processing` per the partial-failure convention from
-  `docs/findings/finding-007-beagle-real-data-cleanup.md`.
-
-This is the mechanism behind the "chrX imputed variants: 0 for males"
-behavior recorded in CLAUDE.md "Real-data observations" #3. The
-hemizygous `ref==alt` filter at `prepare` (see
-`docs/findings/finding-005-deferred-improvements.md` #6) contributes
-to the empty chrX result but is not the proximate cause; Beagle's
-reference loader fails before any user variant is imputed.
-
-There is no fix yet. Two options — pre-processing the panel to "fake
-diploid" male non-PAR X, and a sex-aware PAR1/PAR2/non-PAR split — are
-documented in
-`docs/findings/finding-008-phase4-rebuild-and-chrx-observations.md`
-and deferred. Until one of them lands, expect chrX imputed counts to
-be zero for male users and treat the truncated `result/chrX.vcf.gz`
-as the known-bad signal of this issue.
+If you see the error above, the diploidized panel is missing or stale: run
+`genome imputation panel prepare-chrx` (or `--force` to rebuild). The runner now
+fails chrX with a clear `no_diploidized_panel` message rather than crashing
+mid-write, and refuses to import a truncated or silently-empty chromosome.
 
 ### Audit log review
 
