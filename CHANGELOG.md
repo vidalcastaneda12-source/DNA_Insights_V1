@@ -24,7 +24,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an EOF-less BGZF instead of skipping it; the import refuses a cleanly-empty
   chromosome with a non-trivial manifest count) and genetic-map hardening
   (idempotent `normalize_map_chrom` with `23→X`/`24→Y`, stray `chrchr*` cleanup,
-  a chrX-map column-1 assertion in `validate_panel`).
+  a chrX-map column-1 assertion in `validate_panel`). Also fixes a latent
+  off-by-one in `canonicalize`'s `_resync_variant_id_sequence` that the chrX
+  import (the first default-`nextval` `variants_master` insert after a
+  canonicalize) surfaced: DuckDB 1.5.x reports `duckdb_sequences().last_value`
+  as the *next* value on a fresh connection (the connection canonicalize runs
+  on), so the old resync under-drained by one and stranded the sequence at
+  exactly `MAX(variant_id)` → duplicate-PK on the next insert. Now resyncs by
+  peeking one `nextval` and draining the gap (robust to the `last_value`
+  ambiguity); regression-tested on a fresh connection.
 - PR 5b-pre (pre-Phase-6): `consensus_v1` chip-no-call completion — a chip
   *no-call* must not clobber a real imputed genotype. `merge/consensus.py:resolve()`
   gains a guard so that when a real `beagle_imputed` call is present and the only

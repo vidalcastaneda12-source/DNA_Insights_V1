@@ -962,21 +962,27 @@ def _resync_variant_id_sequence(conn: DuckDBPyConnection) -> None:
     usable reset (``CREATE OR REPLACE SEQUENCE`` trips the column-DEFAULT
     dependency; ``ALTER SEQUENCE … RESTART`` is unimplemented), so we advance
     by draining ``nextval`` to the high-water mark.
+
+    We deliberately do NOT read the position from ``duckdb_sequences()``: its
+    ``last_value`` means "last returned" on a connection that has called
+    ``nextval`` in-session, but "next to return" on a fresh connection (DuckDB
+    1.5.x). canonicalize allocates ids explicitly and never calls ``nextval``,
+    so this always runs on a fresh-position connection — where reading
+    ``last_value`` as "consumed" under-drained by one and stranded the next
+    value at exactly ``MAX(variant_id)``, so the next default-path insert
+    collided (the latent bug PR 5a's chrX import surfaced). Instead we peek one
+    ``nextval`` (a harmless one-id gap) and drain the remaining gap, which is
+    correct regardless of the ``last_value`` ambiguity.
     """
     mx_row = conn.execute("SELECT COALESCE(MAX(variant_id), 0) FROM variants_master").fetchone()
     mx = int(mx_row[0]) if mx_row is not None else 0
-    seq_row = conn.execute(
-        "SELECT last_value, start_value, increment_by "
-        "FROM duckdb_sequences() WHERE sequence_name = 'variant_id_seq'",
-    ).fetchone()
-    if seq_row is None:
-        return
-    last_value, start_value, increment_by = seq_row
-    consumed = int(last_value) if last_value is not None else int(start_value) - int(increment_by)
-    delta = mx - consumed
-    if delta > 0:
+    nxt_row = conn.execute("SELECT nextval('variant_id_seq')").fetchone()
+    nxt = int(nxt_row[0]) if nxt_row is not None else 0
+    if nxt <= mx:
+        # Drain the remaining gap so the next nextval lands at mx + 1.
         conn.execute(
-            f"SELECT max(s) FROM (SELECT nextval('variant_id_seq') AS s FROM range({delta}))",  # noqa: S608 — integer delta only
+            "SELECT max(s) FROM (SELECT nextval('variant_id_seq') AS s FROM range(?))",
+            [mx - nxt],
         ).fetchone()
 
 

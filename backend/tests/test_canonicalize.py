@@ -27,6 +27,7 @@ from genome.annotate.canonicalize import (
     CanonicalizeResult,
     DbsnpNotLoadedError,
     DerivedTablesNotEmptyError,
+    _resync_variant_id_sequence,
     canonicalize_variants,
     take_snapshot,
 )
@@ -646,6 +647,44 @@ def test_sequence_resynced_allows_default_path_insert(
         # shift across DuckDB releases); the insert is not.
         new_id = _seed_variant_via_sequence(conn, pos=2000, ref="C", alt="T")
         assert new_id > post_max
+
+
+def test_resync_survives_fresh_connection_last_value(
+    isolated_settings: dict[str, str],  # noqa: ARG001 — redirects the DB path
+) -> None:
+    """Regression: the sequence re-sync must hold on a *fresh* connection.
+
+    Production canonicalize runs on a connection that allocated survivor ids
+    explicitly and never called ``nextval`` in-session. On such a connection
+    DuckDB's ``duckdb_sequences().last_value`` reports the *next* value, not the
+    last returned (DuckDB 1.5.x); reading it as "consumed" under-drained by one
+    and stranded the next ``nextval`` at exactly ``MAX(variant_id)`` — the next
+    default-path insert then collided (the latent bug PR 5a's chrX import hit).
+    The same-connection test above can't catch this: its seed nextvals make
+    ``last_value`` report the last-returned value instead. Here the seed +
+    explicit-id allocation happen on one connection, then the re-sync runs on a
+    second, fresh connection — the production condition.
+    """
+    init_databases()
+
+    # Connection 1: seed via the sequence (in sync), then allocate explicit high
+    # ids the way canonicalize does — without advancing the sequence.
+    with duckdb_connection() as conn:
+        for i in range(5):
+            _seed_variant_via_sequence(conn, pos=1000 + i, ref="A", alt="G")
+        seeded_max = int(conn.execute("SELECT MAX(variant_id) FROM variants_master").fetchone()[0])
+        conn.execute(
+            "INSERT INTO variants_master (variant_id, chrom, pos_grch38, ref_allele, alt_allele) "
+            "SELECT ? + i, '1'::chromosome_enum, 9000000 + i, 'C', 'T' FROM range(3) t(i)",
+            [seeded_max + 1],
+        )
+
+    # Connection 2 (fresh): re-sync, then a default-path insert must not collide.
+    with duckdb_connection() as conn:
+        mx = int(conn.execute("SELECT MAX(variant_id) FROM variants_master").fetchone()[0])
+        _resync_variant_id_sequence(conn)
+        new_id = _seed_variant_via_sequence(conn, pos=2_000_000, ref="A", alt="T")
+        assert new_id > mx
 
 
 # ---------------------------------------------------------------------------

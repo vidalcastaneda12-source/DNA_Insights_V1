@@ -148,6 +148,23 @@ later re-run against the same corpus is then a regression signal):
   diploidized run would implicate Beagle's boundary handling and gets an entry
   here.
 
+## Side-effect surfaced: the canonicalize variant_id_seq off-by-one
+
+The first real chrX `import` is the first default-`nextval` `variants_master`
+insert *after* a canonicalize (the autosomal import ran before it; 5b-collapse /
+merge / refresh-index don't `nextval`-insert), and it hit a duplicate-PK at
+exactly `MAX(variant_id)`. Root cause: `canonicalize`'s
+`_resync_variant_id_sequence` read `duckdb_sequences().last_value` to size its
+drain, but DuckDB 1.5.x reports `last_value` as the *last returned* value on a
+connection that called `nextval` in-session and the *next to return* on a fresh
+connection. canonicalize allocates survivor ids explicitly and never calls
+`nextval`, so it always runs on a fresh-position connection — the resync read the
+"next" value as "consumed", under-drained by one, and stranded the sequence at
+exactly `MAX(variant_id)`. The same-connection regression test could not catch
+it (its seed `nextval`s flip `last_value` to the last-returned meaning). Fixed in
+this PR by peeking one `nextval` and draining the remaining gap (no reliance on
+the catalog view), with a fresh-connection regression test.
+
 ## Follow-up
 
 - Capture the anchors above at the first authoritative run and lock them here.
