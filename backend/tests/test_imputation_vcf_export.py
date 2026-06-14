@@ -506,3 +506,85 @@ def test_pipeline_version_stamp_matches_constant(
             "SELECT pipeline_version FROM imputation_runs WHERE imputation_id = 1",
         ).fetchone()
     assert row[0] == EXPORT_PIPELINE_VERSION
+
+
+def test_prepare_exports_recovered_chrx_and_skips_hom_only(
+    isolated_settings: dict[str, str],  # noqa: ARG001 — fixture redirects paths
+) -> None:
+    """A canonical chrX SNV (ref != alt) exports; a hom-only (ref == alt) drops.
+
+    Under M1 + R1 the prepare step needs no chrX-specific change — the existing
+    ``ref != alt`` filter handles chrX. Post-canonicalization the recovered chrX
+    positions carry a real ALT and so flow through the export unchanged.
+    """
+    init_databases()
+    with duckdb_connection() as conn:
+        _seed_ingestion_run(conn, 1, "23andme")
+        _seed_variant_with_consensus(  # recovered: ref != alt -> exported
+            conn,
+            variant_id=1,
+            rsid="rs_recovered",
+            chrom="X",
+            pos=50_000_000,
+            ref="A",
+            alt="G",
+            consensus_a1="A",
+            consensus_a2="G",
+            dosage=1,
+        )
+        _seed_variant_with_consensus(  # hom-only: ref == alt -> dropped
+            conn,
+            variant_id=2,
+            rsid="rs_homonly",
+            chrom="X",
+            pos=50_000_001,
+            ref="C",
+            alt="C",
+            consensus_a1="C",
+            consensus_a2="C",
+            dosage=0,
+        )
+
+    result = prepare_run(sample_id="x")
+
+    assert result.variants_per_chrom == {"X": 1}
+    chrx_vcf = result.archive.upload_vcf_path("X")
+    with gzip.open(chrx_vcf, "rt") as f:
+        body = f.read()
+    assert "\t50000000\t" in body  # recovered chrX position exported
+    assert "\t50000001\t" not in body  # hom-only position dropped
+
+
+def test_prepare_manifest_records_profile_sex(
+    isolated_settings: dict[str, str],  # noqa: ARG001 — fixture redirects paths
+) -> None:
+    """The prepare manifest carries the resolved profile sex (transient provenance)."""
+    init_databases()
+    with duckdb_connection() as conn:
+        _seed_ingestion_run(conn, 1, "23andme")
+        conn.execute(
+            "INSERT INTO sample_qc (qc_id, run_id, sex_inferred, qc_status) "
+            "VALUES (1, 1, 'M', 'pass')",
+        )
+        _seed_variant_with_consensus(
+            conn,
+            variant_id=1,
+            rsid="rs_a",
+            chrom="1",
+            pos=1000,
+            ref="A",
+            alt="G",
+            consensus_a1="A",
+            consensus_a2="G",
+            dosage=1,
+        )
+
+    # auto resolves to the chip aggregate ('M')...
+    result = prepare_run(sample_id="x")
+    assert result.profile_sex == "M"
+    assert json.loads(result.manifest_path.read_text())["profile_sex"] == "M"
+
+    # ...and an explicit --sex override wins.
+    forced = prepare_run(sample_id="x", force_new=True, sex="F")
+    assert forced.profile_sex == "F"
+    assert json.loads(forced.manifest_path.read_text())["profile_sex"] == "F"

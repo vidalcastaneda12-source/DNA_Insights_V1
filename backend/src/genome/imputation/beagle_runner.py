@@ -39,6 +39,7 @@ Key design points:
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shutil
@@ -52,6 +53,7 @@ import structlog
 from genome.config import get_settings
 from genome.db.duckdb_conn import duckdb_connection
 from genome.imputation.archive import ImputationArchive, restrict_file
+from genome.imputation.bgzf import is_truncated_bgzf
 from genome.imputation.reference_panel import (
     PANEL_CHROMOSOMES,
     ReferencePanel,
@@ -243,6 +245,30 @@ def _vcf_parses_cleanly(path: Path) -> bool:
     return True
 
 
+def _output_is_complete(path: Path) -> bool:
+    """Return True if ``path`` is a fully-written, cleanly-parsing result VCF.
+
+    "Complete" is checked cheapest-first: the file exists, it is not a truncated
+    BGZF (Beagle writes BGZF; a missing EOF marker means the subprocess died
+    mid-write — finding-008 #2), and cyvcf2 can open the header and read its
+    first record. The truncation check sits *before* the cyvcf2 open because a
+    truncated BGZF is exactly the file cyvcf2 reads as a silent zero-variant
+    success — so the resumable skip-existing check must not treat it as clean
+    and skip re-imputation of a half-written chromosome.
+    """
+    if not path.is_file():
+        return False
+    if is_truncated_bgzf(path):
+        return False
+    return _vcf_parses_cleanly(path)
+
+
+def _unlink_quietly(path: Path) -> None:
+    """Remove a partial/garbage output file; ignore a file that isn't there."""
+    with contextlib.suppress(FileNotFoundError):
+        path.unlink()
+
+
 def _build_beagle_command(  # noqa: PLR0913 — Beagle's CLI is a flat keyword list
     *,
     beagle_jar: Path,
@@ -427,7 +453,7 @@ def _move_to_processing_if_pending(
         update_status(conn, imputation_id, status="processing", set_submitted=True)
 
 
-def _impute_one_chromosome(  # noqa: PLR0913 — per-call configuration is irreducible
+def _impute_one_chromosome(  # noqa: PLR0913, PLR0911 — irreducible config; chrX adds a guarded early-exit
     *,
     archive: ImputationArchive,
     panel: ReferencePanel,
@@ -453,8 +479,22 @@ def _impute_one_chromosome(  # noqa: PLR0913 — per-call configuration is irred
         log.warning("imputation.beagle.chrom.skip_no_panel", chrom=chrom)
         return "skipped", 0.0
 
+    if chrom == "X":
+        # M1: Beagle needs the diploidized chrX panel, not the raw mixed-ploidy
+        # one (finding-008/029). Refuse the chromosome with an actionable signal
+        # rather than crashing mid-run if it hasn't been prepared.
+        diploidized = panel.diploidized_chrx_panel
+        if not diploidized.is_file():
+            log.error(
+                "imputation.beagle.chrx.no_diploidized_panel",
+                expected=str(diploidized),
+                hint="run `genome imputation panel prepare-chrx` first",
+            )
+            return "failed", 0.0
+        panel_vcf = diploidized
+
     output_vcf = _output_vcf_path(archive, chrom)
-    if not force and _vcf_parses_cleanly(output_vcf):
+    if not force and _output_is_complete(output_vcf):
         log.info("imputation.beagle.chrom.skip_existing", output=str(output_vcf))
         return "skipped", 0.0
 
@@ -477,15 +517,27 @@ def _impute_one_chromosome(  # noqa: PLR0913 — per-call configuration is irred
         rc = _run_beagle_subprocess(cmd, chrom=chrom, imputation_id=imputation_id)
     except Exception:
         elapsed = time.monotonic() - start
+        # The subprocess never reported a clean exit; whatever partial output it
+        # left would be skipped-as-clean on a later non-force run only if its
+        # BGZF EOF survived — but a half-written file is garbage either way, so
+        # remove it (finding-008 #2 safety gap).
+        _unlink_quietly(output_vcf)
         log.exception("imputation.beagle.chrom.exception")
         return "failed", elapsed
     elapsed = time.monotonic() - start
 
     if rc != 0:
+        # Beagle's chrX reference-panel ploidy crash exits non-zero after
+        # leaving a truncated result/chrX.vcf.gz with no BGZF EOF marker. Remove
+        # it so it can never be mistaken for a finished chromosome.
+        _unlink_quietly(output_vcf)
         log.error("imputation.beagle.chrom.failed", returncode=rc, elapsed=elapsed)
         return "failed", elapsed
 
-    if not _vcf_parses_cleanly(output_vcf):
+    if not _output_is_complete(output_vcf):
+        # rc==0 but the output is truncated or unparseable — treat it as a
+        # failure and drop the file rather than leaving it to be skipped later.
+        _unlink_quietly(output_vcf)
         log.error(
             "imputation.beagle.chrom.output_invalid",
             output=str(output_vcf),

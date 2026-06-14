@@ -110,6 +110,11 @@ PANEL_CHROMOSOMES: Final[frozenset[str]] = PANEL_AUTOSOMES | PANEL_SEX_CHROMS
 _OWNER_RW_ONLY: Final[int] = stat.S_IRUSR | stat.S_IWUSR
 _OWNER_RWX_ONLY: Final[int] = stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
 
+# PLINK's GRCh38 genetic maps label the sex chromosomes numerically in column 1
+# (23 = X, 24 = Y); Beagle expects ``chrX`` / ``chrY``. The normalizer applies
+# this mapping after stripping any (possibly doubled) ``chr`` prefix.
+_PLINK_SEX_CHROM: Final[dict[str, str]] = {"23": "X", "24": "Y"}
+
 
 def default_panel_root() -> Path:
     """Resolve the reference-panel root directory.
@@ -173,6 +178,17 @@ class ReferencePanel:
         return self.root / "panel"
 
     @property
+    def diploidized_chrx_panel(self) -> Path:
+        """Path to the M1-diploidized chrX panel (``<panel>/chrX.diploidized.vcf.gz``).
+
+        Produced by ``genome imputation panel prepare-chrx``; the runner points
+        the chrX ``ref=`` here so Beagle sees a uniform-diploid panel and accepts
+        it (finding-008/029). The path is computed, not checked — pair it with an
+        ``is_file()`` test before a chrX run.
+        """
+        return self.panel_dir / "chrX.diploidized.vcf.gz"
+
+    @property
     def genetic_map_archive(self) -> Path:
         """Path to the cached PLINK map zip (``<root>/plink.GRCh38.map.zip``).
 
@@ -228,7 +244,41 @@ def validate_panel(panel: ReferencePanel) -> list[str]:
             continue
         if not panel_path.is_file():
             problems.append(f"missing panel VCF for chr{chrom}: {panel_path}")
+    chrx_problem = _chrx_map_col1_problem(panel)
+    if chrx_problem is not None:
+        problems.append(chrx_problem)
     return problems
+
+
+def _chrx_map_col1_problem(panel: ReferencePanel) -> str | None:
+    """Return a problem string if the chrX genetic map's column 1 isn't ``chrX``.
+
+    Beagle matches chromosome labels by exact string, so a chrX map whose
+    column 1 is the bare PLINK ``23`` (or a doubled ``chrchrX``) silently fails
+    to line up with the ``chrX`` reference panel. :func:`normalize_map_chrom`
+    fixes this at install time; this positively asserts the result so a stale or
+    hand-mangled map is caught before a wasted Beagle run. Returns ``None`` when
+    the map is absent (the missing-file check already reports that) or when its
+    first data line is correct.
+    """
+    path = panel.map_for_chrom("X")
+    if not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="ascii")
+    except (OSError, UnicodeDecodeError):
+        return f"unreadable chrX genetic map: {path}"
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        col1 = line.split("\t", 1)[0]
+        if col1 != "chrX":
+            return (
+                f"chrX genetic map column 1 is {col1!r}, expected 'chrX' "
+                f"(Beagle matches chromosome labels by exact string): {path}"
+            )
+        return None
+    return None
 
 
 def install_panel(
@@ -307,13 +357,16 @@ def _install_genetic_map(
     The archive itself is also kept on disk so a future extraction can run
     without another network round-trip. Per-file permissions inside the
     extracted directory are tightened to ``0600``.
+
+    After download/extract — and on the pure skip path too — the on-disk maps
+    are normalized to Beagle's exact-string chromosome labels via
+    :func:`_normalize_on_disk_maps`, and any stray doubled-prefix files are
+    cleared. Both steps are idempotent, so an already-correct install is left
+    byte-identical.
     """
     archive = panel.genetic_map_archive
     needs_download = force or not archive.is_file()
     needs_extract = force or _missing_map_files(panel)
-    if not needs_download and not needs_extract:
-        log.debug("reference_panel.skip_existing", artifact="genetic_map")
-        return
 
     if needs_download:
         log.info(
@@ -329,28 +382,33 @@ def _install_genetic_map(
         )
         archive.chmod(_OWNER_RW_ONLY)
 
-    log.info("reference_panel.extract.start", artifact="genetic_map")
-    panel.genetic_map_dir.mkdir(parents=True, exist_ok=True)
-    panel.genetic_map_dir.chmod(_OWNER_RWX_ONLY)
-    with zipfile.ZipFile(archive) as zf:
-        for info in zf.infolist():
-            if info.is_dir():
-                continue
-            # Flatten any internal directory structure — we want the .map
-            # files to land directly in genetic_map_dir.
-            member_name = Path(info.filename).name
-            if not member_name.endswith(".map"):
-                continue
-            dest = panel.genetic_map_dir / member_name
-            with zf.open(info) as src, open(dest, "wb") as out:  # noqa: PTH123
-                out.writelines(iter(lambda: src.read(1 << 16), b""))
-            dest.chmod(_OWNER_RW_ONLY)
-            # The Browning Lab's PLINK GRCh38 maps label chromosomes in
-            # column 1 without a `chr` prefix (e.g. `22`, `23`), but Beagle
-            # 5.5's reference panels and our prepared input VCFs both use
-            # `chr`-prefixed labels. Beagle does exact-string chromosome
-            # matching, so we normalize the maps once at install time.
-            _rewrite_map_with_chr_prefix(dest, log)
+    if needs_extract:
+        log.info("reference_panel.extract.start", artifact="genetic_map")
+        panel.genetic_map_dir.mkdir(parents=True, exist_ok=True)
+        panel.genetic_map_dir.chmod(_OWNER_RWX_ONLY)
+        with zipfile.ZipFile(archive) as zf:
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                # Flatten any internal directory structure — we want the .map
+                # files to land directly in genetic_map_dir.
+                member_name = Path(info.filename).name
+                if not member_name.endswith(".map"):
+                    continue
+                dest = panel.genetic_map_dir / member_name
+                with zf.open(info) as src, open(dest, "wb") as out:  # noqa: PTH123
+                    out.writelines(iter(lambda: src.read(1 << 16), b""))
+                dest.chmod(_OWNER_RW_ONLY)
+
+    # Normalize column-1 labels (and clear any stray doubled-prefix files) on
+    # every install, including the no-download skip path, so a previously bare
+    # (`23`) or doubled (`chrchr22`) label is repaired without a re-download.
+    if panel.genetic_map_dir.is_dir():
+        _remove_doubled_map_files(panel, log)
+        _normalize_on_disk_maps(panel, log)
+
+    if not needs_download and not needs_extract:
+        log.debug("reference_panel.skip_existing", artifact="genetic_map")
 
 
 def _install_panel_vcf(
@@ -382,22 +440,45 @@ def _install_panel_vcf(
     dest.chmod(_OWNER_RW_ONLY)
 
 
-def _rewrite_map_with_chr_prefix(
+def normalize_map_chrom(col1: str) -> str:
+    """Canonicalize a genetic-map column-1 chromosome label to Beagle's form.
+
+    Beagle 5.5 does exact-string chromosome matching between the genetic map,
+    the reference panel, and the input VCF — all of which use a single-``chr``-
+    prefixed label (``chr1`` … ``chr22``, ``chrX``). The Browning Lab's PLINK
+    GRCh38 maps instead ship bare PLINK-numeric labels (``1`` … ``22``, ``23``
+    for X), and a buggy earlier rewrite could leave doubled ``chrchr`` prefixes.
+
+    The normalizer is total and idempotent:
+
+    1. strip *every* leading ``chr`` (so ``chrchrX`` and ``chr23`` both reduce);
+    2. map the PLINK sex-chromosome numbers ``23`` → ``X`` and ``24`` → ``Y``;
+    3. re-emit exactly one ``chr`` prefix.
+
+    Re-running it on its own output is a fixed point (``chrX`` → ``chrX``), which
+    is what lets :func:`_install_genetic_map` apply it unconditionally — even on
+    the no-download path — to repair any previously-doubled or bare label.
+    """
+    core = col1.strip()
+    while core[:3].lower() == "chr":
+        core = core[3:]
+    core = _PLINK_SEX_CHROM.get(core, core)
+    return f"chr{core}"
+
+
+def _normalize_map_file(
     path: Path,
     log: structlog.stdlib.BoundLogger,
 ) -> bool:
-    """Rewrite ``path`` so column 1 of every non-blank line is ``chr``-prefixed.
+    """Rewrite ``path`` so column 1 of every data line is :func:`normalize_map_chrom`'d.
 
-    Idempotent: lines whose column 1 already starts with ``chr`` are left
-    unchanged, so re-running on an already-prefixed file is a no-op and
-    the file is byte-identical afterwards. Blank lines and comment lines
-    (``#``-prefixed, defensive — PLINK maps don't typically have them) are
-    passed through verbatim. The rewrite is atomic (write to ``<path>.tmp``
-    then rename) and preserves the ``0600`` permission on the rewritten
-    file.
+    Idempotent: a line whose column 1 already canonicalizes to itself is left
+    untouched, so re-running on a normalized file is a no-op and the file stays
+    byte-identical. Blank and comment (``#``-prefixed, defensive) lines pass
+    through verbatim. The rewrite is atomic (write ``<path>.tmp`` then rename)
+    and preserves the ``0600`` permission.
 
-    Returns True when the file was rewritten, False when no rewrite was
-    necessary.
+    Returns True when the file was rewritten, False when no rewrite was needed.
     """
     text = path.read_bytes().decode("ascii")
     out_chunks: list[str] = []
@@ -411,10 +492,11 @@ def _rewrite_map_with_chr_prefix(
         col1 = stripped if tab_idx == -1 else stripped[:tab_idx]
         rest = "" if tab_idx == -1 else stripped[tab_idx:]
         ending = line[len(stripped) :]
-        if col1.startswith("chr"):
+        new_col1 = normalize_map_chrom(col1)
+        if new_col1 == col1:
             out_chunks.append(line)
             continue
-        out_chunks.append(f"chr{col1}{rest}{ending}")
+        out_chunks.append(f"{new_col1}{rest}{ending}")
         changed = True
     if not changed:
         return False
@@ -422,8 +504,37 @@ def _rewrite_map_with_chr_prefix(
     tmp.write_bytes("".join(out_chunks).encode("ascii"))
     tmp.chmod(_OWNER_RW_ONLY)
     tmp.replace(path)
-    log.info("reference_panel.genetic_map.chr_prefix_added", path=str(path))
+    log.info("reference_panel.genetic_map.normalized", path=str(path))
     return True
+
+
+def _normalize_on_disk_maps(
+    panel: ReferencePanel,
+    log: structlog.stdlib.BoundLogger,
+) -> None:
+    """Normalize column 1 of every canonical per-chromosome map present on disk."""
+    for chrom in sorted(PANEL_CHROMOSOMES, key=_chrom_sort_key):
+        path = panel.map_for_chrom(chrom)
+        if path.is_file():
+            _normalize_map_file(path, log)
+
+
+def _remove_doubled_map_files(
+    panel: ReferencePanel,
+    log: structlog.stdlib.BoundLogger,
+) -> None:
+    """Delete stray ``plink.chrchr*.GRCh38.map`` files from a buggy past rewrite.
+
+    The canonical per-chromosome filenames are derived from canonical labels
+    (:meth:`ReferencePanel.map_for_chrom`), so the live code never writes a
+    doubled-``chr`` filename; this clears the residue an earlier version left
+    behind. Idempotent — a clean directory yields no matches.
+    """
+    if not panel.genetic_map_dir.is_dir():
+        return
+    for stray in sorted(panel.genetic_map_dir.glob("plink.chrchr*.GRCh38.map")):
+        stray.unlink()
+        log.info("reference_panel.genetic_map.removed_doubled", path=str(stray))
 
 
 def _missing_map_files(panel: ReferencePanel) -> bool:
@@ -450,5 +561,6 @@ __all__ = [
     "ReferencePanel",
     "default_panel_root",
     "install_panel",
+    "normalize_map_chrom",
     "validate_panel",
 ]

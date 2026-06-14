@@ -32,7 +32,9 @@ from genome.imputation import (
     run_imputation,
     validate_panel,
 )
+from genome.imputation.archive import ImputationArchive
 from genome.imputation.beagle_runner import DEFAULT_MEMORY_GB, DEFAULT_NE
+from genome.imputation.chrx_panel import ChrxToolingError, prepare_chrx_panel
 from genome.ingest import Source, ingest_file
 from genome.ingest.liftover import LiftoverEngine
 from genome.merge import merge_all
@@ -352,6 +354,79 @@ def config_set(
 # -----------------------------------------------------------------------------
 
 
+_SEX_FLAG_HELP = (
+    "Profile sex for the chrX path: 'M', 'F', or 'auto' (default — resolve from "
+    "the chip sample_qc rows). Drives only the transient prepare/run/import-QC "
+    "path; no DB column is written (PR 5a)."
+)
+
+
+def _normalize_sex_flag(raw: str) -> str | None:
+    """Validate a ``--sex`` value; return ``'M'`` / ``'F'``, or ``None`` for ``auto``."""
+    value = raw.strip()
+    if value.lower() == "auto":
+        return None
+    if value.upper() in {"M", "F"}:
+        return value.upper()
+    msg = "--sex must be one of: M, F, auto"
+    raise typer.BadParameter(msg, param_hint="--sex")
+
+
+def _gate_chrx_sex(chromosomes_set: frozenset[str] | None, sex: str) -> None:
+    """Require a determinate profile sex when chrX is in the run scope (PR 5a).
+
+    chrX imputation needs a known sex to correct male non-PAR dosage downstream.
+    ``auto`` resolves it from chip QC; an ambiguous result there aborts with a
+    request for an explicit ``--sex``. Autosome-only runs never consult it.
+    """
+    includes_x = chromosomes_set is None or "X" in chromosomes_set
+    if not includes_x:
+        return
+    from genome.imputation.sex import AmbiguousSexError, resolve_sex  # noqa: PLC0415
+
+    explicit = _normalize_sex_flag(sex)
+    try:
+        with duckdb_connection() as conn:
+            resolved = resolve_sex(conn, explicit)
+    except AmbiguousSexError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--sex") from exc
+    typer.echo(f"chrX imputation profile sex: {resolved}")
+
+
+def _require_diploidized_chrx_panel(chromosomes_set: frozenset[str] | None) -> None:
+    """Abort a chrX run if the diploidized chrX panel hasn't been prepared (PR 5a).
+
+    Beagle needs the M1-diploidized chrX panel; without it the chrX subprocess
+    would crash mid-run on the 1000G panel's mixed ploidy (finding-008). Surface
+    that as a friendly pre-flight when chrX is in scope.
+    """
+    includes_x = chromosomes_set is None or "X" in chromosomes_set
+    if not includes_x:
+        return
+    panel = ReferencePanel.resolve()
+    if not panel.diploidized_chrx_panel.is_file():
+        msg = (
+            "chrX is in scope but the diploidized chrX reference panel is missing. "
+            "Run `genome imputation panel prepare-chrx` first (M1 — finding-008/029)."
+        )
+        typer.echo(msg, err=True)
+        raise typer.Exit(code=1)
+
+
+def _chrx_in_run_scope(imputation_id: int, chromosomes_set: frozenset[str] | None) -> bool:
+    """True iff chrX will actually be imputed in this run (PR 5a).
+
+    chrX runs only when it is in the chromosome scope AND a chrX upload VCF was
+    prepared for this run. An autosome-only corpus (no chrX upload) never trips
+    the chrX preconditions, even on a full run, so the chrX gates fire exactly
+    when chrX is genuinely about to be imputed.
+    """
+    if chromosomes_set is not None and "X" not in chromosomes_set:
+        return False
+    archive = ImputationArchive.for_run(get_settings().archive_path, imputation_id)
+    return archive.upload_vcf_path("X").is_file()
+
+
 @imputation_app.command("prepare")
 def imputation_prepare(
     sample_id: Annotated[
@@ -372,6 +447,10 @@ def imputation_prepare(
             ),
         ),
     ] = False,
+    sex: Annotated[
+        str,
+        typer.Option("--sex", help=_SEX_FLAG_HELP),
+    ] = "auto",
 ) -> None:
     """Export the merged consensus genotype set as per-chromosome VCFs.
 
@@ -381,10 +460,11 @@ def imputation_prepare(
     panel, then ``genome imputation import <id>`` to ingest the imputed
     output. See ``docs/runbooks/imputation.md`` for the end-to-end flow.
     """
-    result = prepare_run(sample_id=sample_id, force_new=force_new)
+    result = prepare_run(sample_id=sample_id, force_new=force_new, sex=_normalize_sex_flag(sex))
     typer.echo(
         f"imputation_id={result.imputation_id} "
         f"variants={result.variants_total} "
+        f"profile_sex={result.profile_sex} "
         f"chroms_exported={sorted(result.variants_per_chrom)} "
         f"upload_dir={result.archive.upload_dir}",
     )
@@ -604,6 +684,10 @@ def imputation_run(  # noqa: PLR0913 — one CLI flag per operational control
             ),
         ),
     ] = False,
+    sex: Annotated[
+        str,
+        typer.Option("--sex", help=_SEX_FLAG_HELP),
+    ] = "auto",
 ) -> None:
     """Run Beagle 5.5 against the prepared upload VCFs for one run.
 
@@ -623,6 +707,13 @@ def imputation_run(  # noqa: PLR0913 — one CLI flag per operational control
         chromosomes_set = _parse_run_chromosomes(chromosomes)
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--chromosomes") from exc
+
+    # chrX imputation needs a determinate profile sex and the diploidized panel.
+    # Gate both before the long run — but only when chrX will actually run (in
+    # scope AND a chrX upload exists), so autosome-only runs are unaffected.
+    if _chrx_in_run_scope(imputation_id, chromosomes_set):
+        _gate_chrx_sex(chromosomes_set, sex)
+        _require_diploidized_chrx_panel(chromosomes_set)
 
     result = run_imputation(
         imputation_id,
@@ -793,6 +884,48 @@ def panel_install(
         typer.echo(f"after install, {len(problems)} component(s) still missing:")
         for p in problems:
             typer.echo(f"  - {p}")
+
+
+@panel_app.command("prepare-chrx")
+def panel_prepare_chrx(
+    force: Annotated[  # noqa: FBT002 — typer boolean flag, --force is opt-in
+        bool,
+        typer.Option(
+            "--force",
+            help="Re-diploidize even if chrX.diploidized.vcf.gz already exists.",
+        ),
+    ] = False,
+) -> None:
+    """Diploidize the chrX reference panel for Beagle (M1 — finding-008/029).
+
+    Rewrites male non-PAR haploid genotypes in the installed 1000G chrX panel to
+    homozygous-diploid so Beagle 5.5's uniform-ploidy reference loader accepts
+    it, writing ``chrX.diploidized.vcf.gz`` beside the panel. Required before
+    ``genome imputation run`` with chrX in scope; one-time and idempotent. This
+    is a gated long operation — it streams the whole chromosome through
+    ``bgzip | awk | bgzip`` and asserts the result is haploid-free.
+    """
+    panel = ReferencePanel.resolve()
+    try:
+        result = prepare_chrx_panel(panel, force=force)
+    except ChrxToolingError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    if result.skipped:
+        typer.echo(
+            f"chrX diploidized panel already present: {result.output_path} "
+            "(pass --force to rebuild)",
+        )
+        return
+    typer.echo(
+        f"chrX panel diploidized: {result.output_path} "
+        f"diploidized_gts={result.diploidized_gts} "
+        f"haploid_remaining={result.haploid_remaining}",
+    )
+    typer.echo(
+        "Next: `genome imputation run <id> --chromosomes X` (or a full run including X).",
+    )
 
 
 @app.command()

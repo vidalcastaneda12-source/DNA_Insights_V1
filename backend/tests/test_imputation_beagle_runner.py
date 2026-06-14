@@ -76,7 +76,9 @@ def _seed_panel(panel_root: Path) -> ReferencePanel:
     panel.ensure_layout()
     panel.beagle_jar.write_bytes(b"jar")
     for c in PANEL_CHROMOSOMES:
-        panel.map_for_chrom(c).write_bytes(b"map")
+        # A realistic column-1 label so validate_panel's chrX-col1 assertion
+        # (PR 5a) passes; the runner itself never reads the map contents.
+        panel.map_for_chrom(c).write_bytes(f"chr{c}\t.\t0.0\t1\n".encode("ascii"))
         p = panel.panel_for_chrom(c)
         assert p is not None
         p.write_bytes(b"vcf")
@@ -950,3 +952,159 @@ def test_import_result_completed_path_stamps_completed_at(
     assert run.status == "completed"
     assert run.submitted_at is not None  # set by our seed update_status
     assert run.completed_at is not None  # set by import_result's update_status
+
+
+# ---------------------------------------------------------------------------
+# finding-008 #2 safety gaps (PR 5a, session A): the runner must not leave a
+# truncated output behind, and must not skip a truncated existing output.
+# ---------------------------------------------------------------------------
+
+
+# A BGZF header (gzip magic + FEXTRA) with no trailing EOF marker — the exact
+# shape Beagle's chrX ploidy crash leaves on disk.
+_TRUNCATED_BGZF: bytes = b"\x1f\x8b\x08\x04" + b"\x00" * 64
+
+
+def _writes_partial_then_fails_factory() -> tuple[mock.MagicMock, list[list[str]]]:
+    """A Popen factory that writes a truncated BGZF then exits non-zero.
+
+    Models the finding-008 #2 chrX failure: Beagle writes a partial
+    ``result/chrX.vcf.gz`` (no BGZF EOF) and exits 1.
+    """
+    captured: list[list[str]] = []
+
+    def _factory(cmd: list[str], *_args: object, **_kwargs: object) -> _FakeProc:
+        captured.append(list(cmd))
+        out_arg = next(a for a in cmd if a.startswith("out="))
+        Path(f"{out_arg[len('out=') :]}.vcf.gz").write_bytes(_TRUNCATED_BGZF)
+        return _FakeProc(returncode_to_return=1, output_vcf_to_write=None)
+
+    return mock.MagicMock(side_effect=_factory), captured
+
+
+def test_run_imputation_unlinks_truncated_partial_on_failure(
+    isolated_settings: dict[str, str],
+    panel_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stubbed_java: None,  # noqa: ARG001 — fixture stubs check_java_available
+) -> None:
+    """A non-zero Beagle exit leaves no partial output behind (finding-008 #2).
+
+    Without the unlink, the truncated file would survive and — if its BGZF EOF
+    happened to be present — be skipped-as-clean on a later non-force run.
+    """
+    archive_root = _archive_root(isolated_settings)
+    _seed_panel(panel_root)
+    # Use an autosome — the unlink-on-failure path is chromosome-independent, and
+    # chrX additionally requires the diploidized panel (covered separately).
+    imp_id = _seed_run(archive_root=archive_root, chromosomes=("1",))
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+
+    popen_mock, _ = _writes_partial_then_fails_factory()
+    monkeypatch.setattr(subprocess, "Popen", popen_mock)
+
+    result = run_imputation(imp_id)
+
+    assert result.chromosomes_failed == ("1",)
+    # The truncated partial was removed.
+    assert not (archive.result_dir / "chr1.vcf.gz").exists()
+
+
+def test_run_imputation_unlinks_corrupt_output_on_clean_exit(
+    isolated_settings: dict[str, str],
+    panel_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stubbed_java: None,  # noqa: ARG001 — fixture stubs check_java_available
+) -> None:
+    """An rc=0 run whose output won't parse is failed AND its file removed."""
+    archive_root = _archive_root(isolated_settings)
+    _seed_panel(panel_root)
+    imp_id = _seed_run(archive_root=archive_root, chromosomes=("1",))
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+
+    # truncate_for writes "not a vcf" at rc=0 — cyvcf2 can't open it.
+    popen_mock, _ = _make_popen_factory(truncate_for=frozenset({"1"}))
+    monkeypatch.setattr(subprocess, "Popen", popen_mock)
+
+    result = run_imputation(imp_id)
+
+    assert result.chromosomes_failed == ("1",)
+    assert not (archive.result_dir / "chr1.vcf.gz").exists()
+
+
+def test_run_imputation_reimputes_when_existing_output_is_truncated_bgzf(
+    isolated_settings: dict[str, str],
+    panel_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stubbed_java: None,  # noqa: ARG001 — fixture stubs check_java_available
+) -> None:
+    """A truncated existing output is NOT skipped-as-clean — it is re-imputed.
+
+    The pre-fix ``_vcf_parses_cleanly`` skip check read a truncated BGZF as
+    zero records without raising and skipped it. The EOF-aware
+    ``_output_is_complete`` now treats it as incomplete, so the runner re-runs.
+    """
+    archive_root = _archive_root(isolated_settings)
+    _seed_panel(panel_root)
+    imp_id = _seed_run(archive_root=archive_root, chromosomes=("1",))
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+    # A leftover truncated output from a prior crashed run.
+    (archive.result_dir / "chr1.vcf.gz").write_bytes(_TRUNCATED_BGZF)
+
+    popen_mock, captured = _make_popen_factory()  # writes a valid VCF at rc=0
+    monkeypatch.setattr(subprocess, "Popen", popen_mock)
+
+    result = run_imputation(imp_id)
+
+    assert result.chromosomes_completed == ("1",)
+    assert result.chromosomes_skipped == ()
+    # Beagle was actually invoked — the truncated file was not treated as clean.
+    assert len(captured) == 1
+
+
+# ---------------------------------------------------------------------------
+# M1 chrX: the runner requires the diploidized panel and points ref= at it.
+# ---------------------------------------------------------------------------
+
+
+def test_run_imputation_chrx_fails_without_diploidized_panel(
+    isolated_settings: dict[str, str],
+    panel_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stubbed_java: None,  # noqa: ARG001 — fixture stubs check_java_available
+) -> None:
+    """chrX is failed (not crashed mid-run) when the diploidized panel is absent."""
+    archive_root = _archive_root(isolated_settings)
+    _seed_panel(panel_root)  # base panel only — no chrX.diploidized.vcf.gz
+    imp_id = _seed_run(archive_root=archive_root, chromosomes=("X",))
+
+    popen_mock, captured = _make_popen_factory()
+    monkeypatch.setattr(subprocess, "Popen", popen_mock)
+
+    result = run_imputation(imp_id)
+
+    assert result.chromosomes_failed == ("X",)
+    assert len(captured) == 0  # Beagle was never invoked for chrX
+
+
+def test_run_imputation_chrx_points_ref_at_diploidized_panel(
+    isolated_settings: dict[str, str],
+    panel_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stubbed_java: None,  # noqa: ARG001 — fixture stubs check_java_available
+) -> None:
+    """With the diploidized panel present, chrX runs and ``ref=`` targets it."""
+    archive_root = _archive_root(isolated_settings)
+    panel = _seed_panel(panel_root)
+    panel.diploidized_chrx_panel.write_bytes(b"diploidized-panel")
+    imp_id = _seed_run(archive_root=archive_root, chromosomes=("X",))
+
+    popen_mock, captured = _make_popen_factory()
+    monkeypatch.setattr(subprocess, "Popen", popen_mock)
+
+    result = run_imputation(imp_id)
+
+    assert result.chromosomes_completed == ("X",)
+    assert len(captured) == 1
+    ref_arg = next(a for a in captured[0] if a.startswith("ref="))
+    assert ref_arg.endswith("chrX.diploidized.vcf.gz")
