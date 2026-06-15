@@ -165,6 +165,30 @@ it (its seed `nextval`s flip `last_value` to the last-returned meaning). Fixed i
 this PR by peeking one `nextval` and draining the remaining gap (no reliance on
 the catalog view), with a fresh-connection regression test.
 
+### Repairing an already-stranded DB — and why the code fix persists but a
+### standalone script doesn't
+
+The code fix only prevents *future* canonicalize runs from stranding the
+sequence; a DB canonicalized under the old code is already stranded and needs a
+one-time repair. The non-obvious part: **DuckDB 1.5.x does not persist a
+pure-`nextval` advance across connection close — not even with an explicit
+`CHECKPOINT`.** The sequence counter is flushed to disk only alongside a *data*
+modification. So a naive repair script that just drains `nextval` advances the
+counter in memory and then silently loses it on `close()`, leaving the next
+reopen stranded at the same id.
+
+Two consequences:
+
+- The in-pipeline fix is safe: `_resync_variant_id_sequence` runs inside
+  canonicalize's TX2, which is full of `DELETE`/`UPDATE` writes and ends in
+  `commit_and_checkpoint`, so the sequence advance is anchored and persists.
+- A standalone repair must anchor the advance with a real write. The verified
+  recipe: drain `nextval` past `MAX(variant_id)`, then `INSERT` one throwaway
+  `variants_master` row (which consumes a `nextval` at a now-safe id and dirties
+  the table) and `DELETE` it, then `CHECKPOINT`. Net zero rows; the sequence
+  position now survives a reopen. Verify on a *fresh* connection that
+  `nextval('variant_id_seq') > MAX(variant_id)`.
+
 ## Follow-up
 
 - Capture the anchors above at the first authoritative run and lock them here.
