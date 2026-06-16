@@ -10,18 +10,19 @@ A local-first personal DNA insights application that ingests 23andMe + Ancestry 
 
 ## Working with this codebase
 
-This codebase is built collaboratively across four actors. The boundaries between them are part of the convention.
+This codebase is built collaboratively across five actors. The boundaries between them are part of the convention.
 
-- **AI-Claude** — the planning chat (claude.ai / Claude desktop). Roadmap planning, plan review, handoff review, test-results review. Does not touch the codebase or run commands.
-- **VSC-ClaudeCodePlanning** — Claude Code in plan mode — toggled locally via Shift+Tab, or invoked in the cloud via /ultraplan for inline-comment review. Reads the repo, produces a technical plan, surfaces questions. Does not write code or run commands.
-- **VSC-ClaudeCode** — Claude Code in normal mode. Writes code, runs the dev-loop tests, commits, pushes, opens PRs, produces an end-of-session handoff via `/handoff`.
+- **ClaudeCodeVerification** — Claude Code. the pre and post implementation chat. Plan review, handoff review. Does not touch the codebase or run commands.
+- **ClaudeCodeTestingBugs** — Claude Code. the post implementation chat. Test-results review and test assistance. Does not touch the codebase or run commands.
+- **ClaudeCodePlanning** — Claude Code in plan mode — toggled locally via Shift+Tab, or invoked in the cloud via /ultraplan for inline-comment review. Reads the repo, produces a technical plan, surfaces questions. Does not write code or run commands.
+- **ClaudeCodeDevelopment** — Claude Code. Writes code, runs the dev-loop tests, commits, pushes, opens PRs, produces an end-of-session handoff via `/handoff`.
 - **VSC-User** — the human operator. Approves plans, runs the formal verification protocol (`docs/runbooks/verification.md`), merges.
 
-Older docs and CHANGELOG entries use **VSC-Claude** as a single name. That maps to VSC-ClaudeCode (implementation mode) by default — VSC-ClaudeCodePlanning is the newer split.
+Older docs and CHANGELOG entries use **VSC-Claude** as a single name. That maps to VSC-ClaudeCodeDevelopment (implementation mode) by default.
 
 ### Plan mode first
 
-For any non-trivial change — anything that touches multiple files, modifies behavior, alters the schema, or adds a dependency — Claude Code starts in plan mode. Implementation does not begin until VSC-User has approved the plan. Trivial work (typo fixes, single-line docstring edits, comment clarifications) can proceed without plan mode.
+For any non-trivial change — anything that touches multiple files, modifies behavior, alters the schema, or adds a dependency — Claude Code starts in plan mode. Implementation does not begin until VSC-User has approved the plan.
 
 When in plan mode, read the listed inputs first — `CLAUDE.md`, `ROADMAP.md`, relevant `docs/findings/`, and the relevant `backend/src/genome/` subdirectory — then produce a plan containing:
 
@@ -34,16 +35,17 @@ When in plan mode, read the listed inputs first — `CLAUDE.md`, `ROADMAP.md`, r
 7. **Out-of-scope** — explicit list. Phase boundaries, optional features, things to defer.
 8. **End-of-session handoff** — `/handoff` at session end.
 
-If plan mode surfaces a question that needs judgment outside the code (roadmap-level trade-offs, architectural fit, alignment with locked decisions), pause and ask VSC-User. VSC-User routes the question to AI-Claude and returns with an answer.
+If plan mode surfaces a question that needs judgment outside the code (roadmap-level trade-offs, architectural fit, alignment with locked decisions), pause and ask VSC-User. VSC-User routes the question to ClaudeCodePlanning and returns with an answer.
 
 ### Implementation contract
 
-Once VSC-User approves the plan, VSC-ClaudeCode executes it. The expectation is mechanical execution — surprises at this stage usually mean the plan missed something, and the right move is to pause and escalate rather than improvise.
+Once VSC-User approves the plan, ClaudeCodeDevelopment executes it. The expectation is mechanical execution — surprises at this stage usually mean the plan missed something, and the right move is to pause and escalate rather than improvise.
 
 Every implementation session produces:
 - A new branch from `main`.
 - A clean dev-loop (`pytest`, `ruff check`, `ruff format --check`, `mypy --strict backend/src`).
 - A commit + push.
+- An open PR, or a new commit to an existing PR where appropriate.
 - An end-of-session handoff via `/handoff` (`.claude/commands/handoff.md`).
 
 VSC-User runs the canonical verification independently against the pushed branch — see `docs/runbooks/verification.md`. That independence is the gate that catches selective test runs, test mutation, and number-interpretation slippage. It is not optional and is not negotiable.
