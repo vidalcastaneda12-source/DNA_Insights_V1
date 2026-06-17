@@ -1032,6 +1032,14 @@ def _assert_chrom_not_silently_empty(
     silently. Skipped when no manifest is available (no trusted input count).
     An all-below-R²-threshold chromosome is unaffected — it still streamed
     ``raw_records > 0`` before the threshold dropped them.
+
+    For chrX under M3-physical (PR 5a) this guard keeps the whole-chromosome
+    backstop, but the *primary* per-region empty check now lives in the runner
+    (:func:`genome.imputation.beagle_runner._impute_chrx_regions`): a region
+    handed >0 chip inputs that imputes zero records fails there, *before* the
+    three regions are concatenated into the single ``result/chrX.vcf.gz`` this
+    function sees. The manifest's ``variants_per_chrom["X"]`` here is the sum
+    across regions, so a fully-empty chrX concat is still caught.
     """
     if manifest_per_chrom is None:
         return

@@ -1,25 +1,35 @@
-"""M1 chrX reference-panel diploidizer (PR 5a, finding-008/029).
+"""M3-physical chrX panel region split + R1 re-diploidization seam (PR 5a).
 
-Beagle 5.5's reference loader rejects the 1000 Genomes panel's *within-sample*
-ploidy transition: a male sample is diploid through PAR1 and haploid past it, and
-Beagle aborts at the first non-PAR position (finding-008 #2). The M1 mechanic,
-decided after the planning probe, rewrites male non-PAR haploid genotypes to
-homozygous-diploid so the whole panel is uniform-diploid and Beagle accepts it.
-PAR positions (already diploid in both sexes) are left untouched.
+Beagle 5.5's reference loader rejects the 1000 Genomes chrX panel's *within-sample*
+ploidy transition — a male sample is diploid through PAR1 and haploid past it, and
+Beagle aborts at the first non-PAR position (finding-008 #2). The shipped M1
+mechanic worked around this by diploidizing the *entire* panel (male non-PAR
+haploid → fake hom-diploid). Its first authoritative run failed M1's own
+falsifiability gate: whole-panel diploidization destroys non-PAR information
+content, yielding mean DR² ≈ 0 (finding-029).
 
-The transform is the probe-validated ``bgzip | awk | bgzip`` stream — awk does
-the per-field genotype rewrite at C speed (a pure-Python pass over a 3202-sample
-chrX panel would be far too slow), gated to non-PAR positions by the same PAR1 /
-PAR2 boundaries as :mod:`genome.par_regions`. It is **not** ``bcftools
-+fixploidy``, which the probe did not byte-validate. After the rewrite the whole
-chromosome is asserted haploid-free before any Beagle run.
+**M3-physical** is the fix. Instead of mutating ploidy, split the panel into three
+**physical** region subsets — PAR1 / non-PAR / PAR2 — via ``bcftools view -r``.
+Each subset is internally uniform (no within-sample transition), so Beagle loads
+it natively: the non-PAR subset keeps male haplotypes *haploid*, the
+biologically-correct field-standard representation, and imputes faithfully. The
+runner (:mod:`genome.imputation.beagle_runner`) imputes each region against its
+matching native subset, then ``bcftools concat -a`` re-joins them.
 
-Output lands beside the panel as ``chrX.diploidized.vcf.gz``; the runner points
-its chrX ``ref=`` at this file.
+**R1 storage** keeps the rest of the pipeline byte-unchanged: the male non-PAR
+Beagle output is haploid, so :func:`rediploidize_vcf` doubles it back to
+hom-diploid (``0`` → ``0|0``) before the importer ever sees it. The seam is
+idempotent — a no-op on already-diploid (female / PAR) output — so the runner runs
+it unconditionally on the non-PAR slot and never needs to know the sample's sex.
+
+This module owns the panel-side split (:func:`prepare_chrx_panel`) and the
+re-diploidizer (:func:`rediploidize_vcf`). The region boundaries are derived from
+:mod:`genome.par_regions` so the coordinate literals live in exactly one place.
 """
 
 from __future__ import annotations
 
+import contextlib
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -28,6 +38,7 @@ from typing import TYPE_CHECKING, Final
 import structlog
 
 from genome.imputation.archive import restrict_file
+from genome.par_regions import PAR1_END, PAR1_START, PAR2_END, PAR2_START
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -36,50 +47,54 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-# Non-PAR gating uses the same GRCh38 PAR1 / PAR2 boundaries as
-# genome.par_regions (kept as awk literals; a parity test pins the agreement).
-# For each non-PAR data record, every sample field whose GT subfield (the first
-# ':'-delimited token) carries no phase/unphase separator is haploid — doubled
-# into a phased homozygote. Header lines and PAR records pass through verbatim.
-_DIPLOIDIZE_AWK: Final[str] = r"""
-BEGIN { OFS = "\t" }
-/^#/ { print; next }
-{
-  pos = $2 + 0
-  if (!((pos >= 10001 && pos <= 2781479) || (pos >= 155701383 && pos <= 156030895))) {
-    for (i = 10; i <= NF; i++) {
-      n = split($i, a, ":")
-      if (a[1] !~ /[|\/]/) {
-        $i = a[1] "|" a[1]
-        for (j = 2; j <= n; j++) $i = $i ":" a[j]
-      }
-    }
-  }
-  print
-}
-"""
+# The panel contig label. The 1000 Genomes high-coverage chrX panel uses the
+# single-``chr``-prefixed ``chrX`` (verified against the installed panel); Beagle
+# matches contig labels by exact string, and the region strings below must agree.
+_CHRX_CONTIG: Final[str] = "chrX"
 
-# Counts haploid GT fields across every (non-header) record — used to size the
-# work before the transform and to assert zero remain after it.
+# Counts haploid GT fields across every (non-header) record — used at prep time to
+# assert the PAR subsets are haploid-free and the non-PAR subset retains males, and
+# as the re-diploidizer's haploid-free post-assertion.
 _COUNT_HAPLOID_AWK: Final[str] = r"""
 /^#/ { next }
 { for (i = 10; i <= NF; i++) { split($i, a, ":"); if (a[1] !~ /[|\/]/) h++ } }
 END { print h + 0 }
 """
 
+# R1 re-diploidizer (un-gated; runs on EVERY record, unlike the deleted M1
+# diploidizer which gated on non-PAR position). For each sample field, if the GT
+# subfield carries no phase/unphase separator it is haploid — doubled into a
+# phased homozygote, preserving trailing ':'-delimited FORMAT subfields (DS).
+# Idempotent: an already-diploid GT is left verbatim.
+_REDIPLOIDIZE_AWK: Final[str] = r"""
+BEGIN { OFS = "\t" }
+/^#/ { print; next }
+{
+  for (i = 10; i <= NF; i++) {
+    n = split($i, a, ":")
+    if (a[1] !~ /[|\/]/) {
+      $i = a[1] "|" a[1]
+      for (j = 2; j <= n; j++) $i = $i ":" a[j]
+    }
+  }
+  print
+}
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class ChrxPanelResult:
-    """Summary returned by :func:`prepare_chrx_panel`."""
+    """Summary returned by :func:`prepare_chrx_panel` — the three native subsets."""
 
-    output_path: Path
+    par1_path: Path
+    nonpar_path: Path
+    par2_path: Path
     skipped: bool
-    diploidized_gts: int
-    haploid_remaining: int
+    nonpar_haploid_gts: int
 
 
 class ChrxToolingError(RuntimeError):
-    """``bgzip`` / ``awk`` is unavailable, or a transform subprocess failed."""
+    """``bcftools`` / ``bgzip`` / ``awk`` is unavailable, or a subprocess failed."""
 
 
 def _resolve_tools(bgzip_bin: str | None, awk_bin: str | None) -> tuple[str, str]:
@@ -88,11 +103,21 @@ def _resolve_tools(bgzip_bin: str | None, awk_bin: str | None) -> tuple[str, str
     if bgzip is None or awk is None:
         missing = [name for name, found in (("bgzip", bgzip), ("awk", awk)) if found is None]
         msg = (
-            f"chrX panel diploidization needs {', '.join(missing)} on PATH. "
+            f"chrX panel prep needs {', '.join(missing)} on PATH. "
             "Install htslib (bgzip) and a POSIX awk and re-run."
         )
         raise ChrxToolingError(msg)
     return bgzip, awk
+
+
+def _resolve_bcftools(bcftools_bin: str | None) -> str:
+    bcftools = bcftools_bin or shutil.which("bcftools")
+    if bcftools is None:
+        msg = (
+            "chrX panel region split needs bcftools on PATH. Install bcftools (htslib) and re-run."
+        )
+        raise ChrxToolingError(msg)
+    return bcftools
 
 
 def count_haploid_gts(vcf: Path, *, bgzip_bin: str, awk_bin: str) -> int:
@@ -121,14 +146,77 @@ def count_haploid_gts(vcf: Path, *, bgzip_bin: str, awk_bin: str) -> int:
     return int(out.strip() or "0")
 
 
-def diploidize_chrx_panel(
-    input_vcf: Path, output_vcf: Path, *, bgzip_bin: str, awk_bin: str
-) -> None:
-    """Stream ``input_vcf`` through the diploidizer into a fresh BGZF ``output_vcf``.
+def _par1_region() -> str:
+    """``bcftools -r`` region string for PAR1."""
+    return f"{_CHRX_CONTIG}:{PAR1_START}-{PAR1_END}"
 
-    ``bgzip -dc input | awk <transform> | bgzip -c > output`` — fully streamed,
-    so no multi-GB uncompressed intermediate ever lands on disk. A partial output
-    is removed on failure.
+
+def _par2_region() -> str:
+    """``bcftools -r`` region string for PAR2."""
+    return f"{_CHRX_CONTIG}:{PAR2_START}-{PAR2_END}"
+
+
+def _nonpar_region() -> str:
+    """``bcftools -r`` region string for the non-PAR complement of PAR1 and PAR2.
+
+    Three comma-joined ranges: the lower telomeric sliver below PAR1, the core
+    between the PARs, and the open-ended upper range above PAR2 (no end bound, so
+    it reaches the contig end regardless of assembly length). Boundaries are
+    derived from :mod:`genome.par_regions` so the literals live in one place.
+    """
+    return (
+        f"{_CHRX_CONTIG}:1-{PAR1_START - 1},"
+        f"{_CHRX_CONTIG}:{PAR1_END + 1}-{PAR2_START - 1},"
+        f"{_CHRX_CONTIG}:{PAR2_END + 1}-"
+    )
+
+
+def _ensure_panel_index(panel_vcf: Path, bcftools_bin: str) -> None:
+    """Build the panel's ``.tbi`` if missing or older than the VCF.
+
+    ``bcftools view -r`` needs a coordinate index; ``install_panel`` does not
+    fetch one. Idempotent: a present, up-to-date ``.tbi`` is left alone.
+    """
+    tbi = panel_vcf.with_name(panel_vcf.name + ".tbi")
+    if tbi.is_file() and tbi.stat().st_mtime >= panel_vcf.stat().st_mtime:
+        return
+    proc = subprocess.run(  # noqa: S603 — bin is a resolved/validated path
+        [bcftools_bin, "index", "-t", "-f", str(panel_vcf)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        msg = f"bcftools index of {panel_vcf} failed (rc={proc.returncode}): {proc.stderr.strip()}"
+        raise ChrxToolingError(msg)
+
+
+def _bcftools_view_region(
+    bcftools_bin: str, input_vcf: Path, region: str, output_vcf: Path
+) -> None:
+    """Extract ``region`` from ``input_vcf`` into a fresh BGZF ``output_vcf``."""
+    proc = subprocess.run(  # noqa: S603 — bin is a resolved/validated path
+        [bcftools_bin, "view", "-r", region, str(input_vcf), "-Oz", "-o", str(output_vcf)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        output_vcf.unlink(missing_ok=True)
+        msg = (
+            f"bcftools view -r {region!r} of {input_vcf} failed "
+            f"(rc={proc.returncode}): {proc.stderr.strip()}"
+        )
+        raise ChrxToolingError(msg)
+
+
+def _stream_through_awk(
+    input_vcf: Path, output_vcf: Path, awk_program: str, *, bgzip_bin: str, awk_bin: str
+) -> None:
+    """``bgzip -dc input | awk <program> | bgzip -c > output`` — fully streamed.
+
+    No multi-GB uncompressed intermediate ever lands on disk. A partial output is
+    removed on failure.
     """
     with output_vcf.open("wb") as out_fh:
         p_decomp = subprocess.Popen(  # noqa: S603
@@ -138,7 +226,7 @@ def diploidize_chrx_panel(
         )
         assert p_decomp.stdout is not None  # noqa: S101
         p_awk = subprocess.Popen(  # noqa: S603
-            [awk_bin, _DIPLOIDIZE_AWK],
+            [awk_bin, awk_program],
             stdin=p_decomp.stdout,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -158,26 +246,62 @@ def diploidize_chrx_panel(
     if rc_decomp != 0 or rc_awk != 0 or rc_comp != 0:
         output_vcf.unlink(missing_ok=True)
         msg = (
-            f"chrX diploidize pipe failed (bgzip-d rc={rc_decomp}, awk rc={rc_awk}, "
+            f"chrX awk stream failed (bgzip-d rc={rc_decomp}, awk rc={rc_awk}, "
             f"bgzip-c rc={rc_comp})"
         )
         raise ChrxToolingError(msg)
+
+
+def rediploidize_vcf(input_vcf: Path, output_vcf: Path, *, bgzip_bin: str, awk_bin: str) -> int:
+    """Re-diploidize ``input_vcf`` into ``output_vcf`` (R1 seam, PR 5a).
+
+    Doubles any haploid GT subfield (``0`` → ``0|0``, ``1`` → ``1|1``, ``.`` →
+    ``.|.``) on every record, preserving trailing ``:``-delimited FORMAT subfields
+    (e.g. Beagle's ``DS``). Idempotent: an already-diploid GT is left verbatim, so
+    running on diploid (female / PAR) output is a no-op. Asserts the result is
+    haploid-free and returns the number of haploid GTs that were doubled (0 on the
+    no-op path).
+    """
+    doubled = count_haploid_gts(input_vcf, bgzip_bin=bgzip_bin, awk_bin=awk_bin)
+    _stream_through_awk(
+        input_vcf, output_vcf, _REDIPLOIDIZE_AWK, bgzip_bin=bgzip_bin, awk_bin=awk_bin
+    )
+    remaining = count_haploid_gts(output_vcf, bgzip_bin=bgzip_bin, awk_bin=awk_bin)
+    if remaining != 0:
+        output_vcf.unlink(missing_ok=True)
+        msg = (
+            f"re-diploidized {output_vcf} still has {remaining} haploid GT field(s) — "
+            "the seam missed a sample; refusing to hand a mixed-ploidy file downstream."
+        )
+        raise ChrxToolingError(msg)
+    return doubled
+
+
+def _cleanup_subsets(*paths: Path) -> None:
+    """Remove partially-written region subsets on a failed prep."""
+    for p in paths:
+        with contextlib.suppress(FileNotFoundError):
+            p.unlink()
 
 
 def prepare_chrx_panel(
     panel: ReferencePanel,
     *,
     force: bool = False,
+    bcftools_bin: str | None = None,
     bgzip_bin: str | None = None,
     awk_bin: str | None = None,
 ) -> ChrxPanelResult:
-    """Produce ``chrX.diploidized.vcf.gz`` from the installed chrX panel (M1).
+    """Split the installed chrX panel into native PAR1 / non-PAR / PAR2 subsets (M3).
 
-    Idempotent: an existing output is reused unless ``force`` is set. After the
-    transform the entire chromosome is asserted haploid-free (the §7 full-
-    chromosome boundary check); a non-zero residual raises and the bad output is
-    removed, so a partial transform can never be handed to Beagle.
+    Idempotent: existing subsets are reused unless ``force`` is set. Ensures the
+    panel ``.tbi`` first (``bcftools view -r`` needs it), then emits the three
+    subsets and asserts their composition at prep time: the PAR subsets must be
+    haploid-free (PAR is diploid in both sexes) and the non-PAR subset must retain
+    haploid male haplotypes (``> 0``). A failed assertion removes the bad subsets
+    and raises, so a malformed split can never be handed to Beagle.
     """
+    bcftools = _resolve_bcftools(bcftools_bin)
     bgzip, awk = _resolve_tools(bgzip_bin, awk_bin)
     input_vcf = panel.panel_for_chrom("X")
     if input_vcf is None or not input_vcf.is_file():
@@ -187,42 +311,55 @@ def prepare_chrx_panel(
         )
         raise ChrxToolingError(msg)
 
-    output_vcf = panel.diploidized_chrx_panel
-    log = logger.bind(input=str(input_vcf), output=str(output_vcf))
-    if output_vcf.is_file() and not force:
+    par1_out = panel.chrx_par1_panel
+    nonpar_out = panel.chrx_nonpar_panel
+    par2_out = panel.chrx_par2_panel
+    log = logger.bind(input=str(input_vcf))
+
+    if not force and par1_out.is_file() and nonpar_out.is_file() and par2_out.is_file():
         log.info("imputation.panel.prepare_chrx.skip_existing")
         return ChrxPanelResult(
-            output_path=output_vcf,
+            par1_path=par1_out,
+            nonpar_path=nonpar_out,
+            par2_path=par2_out,
             skipped=True,
-            diploidized_gts=0,
-            haploid_remaining=0,
+            nonpar_haploid_gts=0,
         )
 
-    to_diploidize = count_haploid_gts(input_vcf, bgzip_bin=bgzip, awk_bin=awk)
-    log.info("imputation.panel.prepare_chrx.start", haploid_gts=to_diploidize)
-    diploidize_chrx_panel(input_vcf, output_vcf, bgzip_bin=bgzip, awk_bin=awk)
+    _ensure_panel_index(input_vcf, bcftools)
+    log.info("imputation.panel.prepare_chrx.start")
+    _bcftools_view_region(bcftools, input_vcf, _par1_region(), par1_out)
+    _bcftools_view_region(bcftools, input_vcf, _nonpar_region(), nonpar_out)
+    _bcftools_view_region(bcftools, input_vcf, _par2_region(), par2_out)
 
-    remaining = count_haploid_gts(output_vcf, bgzip_bin=bgzip, awk_bin=awk)
-    if remaining != 0:
-        output_vcf.unlink(missing_ok=True)
+    for region_name, p in (("par1", par1_out), ("par2", par2_out)):
+        haploid = count_haploid_gts(p, bgzip_bin=bgzip, awk_bin=awk)
+        if haploid != 0:
+            _cleanup_subsets(par1_out, nonpar_out, par2_out)
+            msg = (
+                f"chrX {region_name} subset has {haploid} haploid GT field(s); PAR is "
+                "diploid in both sexes — the region split is wrong, refusing."
+            )
+            raise ChrxToolingError(msg)
+
+    nonpar_haploid = count_haploid_gts(nonpar_out, bgzip_bin=bgzip, awk_bin=awk)
+    if nonpar_haploid == 0:
+        _cleanup_subsets(par1_out, nonpar_out, par2_out)
         msg = (
-            f"diploidized chrX panel still has {remaining} haploid GT field(s) — the "
-            "transform missed a non-PAR boundary; refusing to hand a mixed-ploidy panel "
-            "to Beagle."
+            "chrX non-PAR subset has zero haploid GT fields; the panel's male "
+            "hemizygous haplotypes are expected here — the region split is wrong, refusing."
         )
         raise ChrxToolingError(msg)
 
-    restrict_file(output_vcf)
-    log.info(
-        "imputation.panel.prepare_chrx.complete",
-        diploidized_gts=to_diploidize,
-        haploid_remaining=0,
-    )
+    for p in (par1_out, nonpar_out, par2_out):
+        restrict_file(p)
+    log.info("imputation.panel.prepare_chrx.complete", nonpar_haploid_gts=nonpar_haploid)
     return ChrxPanelResult(
-        output_path=output_vcf,
+        par1_path=par1_out,
+        nonpar_path=nonpar_out,
+        par2_path=par2_out,
         skipped=False,
-        diploidized_gts=to_diploidize,
-        haploid_remaining=0,
+        nonpar_haploid_gts=nonpar_haploid,
     )
 
 
@@ -230,6 +367,6 @@ __all__ = [
     "ChrxPanelResult",
     "ChrxToolingError",
     "count_haploid_gts",
-    "diploidize_chrx_panel",
     "prepare_chrx_panel",
+    "rediploidize_vcf",
 ]

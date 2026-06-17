@@ -52,8 +52,9 @@ import structlog
 
 from genome.config import get_settings
 from genome.db.duckdb_conn import duckdb_connection
-from genome.imputation.archive import ImputationArchive, restrict_file
+from genome.imputation.archive import CHRX_REGIONS, ImputationArchive, restrict_file
 from genome.imputation.bgzf import is_truncated_bgzf
+from genome.imputation.chrx_panel import ChrxToolingError, rediploidize_vcf
 from genome.imputation.reference_panel import (
     PANEL_CHROMOSOMES,
     ReferencePanel,
@@ -385,6 +386,16 @@ def _collect_upload_inputs(
         if c is None:
             continue
         available[c] = p
+    # M3-physical: chrX has no top-level upload VCF — its target lives as the three
+    # region files under upload/chrX_regions/ (PR 5a). Surface chrX into the run
+    # scope when any region target exists; the chrX branch resolves the region
+    # files itself, so the representative path here is only a presence signal.
+    if "X" not in available:
+        for region in CHRX_REGIONS:
+            region_target = archive.chrx_region_upload_path(region)
+            if region_target.is_file():
+                available["X"] = region_target
+                break
     out: list[tuple[str, Path]] = []
     for c in _CHROM_ORDER:
         if c not in available:
@@ -480,18 +491,19 @@ def _impute_one_chromosome(  # noqa: PLR0913, PLR0911 — irreducible config; ch
         return "skipped", 0.0
 
     if chrom == "X":
-        # M1: Beagle needs the diploidized chrX panel, not the raw mixed-ploidy
-        # one (finding-008/029). Refuse the chromosome with an actionable signal
-        # rather than crashing mid-run if it hasn't been prepared.
-        diploidized = panel.diploidized_chrx_panel
-        if not diploidized.is_file():
-            log.error(
-                "imputation.beagle.chrx.no_diploidized_panel",
-                expected=str(diploidized),
-                hint="run `genome imputation panel prepare-chrx` first",
-            )
-            return "failed", 0.0
-        panel_vcf = diploidized
+        # M3-physical: chrX is imputed as three physical regions (PAR1 / non-PAR /
+        # PAR2) against native panel subsets, then re-joined with `bcftools concat`
+        # (finding-029). Delegate; chrX stays one entry in run_imputation's
+        # accounting. The autosomal path below is untouched.
+        return _impute_chrx_regions(
+            archive=archive,
+            panel=panel,
+            threads=threads,
+            memory_gb=memory_gb,
+            ne=ne,
+            imputation_id=imputation_id,
+            force=force,
+        )
 
     output_vcf = _output_vcf_path(archive, chrom)
     if not force and _output_is_complete(output_vcf):
@@ -547,6 +559,291 @@ def _impute_one_chromosome(  # noqa: PLR0913, PLR0911 — irreducible config; ch
 
     restrict_file(output_vcf)
     log.info("imputation.beagle.chrom.complete", elapsed=elapsed)
+    return "completed", elapsed
+
+
+def _resolve_chrx_runner_tools() -> tuple[str, str, str]:
+    """Resolve ``(bcftools, bgzip, awk)`` for the chrX region run; raise if missing.
+
+    The M3-physical chrX path needs ``bcftools`` (per-region index + concat) and
+    ``bgzip`` / ``awk`` (the R1 re-diploidize seam). These are a hard prerequisite
+    for chrX imputation (PR 5a); autosomal runs never reach this.
+    """
+    bcftools = shutil.which("bcftools")
+    bgzip = shutil.which("bgzip")
+    awk = shutil.which("awk")
+    missing = [
+        name
+        for name, found in (("bcftools", bcftools), ("bgzip", bgzip), ("awk", awk))
+        if found is None
+    ]
+    if missing:
+        msg = (
+            f"chrX imputation needs {', '.join(missing)} on PATH (M3-physical region "
+            "split + concat). Install bcftools / htslib and re-run."
+        )
+        raise ChrxToolingError(msg)
+    assert bcftools is not None  # noqa: S101 — narrowed by the missing-list check above
+    assert bgzip is not None  # noqa: S101
+    assert awk is not None  # noqa: S101
+    return bcftools, bgzip, awk
+
+
+def _vcf_has_records(path: Path) -> bool:
+    """True iff ``path`` has at least one variant record (stops at the first).
+
+    Used by the chrX per-region empty guard: :func:`_output_is_complete` accepts an
+    empty body (header-only) as clean, but a region handed >0 chip inputs that
+    imputes zero records is a silent Beagle failure (the M3 analogue of
+    finding-008 #2's empty-output guard).
+    """
+    if not path.is_file():
+        return False
+    try:
+        import cyvcf2  # noqa: PLC0415 — deferred so the module loads without cyvcf2 at type-check time
+
+        reader = cyvcf2.VCF(str(path))
+    except Exception:  # noqa: BLE001 — any cyvcf2 error means "no usable records"
+        return False
+    try:
+        for _ in reader:
+            return True
+        return False
+    finally:
+        reader.close()
+
+
+def _bcftools_index(bcftools_bin: str, path: Path) -> None:
+    """``bcftools index -t`` ``path`` (needed before ``concat -a``)."""
+    proc = subprocess.run(  # noqa: S603 — bin is PATH-resolved via shutil.which
+        [bcftools_bin, "index", "-t", "-f", str(path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        msg = f"bcftools index of {path} failed (rc={proc.returncode}): {proc.stderr.strip()}"
+        raise ChrxToolingError(msg)
+
+
+def _bcftools_concat(bcftools_bin: str, inputs: list[Path], output: Path) -> None:
+    """``bcftools concat -a -Oz`` the region outputs into ``output``.
+
+    ``-a`` (allow-overlaps) re-sorts records across the input files by coordinate,
+    which is required because the non-PAR file's lower telomeric sliver
+    (pos < 10001) precedes PAR1 — a plain ``concat`` would reject the unsorted
+    seam regardless of file order (finding-029 Decision 4). Requires the inputs to
+    be indexed first.
+    """
+    cmd = [bcftools_bin, "concat", "-a", "-Oz", "-o", str(output), *(str(p) for p in inputs)]
+    proc = subprocess.run(cmd, check=False, capture_output=True, text=True)  # noqa: S603
+    if proc.returncode != 0:
+        output.unlink(missing_ok=True)
+        msg = f"bcftools concat -a failed (rc={proc.returncode}): {proc.stderr.strip()}"
+        raise ChrxToolingError(msg)
+
+
+def _unlink_chrx_region_intermediates(archive: ImputationArchive) -> None:
+    """Remove per-region Beagle outputs, the re-diploidized non-PAR, and their indexes.
+
+    Used on a ``force`` chrX re-run so stale region intermediates can't be reused.
+    """
+    paths = [archive.chrx_region_result_path(region) for region in CHRX_REGIONS]
+    paths.append(archive.chrx_region_result_diploid_path())
+    for p in paths:
+        _unlink_quietly(p)
+        _unlink_quietly(p.with_name(p.name + ".tbi"))
+
+
+def _impute_chrx_one_region(  # noqa: PLR0913 — irreducible per-region config
+    *,
+    region: str,
+    region_panel: Path,
+    target: Path,
+    map_file: Path,
+    region_out: Path,
+    beagle_jar: Path,
+    threads: int,
+    memory_gb: int,
+    ne: int,
+    imputation_id: int,
+    force: bool,
+) -> bool:
+    """Run Beagle for one chrX region. Returns True iff ``region_out`` is complete.
+
+    Region-level resumability: a complete output is reused unless ``force``. A
+    non-zero exit, an exception, or an invalid output removes the partial file and
+    returns False.
+    """
+    log = logger.bind(chrom="X", region=region, imputation_id=imputation_id)
+    if not force and _output_is_complete(region_out):
+        log.info("imputation.beagle.chrx.region.skip_existing", output=str(region_out))
+        return True
+    if force and region_out.is_file():
+        _unlink_quietly(region_out)
+
+    cmd = _build_beagle_command(
+        beagle_jar=beagle_jar,
+        panel_vcf=region_panel,
+        map_file=map_file,
+        input_vcf=target,
+        output_prefix=region_out.with_name(region),  # Beagle appends .vcf.gz
+        threads=threads,
+        memory_gb=memory_gb,
+        ne=ne,
+    )
+    log.info("imputation.beagle.chrx.region.start", region=region)
+    try:
+        rc = _run_beagle_subprocess(cmd, chrom=f"X.{region}", imputation_id=imputation_id)
+    except Exception:
+        _unlink_quietly(region_out)
+        log.exception("imputation.beagle.chrx.region.exception")
+        return False
+    if rc != 0:
+        _unlink_quietly(region_out)
+        log.error("imputation.beagle.chrx.region.failed", returncode=rc)
+        return False
+    if not _output_is_complete(region_out):
+        _unlink_quietly(region_out)
+        log.error("imputation.beagle.chrx.region.output_invalid", output=str(region_out))
+        return False
+    restrict_file(region_out)
+    log.info("imputation.beagle.chrx.region.complete", region=region)
+    return True
+
+
+def _impute_chrx_regions(  # noqa: PLR0911, PLR0912, PLR0913, PLR0915, C901 — the M3 region orchestration is irreducibly branchy
+    *,
+    archive: ImputationArchive,
+    panel: ReferencePanel,
+    threads: int,
+    memory_gb: int,
+    ne: int,
+    imputation_id: int,
+    force: bool,
+) -> tuple[str, float]:
+    """Impute chrX as PAR1 / non-PAR / PAR2 + ``bcftools concat`` (M3-physical, PR 5a).
+
+    Returns ``(status, seconds)`` like :func:`_impute_one_chromosome` so chrX stays
+    a single entry in :func:`run_imputation`'s accounting. Each region with a chip
+    target is imputed against its native panel subset; the non-PAR output is
+    re-diploidized (R1, idempotent) before the three are indexed and concatenated
+    into ``result/chrX.vcf.gz``. A per-region empty result (target present but zero
+    imputed records) is the M3 silent-failure guard. All failures return
+    ``"failed"`` rather than raising, so chrX cannot abort the whole run.
+    """
+    log = logger.bind(chrom="X", imputation_id=imputation_id)
+    final_out = _output_vcf_path(archive, "X")  # result/chrX.vcf.gz
+
+    if not force and _output_is_complete(final_out):
+        log.info("imputation.beagle.chrx.skip_existing", output=str(final_out))
+        return "skipped", 0.0
+
+    start = time.monotonic()
+    try:
+        bcftools, bgzip, awk = _resolve_chrx_runner_tools()
+    except ChrxToolingError:
+        log.exception("imputation.beagle.chrx.tooling_missing")
+        return "failed", time.monotonic() - start
+
+    region_panels = {
+        "par1": panel.chrx_par1_panel,
+        "nonpar": panel.chrx_nonpar_panel,
+        "par2": panel.chrx_par2_panel,
+    }
+    missing_panels = [region for region, p in region_panels.items() if not p.is_file()]
+    if missing_panels:
+        log.error(
+            "imputation.beagle.chrx.no_region_panel",
+            missing=missing_panels,
+            hint="run `genome imputation panel prepare-chrx` first",
+        )
+        return "failed", time.monotonic() - start
+
+    map_file = panel.map_for_chrom("X")
+    if force:
+        _unlink_quietly(final_out)
+        _unlink_chrx_region_intermediates(archive)
+
+    concat_inputs: list[Path] = []
+    try:
+        for region in CHRX_REGIONS:
+            target = archive.chrx_region_upload_path(region)
+            if not target.is_file():
+                # No chip input for this region (e.g. a corpus with no PAR SNPs).
+                log.info("imputation.beagle.chrx.region.no_target", region=region)
+                continue
+            region_out = archive.chrx_region_result_path(region)
+            ran = _impute_chrx_one_region(
+                region=region,
+                region_panel=region_panels[region],
+                target=target,
+                map_file=map_file,
+                region_out=region_out,
+                beagle_jar=panel.beagle_jar,
+                threads=threads,
+                memory_gb=memory_gb,
+                ne=ne,
+                imputation_id=imputation_id,
+                force=force,
+            )
+            if not ran:
+                return "failed", time.monotonic() - start
+            if not _vcf_has_records(region_out):
+                log.error(
+                    "imputation.beagle.chrx.region.empty",
+                    region=region,
+                    output=str(region_out),
+                    hint="target had >0 inputs but Beagle produced 0 records",
+                )
+                _unlink_quietly(region_out)
+                return "failed", time.monotonic() - start
+            if region == "nonpar":
+                diploid_out = archive.chrx_region_result_diploid_path()
+                if force or not _output_is_complete(diploid_out):
+                    _unlink_quietly(diploid_out)
+                    log.info("imputation.beagle.chrx.rediploidize.start", output=str(diploid_out))
+                    rediploidize_vcf(region_out, diploid_out, bgzip_bin=bgzip, awk_bin=awk)
+                    restrict_file(diploid_out)
+                    log.info("imputation.beagle.chrx.rediploidize.complete")
+                concat_inputs.append(diploid_out)
+            else:
+                concat_inputs.append(region_out)
+    except ChrxToolingError:
+        log.exception("imputation.beagle.chrx.rediploidize_failed")
+        return "failed", time.monotonic() - start
+
+    if not concat_inputs:
+        log.error("imputation.beagle.chrx.no_regions_ran")
+        return "failed", time.monotonic() - start
+
+    try:
+        for p in concat_inputs:
+            _bcftools_index(bcftools, p)
+        log.info(
+            "imputation.beagle.chrx.concat.start",
+            inputs=[str(p) for p in concat_inputs],
+            output=str(final_out),
+        )
+        _bcftools_concat(bcftools, concat_inputs, final_out)
+        log.info("imputation.beagle.chrx.concat.complete", output=str(final_out))
+    except ChrxToolingError:
+        log.exception("imputation.beagle.chrx.concat_failed")
+        _unlink_quietly(final_out)
+        return "failed", time.monotonic() - start
+
+    if not _output_is_complete(final_out):
+        _unlink_quietly(final_out)
+        log.error("imputation.beagle.chrx.concat_output_invalid", output=str(final_out))
+        return "failed", time.monotonic() - start
+
+    restrict_file(final_out)
+    elapsed = time.monotonic() - start
+    log.info(
+        "imputation.beagle.chrx.complete",
+        elapsed=elapsed,
+        regions_concatenated=len(concat_inputs),
+    )
     return "completed", elapsed
 
 

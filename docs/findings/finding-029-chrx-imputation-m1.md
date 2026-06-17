@@ -60,6 +60,67 @@ DR² (beyond the modest reduction expected from lower non-PAR marker density),
 **or** a `male_nonpar_het_anomaly` count more than a handful. It is not built;
 this is the option-space record so a future session does not re-derive it.
 
+## M1 failed the gate → M3-physical Task 0 probe (PASS, 2026-06-16)
+
+M1's first authoritative real-data run **failed its own falsifiability gate**,
+firing the M3-physical trigger above:
+
+- 25,751 non-PAR male targets → **31** out at DR²>0.3, **29** of them
+  biologically-impossible male hets → **net ~1 usable non-PAR variant**.
+- Raw Beagle non-PAR output: **2,731,121** variants, mean DR² ≈ **0.0000**, only
+  **55** > 0.3 (0.002%). `male_nonpar_het_anomaly = 30`.
+- Internal control: PAR (un-diploidized) imputed normally — 519 anchors → 1,958
+  calls. Non-PAR has 50× the anchors and yields 63× fewer. The genetic map is
+  fine; whole-panel diploidization destroys non-PAR information content.
+
+### Task 0 probe — does native-haploid (M3) recover non-PAR DR²?
+
+PR 5a Task 0 (the hard build gate) probed whether imputing the **native**
+(un-diploidized) panel — males left haploid in non-PAR — with a haploid male
+target restores DR². Method: leave 12 panel males out of the reference, thin
+those 12 to chip-like density (~190 typed markers/Mb, close to the real ~169/Mb
+non-PAR chip density) as the target, `beagle ref= gt= map= impute=true` on a
+2 Mb window, mean DR² over imputed (IMP) sites. All arms `bcftools`-built
+against the on-disk panel; Beagle 5.5, **exit 0 everywhere**:
+
+| Arm | Region | Target | Panel | imputed n | meanDR² | DR²>0.3 | DR²>0.8 | out ploidy |
+|---|---|---|---|---|---|---|---|---|
+| **Primary** | non-PAR chrX:49–51M | haploid | native | 22,172 | 0.026 | 503 (2.3%) | 306 (1.4%) | **haploid** `GT:DS` |
+| PAR control | PAR1 chrX:0.5–2.5M | diploid | native | 69,277 | 0.070 | 7.7% | 2.1% | diploid |
+| chr20 control | chr20:30–32M | diploid | native | 48,743 | 0.088 | 10.0% | 6.2% | diploid |
+| non-PAR diploid-target | non-PAR chrX:49–51M (same) | diploid (re-dip) | native | 22,172 | 0.026 | 503 (2.3%) | 306 (1.4%) | diploid |
+
+Findings:
+
+1. **M3 is viable — decisively better than M1.** Native-haploid non-PAR yields
+   **2.3% > 0.3** vs M1's **0.002%** (~1,100× more imputable sites), mean DR²
+   0.026 vs 0.0000. Projected over ~152 Mb non-PAR this is order **10⁴**
+   (tens of thousands of) usable variants — ≫ M1's net ~1, ≫ the PAR yield.
+2. **Non-PAR sits ~3–4× below the diploid baselines** (2.3% vs PAR 7.7% /
+   autosomal 10%). This is the *expected* chrX penalty — the non-PAR window has
+   ~half the marker density of the autosomal window and a smaller effective Ne
+   (1,598 male haplotypes are hemizygous, not 2×) — **not** a catastrophic
+   failure. The low mean DR² in *every* arm (incl. diploid PAR/chr20) is the
+   rare-variant tail of *raw* Beagle output; the production "mean 0.82" is the
+   post-`DR²>0.3` figure.
+3. **Haploid-dosage DR² deflation refuted.** Re-diploidizing the target on the
+   identical window/ref gives byte-identical DR² stats (0.026 / 503 / 306) — the
+   target's input ploidy does not change imputation quality. The plan's
+   haploid-target choice is correct; there is no better target-diploidization
+   variant to chase.
+4. **Beagle emits HAPLOID output for a haploid target** (`GT:DS`, GT = `0`/`1`)
+   → the R1 re-diploidization seam (plan Task 4) is **load-bearing, not a
+   no-op**, and (since haploid→hom-diploid is deterministic) M3+R1 cannot
+   introduce a male non-PAR het → `male_nonpar_het_anomaly` ≈ 0 by construction.
+
+Probe limitations (do not change the verdict): one mid-core 2 Mb non-PAR window
+(not whole non-PAR); 12-sample leave-out study (vs production's 1 sample) — DR²
+noise affects all arms equally; DR² is Beagle's internal estimate, not measured
+concordance. The real-data gate (Verification, below) measures the full
+distribution.
+
+**Verdict: GO** — the Task 0 hard gate passes. Build M3-physical (tasks 1–9).
+
 ## What landed in PR 5a
 
 - **finding-008 safety fixes** (mechanic-independent): shared `imputation/bgzf.py`;
@@ -189,11 +250,48 @@ Two consequences:
   position now survives a reopen. Verify on a *fresh* connection that
   `nextval('variant_id_seq') > MAX(variant_id)`.
 
+## M3-physical built (PR 5a)
+
+The Task 0 probe passed, so M3-physical was built and the M1 *code* deleted
+(the M1 narrative above is kept as the audit trail). What shipped:
+
+- **Panel split** (`genome imputation panel prepare-chrx`,
+  `imputation/chrx_panel.py`): ensures the panel `.tbi`, then `bcftools view -r`
+  emits three **native** subsets `chrX.{par1,nonpar,par2}.vcf.gz` beside the
+  panel; prep-time assertions pin PAR-haploid-free + non-PAR-retains-males. The
+  region boundaries derive from `par_regions` (the non-PAR region uses an
+  open-ended upper range so it reaches the contig end regardless of assembly
+  length). `ReferencePanel.diploidized_chrx_panel` → `chrx_{par1,nonpar,par2}_panel`.
+- **Region-aware target export** (`imputation/vcf_export.py`): chrX rows bucket
+  into the three regions in Python (no SQL predicate); a male profile renders
+  non-PAR **haploid** (`_haploid_genotype_for_dosage`: 0→`0`, 2→`1`, impossible
+  het 1→`.`), PAR + female/ambiguous stay diploid. Region targets land under
+  `archive/.../upload/chrX_regions/`; the manifest records `chrx_regions` counts
+  + the `chrx_ploidy` decision.
+- **Three-region run + concat** (`imputation/beagle_runner._impute_chrx_regions`):
+  one Beagle invocation per region against its native subset, the non-PAR output
+  re-diploidized (R1, `rediploidize_vcf` — un-gated, idempotent), then `bcftools
+  index -t` ×3 + `bcftools concat -a` → one `result/chrX.vcf.gz`. `concat -a`
+  re-sorts across files (the non-PAR sliver < PAR1). Per-region empty guard
+  (target present but 0 imputed records → fail), region-level resumability, and
+  per-step structlog progress. Autosomal path byte-identical; chrX stays one
+  accounting entry.
+- **R1 storage unchanged**: `consensus_chrx_dosage_v`, `apply_chrx_het_guard`,
+  `chrx_qc.py`, and the importer (`ingest.py`) are untouched — the runner's
+  re-diploidization makes the male non-PAR output diploid hom before import.
+- **Tooling**: `bcftools` is now a hard prerequisite for the chrX path
+  (README + runbook updated).
+
 ## Follow-up
 
-- Capture the anchors above at the first authoritative run and lock them here.
-- If the M3-physical trigger fires, build it (region-split subsets + `bcftools
-  concat`) per the option-space record above.
+- **Capture the first-authoritative-run M3 anchors at the gate and lock them
+  here** (these replace the M1 failure numbers as the regression signal):
+  non-PAR mean DR² ≈ PAR/autosomal (no longer ~0); non-PAR usable yield ≫ 31
+  (order ~10⁴–10⁵); `male_nonpar_het_anomaly` ≈ 0; chrX duplicates collapsed > 0;
+  re-locked index match counts; negative controls (autosomal anchors, PAR,
+  shared-call concordance ~0.999776) unchanged. **Also update CLAUDE.md real-data
+  observation #3** ("chrX imputed: 0") to the measured M3 numbers, and flip
+  ROADMAP PR 5a to `[x]`, only after the gate passes.
 - Persist `--sex` to `sample_qc.sex_expected` (the sex-edge remedy) when an
   all-ambiguous profile actually needs it — not required for this user.
 - chrY stays skipped (the panel has no Y); `pos_grch37` recoalesce

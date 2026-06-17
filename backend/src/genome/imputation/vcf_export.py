@@ -24,16 +24,22 @@ from __future__ import annotations
 
 import gzip
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final
 
 import structlog
 
 from genome.config import get_settings
 from genome.db.duckdb_conn import duckdb_connection
-from genome.imputation.archive import ImputationArchive, restrict_file
+from genome.imputation.archive import (
+    CHRX_REGIONS,
+    ChrxRegion,
+    ImputationArchive,
+    restrict_file,
+)
 from genome.imputation.runs import insert_run
 from genome.imputation.sex import profile_sex_label
+from genome.par_regions import PAR1_END, is_nonpar
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -96,6 +102,9 @@ class PreparedUpload:
     manifest_path: Path
     input_run_ids: tuple[int, ...]
     profile_sex: str
+    chrx_regions: dict[str, int]
+    """Per-region chrX target counts (``par1`` / ``nonpar`` / ``par2``); empty when
+    no chrX rows were exported (PR 5a / M3-physical)."""
 
 
 def _input_run_ids(conn: DuckDBPyConnection) -> tuple[int, ...]:
@@ -130,6 +139,9 @@ class _ExportRow:
     ref: str
     alt: str
     genotype: str
+    dosage: int | None = None
+    """Raw alt-allele dosage (0/1/2), carried so the chrX path can re-render a male
+    non-PAR row as haploid (PR 5a). ``None`` / unused for the autosomal path."""
 
 
 def _genotype_for_dosage(dosage: int | None, *, is_no_call: bool) -> str:
@@ -150,6 +162,64 @@ def _genotype_for_dosage(dosage: int | None, *, is_no_call: bool) -> str:
         return "1/1"
     msg = f"invalid dosage value: {dosage}"
     raise ValueError(msg)
+
+
+def _haploid_genotype_for_dosage(dosage: int | None, *, is_no_call: bool) -> str:
+    """Map ``dosage`` to a HAPLOID VCF GT for a male non-PAR chrX call (PR 5a / M3).
+
+    A hemizygous male carries a single allele in non-PAR: dosage 0 → ``'0'``,
+    2 → ``'1'``. A no-call, a missing dosage, or a biologically-impossible male
+    non-PAR het (dosage 1 — a hemizygous position cannot be heterozygous) renders
+    as the haploid no-call ``'.'`` so Beagle imputes it (finding-029 Decision 2).
+    Always single-token — never ``'./.'`` — so the region file is uniform-haploid.
+    """
+    if is_no_call or dosage is None:
+        return "."
+    if dosage == 0:
+        return "0"
+    if dosage == 2:  # noqa: PLR2004 — explicit branch for clarity
+        return "1"
+    if dosage == 1:
+        # Impossible male non-PAR het — emit a haploid no-call and let Beagle impute.
+        return "."
+    msg = f"invalid dosage value: {dosage}"
+    raise ValueError(msg)
+
+
+def _chrx_region_for_pos(pos: int) -> ChrxRegion:
+    """Bucket a 1-based GRCh38 chrX position into ``par1`` / ``nonpar`` / ``par2``.
+
+    Uses :func:`genome.par_regions.is_nonpar` for the PAR/non-PAR split (so the two
+    telomeric slivers outside the PAR windows correctly count as non-PAR), then
+    splits PAR by ``PAR1_END``. Boundaries live in :mod:`genome.par_regions`, so
+    there is no SQL predicate to drift against (PR 5a Task 2).
+    """
+    if is_nonpar(pos):
+        return "nonpar"
+    return "par1" if pos <= PAR1_END else "par2"
+
+
+def _bucket_chrx_rows(
+    rows: list[_ExportRow], *, profile_sex: str
+) -> dict[ChrxRegion, list[_ExportRow]]:
+    """Split chrX export rows into the three regions, sex-aware (PR 5a / M3).
+
+    A male profile re-renders its non-PAR rows as haploid (so Beagle imputes the
+    biologically-correct hemizygous representation against the native panel
+    subset); PAR rows stay diploid for everyone, and a female / ambiguous profile
+    renders the whole chromosome diploid (the pre-rendered genotype from
+    :func:`_fetch_export_rows`). Each returned region list is uniform-ploidy.
+    """
+    buckets: dict[ChrxRegion, list[_ExportRow]] = {region: [] for region in CHRX_REGIONS}
+    male = profile_sex == "M"
+    for row in rows:
+        region = _chrx_region_for_pos(row.pos)
+        if male and region == "nonpar":
+            haploid = _haploid_genotype_for_dosage(row.dosage, is_no_call=False)
+            buckets[region].append(replace(row, genotype=haploid))
+        else:
+            buckets[region].append(row)
+    return buckets
 
 
 def _fetch_export_rows(
@@ -207,6 +277,7 @@ def _fetch_export_rows(
                 None if dosage is None else int(dosage),
                 is_no_call=bool(is_no_call),
             ),
+            dosage=None if dosage is None else int(dosage),
         )
         for pos, rsid, ref, alt, dosage, is_no_call in rows
     ]
@@ -254,6 +325,37 @@ def _write_chromosome_vcf(
             )
 
 
+def _write_chrx_region_targets(
+    archive: ImputationArchive,
+    chrx_region_rows: dict[ChrxRegion, list[_ExportRow]],
+    *,
+    sample_id: str,
+    log: structlog.stdlib.BoundLogger,
+) -> list[Path]:
+    """Write one chrX target VCF per non-empty region; return the written paths (PR 5a).
+
+    Each region file lands under ``upload/chrX_regions/`` and is uniform-ploidy
+    (the bucketing in :func:`_bucket_chrx_rows` already rendered male non-PAR rows
+    haploid). An empty region is skipped — no file, recorded as 0 in the manifest.
+    """
+    written: list[Path] = []
+    for region in CHRX_REGIONS:
+        region_rows = chrx_region_rows.get(region, [])
+        if not region_rows:
+            continue
+        path = archive.chrx_region_upload_path(region)
+        _write_chromosome_vcf(path, region_rows, sample_id=sample_id)
+        restrict_file(path)
+        written.append(path)
+        log.info(
+            "imputation.prepare.chrx_region",
+            region=region,
+            variants=len(region_rows),
+            path=str(path),
+        )
+    return written
+
+
 def _write_manifest(  # noqa: PLR0913 — manifest covers every provenance field; flat keyword list reads better than a wrapping struct
     archive: ImputationArchive,
     *,
@@ -265,13 +367,17 @@ def _write_manifest(  # noqa: PLR0913 — manifest covers every provenance field
     variants_per_chrom: dict[str, int],
     input_run_ids: tuple[int, ...],
     profile_sex: str,
+    chrx_regions: dict[str, int],
+    chrx_ploidy: str | None,
 ) -> Path:
     """Write a JSON manifest of the prepare step's output.
 
     The manifest is what a re-running session reads to recover the run
     parameters without re-querying the DB. It is the on-disk source of truth
-    for "what did this run upload". ``profile_sex`` is recorded as transient
-    provenance for the chrX path (PR 5a) — no DB column is written.
+    for "what did this run upload". ``profile_sex``, ``chrx_regions`` (the
+    M3-physical per-region target counts) and ``chrx_ploidy`` (the chrX target
+    ploidy decision) are recorded as transient provenance for the chrX path
+    (PR 5a) — no DB column is written.
     """
     payload: dict[str, object] = {
         "imputation_id": imputation_id,
@@ -287,6 +393,8 @@ def _write_manifest(  # noqa: PLR0913 — manifest covers every provenance field
         "variants_total": sum(variants_per_chrom.values()),
         "chromosomes_exported": sorted(variants_per_chrom),
         "input_run_ids": list(input_run_ids),
+        "chrx_regions": chrx_regions,
+        "chrx_ploidy": chrx_ploidy,
     }
     archive.upload_manifest.write_text(json.dumps(payload, indent=2, sort_keys=True))
     restrict_file(archive.upload_manifest)
@@ -371,9 +479,17 @@ def prepare_run(
         # Compute totals up front so the imputation_runs row records the right number.
         variants_per_chrom: dict[str, int] = {}
         export_rows_per_chrom: dict[str, list[_ExportRow]] = {}
+        chrx_region_rows: dict[ChrxRegion, list[_ExportRow]] = {}
         for chrom in _IMPUTABLE_CHROMS:
             rows = _fetch_export_rows(conn, chrom)
             if not rows:
+                continue
+            if chrom == "X":
+                # M3-physical: bucket chrX into PAR1 / non-PAR / PAR2 region targets,
+                # rendering male non-PAR haploid. variants_per_chrom["X"] stays the
+                # whole-chromosome total (= sum of regions).
+                chrx_region_rows = _bucket_chrx_rows(rows, profile_sex=profile_sex)
+                variants_per_chrom["X"] = len(rows)
                 continue
             export_rows_per_chrom[chrom] = rows
             variants_per_chrom[chrom] = len(rows)
@@ -411,6 +527,20 @@ def prepare_run(
             path=str(path),
         )
 
+    # M3-physical chrX: one target file per non-empty region, under chrX_regions/.
+    written.extend(
+        _write_chrx_region_targets(archive, chrx_region_rows, sample_id=sample_id, log=log)
+    )
+
+    chrx_regions: dict[str, int] = (
+        {str(region): len(chrx_region_rows.get(region, [])) for region in CHRX_REGIONS}
+        if chrx_region_rows
+        else {}
+    )
+    chrx_ploidy = (
+        ("male_nonpar_haploid" if profile_sex == "M" else "diploid") if chrx_region_rows else None
+    )
+
     manifest = _write_manifest(
         archive,
         imputation_id=imputation_id,
@@ -421,6 +551,8 @@ def prepare_run(
         variants_per_chrom=variants_per_chrom,
         input_run_ids=input_run_ids,
         profile_sex=profile_sex,
+        chrx_regions=chrx_regions,
+        chrx_ploidy=chrx_ploidy,
     )
 
     log.info(
@@ -429,6 +561,8 @@ def prepare_run(
         variants_total=total_variants,
         chroms_exported=sorted(variants_per_chrom),
         profile_sex=profile_sex,
+        chrx_regions=chrx_regions,
+        chrx_ploidy=chrx_ploidy,
     )
     return PreparedUpload(
         imputation_id=imputation_id,
@@ -439,4 +573,5 @@ def prepare_run(
         manifest_path=manifest,
         input_run_ids=input_run_ids,
         profile_sex=profile_sex,
+        chrx_regions=chrx_regions,
     )

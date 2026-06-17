@@ -3,9 +3,10 @@
 PAR1 and PAR2 are the two telomeric segments of chrX that recombine with chrY
 and are therefore diploid in both sexes; the non-PAR core between them is
 hemizygous in males. The chrX dosage view (``consensus_chrx_dosage_v``) and the
-M1 panel diploidizer both gate on this: a male non-PAR position is stored as a
-homozygous-diploid R1 call whose dosage the view halves, while PAR positions
-pass through as ordinary diploid.
+M3 sex-aware target export (``imputation/vcf_export``) both gate on this: a male
+non-PAR position is exported haploid and stored back as a homozygous-diploid R1
+call whose dosage the view halves, while PAR positions pass through as ordinary
+diploid.
 
 Coordinates are 1-based GRCh38 (the project's primary build):
 

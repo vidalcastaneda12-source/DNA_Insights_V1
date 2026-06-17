@@ -104,7 +104,7 @@ VSC-User runs the canonical verification independently against the pushed branch
    - Input to Beagle: 204,153 polymorphic SNVs across chromosomes 1-22 + X. Hom-only positions are filtered at prepare per finding-005 #6.
    - Imputed output at DR² > 0.3: 2,369,171 variants.
    - Mean DR²: 0.8242. High-quality (DR² > 0.8): 1,592,735 (~67% of imported).
-   - chrX imputed variants: 0 for males, because hemizygous positions land as `ref==alt` at the prepare layer (finding-005 #6) and so are dropped before Beagle ever sees them.
+   - chrX imputed variants: 0 for males, because hemizygous positions land as `ref==alt` at the prepare layer (finding-005 #6) and so are dropped before Beagle ever sees them. **Superseded by PR-3 hom-only recovery + PR 5a M3-physical chrX imputation:** the recovered chrX positions now carry a real ALT and impute via the region-split mechanic, so chrX is no longer 0. The first-authoritative-run M3 chrX numbers (expected non-PAR yield order ~10⁴–10⁵, `male_nonpar_het_anomaly` ≈ 0) are captured at the gate and locked in [`finding-029`](docs/findings/finding-029-chrx-imputation-m1.md); re-lock this bullet then.
    - Full-genome runtime: ~30 min on Linux, 16 threads, 8 GB heap.
    - Post-merge `consensus_genotypes`: 3,210,371 rows (942,620 chip-derived; 2,267,751 imputed-only under the `consensus_v1` Phase 4 extension; the 101,420 chip+imputed overlap variants stay chip-derived with the imputed call appended to `contributing_calls` as confirming evidence).
    - Phase 3 numbers preserved exactly through Phase 4: `both_concordant=120,516`, `disagreement_resolved=106`, `single_source=821,998`, shared-call concordance=1.0000, `strand_flip_resolutions=106`, palindromic shared variants=31.

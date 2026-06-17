@@ -178,15 +178,30 @@ class ReferencePanel:
         return self.root / "panel"
 
     @property
-    def diploidized_chrx_panel(self) -> Path:
-        """Path to the M1-diploidized chrX panel (``<panel>/chrX.diploidized.vcf.gz``).
+    def chrx_par1_panel(self) -> Path:
+        """Native PAR1 chrX panel subset (``<panel>/chrX.par1.vcf.gz``, PR 5a / M3).
 
-        Produced by ``genome imputation panel prepare-chrx``; the runner points
-        the chrX ``ref=`` here so Beagle sees a uniform-diploid panel and accepts
-        it (finding-008/029). The path is computed, not checked — pair it with an
-        ``is_file()`` test before a chrX run.
+        Produced by ``genome imputation panel prepare-chrx`` via ``bcftools view
+        -r``; the runner points the PAR1 chrX ``ref=`` here. Un-diploidized — PAR
+        is already diploid in both sexes. Computed, not checked.
         """
-        return self.panel_dir / "chrX.diploidized.vcf.gz"
+        return self.panel_dir / "chrX.par1.vcf.gz"
+
+    @property
+    def chrx_nonpar_panel(self) -> Path:
+        """Native non-PAR chrX panel subset (``<panel>/chrX.nonpar.vcf.gz``, PR 5a / M3).
+
+        The biologically-faithful subset: male haplotypes stay haploid, so Beagle
+        imputes the non-PAR core against the real (un-doubled) reference (the
+        field-standard approach M3-physical restores — see finding-029). Computed,
+        not checked.
+        """
+        return self.panel_dir / "chrX.nonpar.vcf.gz"
+
+    @property
+    def chrx_par2_panel(self) -> Path:
+        """Native PAR2 chrX panel subset (``<panel>/chrX.par2.vcf.gz``, PR 5a / M3)."""
+        return self.panel_dir / "chrX.par2.vcf.gz"
 
     @property
     def genetic_map_archive(self) -> Path:

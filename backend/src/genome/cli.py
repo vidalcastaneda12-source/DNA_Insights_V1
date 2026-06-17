@@ -393,21 +393,22 @@ def _gate_chrx_sex(chromosomes_set: frozenset[str] | None, sex: str) -> None:
     typer.echo(f"chrX imputation profile sex: {resolved}")
 
 
-def _require_diploidized_chrx_panel(chromosomes_set: frozenset[str] | None) -> None:
-    """Abort a chrX run if the diploidized chrX panel hasn't been prepared (PR 5a).
+def _require_chrx_region_panels(chromosomes_set: frozenset[str] | None) -> None:
+    """Abort a chrX run if the chrX region panel subsets haven't been prepared (PR 5a).
 
-    Beagle needs the M1-diploidized chrX panel; without it the chrX subprocess
-    would crash mid-run on the 1000G panel's mixed ploidy (finding-008). Surface
-    that as a friendly pre-flight when chrX is in scope.
+    M3-physical needs the three native panel subsets (PAR1 / non-PAR / PAR2) from
+    ``panel prepare-chrx``; without them the chrX region runs have no ``ref=``.
+    Surface that as a friendly pre-flight when chrX is in scope (finding-029).
     """
     includes_x = chromosomes_set is None or "X" in chromosomes_set
     if not includes_x:
         return
     panel = ReferencePanel.resolve()
-    if not panel.diploidized_chrx_panel.is_file():
+    region_panels = (panel.chrx_par1_panel, panel.chrx_nonpar_panel, panel.chrx_par2_panel)
+    if not all(p.is_file() for p in region_panels):
         msg = (
-            "chrX is in scope but the diploidized chrX reference panel is missing. "
-            "Run `genome imputation panel prepare-chrx` first (M1 — finding-008/029)."
+            "chrX is in scope but the chrX region reference panels are missing. "
+            "Run `genome imputation panel prepare-chrx` first (M3-physical — finding-029)."
         )
         typer.echo(msg, err=True)
         raise typer.Exit(code=1)
@@ -424,7 +425,10 @@ def _chrx_in_run_scope(imputation_id: int, chromosomes_set: frozenset[str] | Non
     if chromosomes_set is not None and "X" not in chromosomes_set:
         return False
     archive = ImputationArchive.for_run(get_settings().archive_path, imputation_id)
-    return archive.upload_vcf_path("X").is_file()
+    # M3-physical: chrX is prepared as region targets under chrX_regions/, not a
+    # top-level upload/chrX.vcf.gz. The non-PAR region is always present when chrX
+    # has any exportable rows, so it is the presence signal (PR 5a).
+    return archive.chrx_region_upload_path("nonpar").is_file()
 
 
 @imputation_app.command("prepare")
@@ -708,12 +712,12 @@ def imputation_run(  # noqa: PLR0913 — one CLI flag per operational control
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--chromosomes") from exc
 
-    # chrX imputation needs a determinate profile sex and the diploidized panel.
+    # chrX imputation needs a determinate profile sex and the region panel subsets.
     # Gate both before the long run — but only when chrX will actually run (in
-    # scope AND a chrX upload exists), so autosome-only runs are unaffected.
+    # scope AND chrX region targets exist), so autosome-only runs are unaffected.
     if _chrx_in_run_scope(imputation_id, chromosomes_set):
         _gate_chrx_sex(chromosomes_set, sex)
-        _require_diploidized_chrx_panel(chromosomes_set)
+        _require_chrx_region_panels(chromosomes_set)
 
     result = run_imputation(
         imputation_id,
@@ -892,18 +896,19 @@ def panel_prepare_chrx(
         bool,
         typer.Option(
             "--force",
-            help="Re-diploidize even if chrX.diploidized.vcf.gz already exists.",
+            help="Rebuild the chrX region subsets even if they already exist.",
         ),
     ] = False,
 ) -> None:
-    """Diploidize the chrX reference panel for Beagle (M1 — finding-008/029).
+    """Split the chrX reference panel into native region subsets for Beagle (M3 — finding-029).
 
-    Rewrites male non-PAR haploid genotypes in the installed 1000G chrX panel to
-    homozygous-diploid so Beagle 5.5's uniform-ploidy reference loader accepts
-    it, writing ``chrX.diploidized.vcf.gz`` beside the panel. Required before
-    ``genome imputation run`` with chrX in scope; one-time and idempotent. This
-    is a gated long operation — it streams the whole chromosome through
-    ``bgzip | awk | bgzip`` and asserts the result is haploid-free.
+    Emits three native (un-diploidized) subsets of the installed 1000G chrX panel
+    — ``chrX.par1.vcf.gz`` / ``chrX.nonpar.vcf.gz`` / ``chrX.par2.vcf.gz`` — via
+    ``bcftools view -r``, so each region loads into Beagle 5.5 with the
+    biologically-correct ploidy (male non-PAR stays haploid). Required before
+    ``genome imputation run`` with chrX in scope; one-time and idempotent. Ensures
+    the panel ``.tbi`` first and asserts each subset's ploidy composition.
+    Requires ``bcftools`` on PATH.
     """
     panel = ReferencePanel.resolve()
     try:
@@ -914,14 +919,15 @@ def panel_prepare_chrx(
 
     if result.skipped:
         typer.echo(
-            f"chrX diploidized panel already present: {result.output_path} "
+            f"chrX region panels already present: {result.par1_path.name}, "
+            f"{result.nonpar_path.name}, {result.par2_path.name} "
             "(pass --force to rebuild)",
         )
         return
     typer.echo(
-        f"chrX panel diploidized: {result.output_path} "
-        f"diploidized_gts={result.diploidized_gts} "
-        f"haploid_remaining={result.haploid_remaining}",
+        f"chrX panel split into region subsets beside {result.par1_path.parent}: "
+        f"{result.par1_path.name}, {result.nonpar_path.name}, {result.par2_path.name} "
+        f"(non-PAR haploid GTs={result.nonpar_haploid_gts})",
     )
     typer.echo(
         "Next: `genome imputation run <id> --chromosomes X` (or a full run including X).",

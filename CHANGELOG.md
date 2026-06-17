@@ -6,13 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-- PR 5a (pre-Phase-6): chrX imputation via the **M1** panel-diploidization
-  mechanic (`finding-029`, closing `finding-008`). New `genome imputation panel
-  prepare-chrx` rewrites male non-PAR haploid genotypes in the 1000G chrX panel
-  to homozygous-diploid (probe-validated `bgzip | awk | bgzip` stream, non-PAR
-  gated, asserts haploid-free) so Beagle 5.5's uniform-ploidy reference loader
-  accepts it; the runner points the chrX `ref=` at `chrX.diploidized.vcf.gz` and
-  fails chrX clearly when it is absent. Adds: a minimal in-SQL sex mechanism
+- PR 5a (pre-Phase-6): chrX imputation via the **M3-physical** region-split
+  mechanic (`finding-029`, closing `finding-008`). `genome imputation panel
+  prepare-chrx` now splits the 1000G chrX panel into three **native**
+  (un-diploidized) subsets — `chrX.{par1,nonpar,par2}.vcf.gz` — via `bcftools
+  view -r` (ensuring the panel `.tbi` first; asserting the PAR subsets are
+  haploid-free and the non-PAR subset retains the male hemizygous haplotypes).
+  The runner imputes each region against its matching native subset with the
+  biologically-correct ploidy (male non-PAR stays **haploid**), re-diploidizes
+  the male non-PAR output back to hom-diploid (R1 seam — idempotent, so
+  `variants_master`/`consensus_genotypes` storage is byte-unchanged), and
+  `bcftools concat -a`s the three region outputs into one `result/chrX.vcf.gz`.
+  This **supersedes** the prior M1 whole-panel diploidization, which failed its
+  falsifiability gate (fake-homozygosing half the panel drove non-PAR mean
+  DR² ≈ 0; the finding-029 Task 0 probe confirms native-haploid imputation
+  recovers it — ~1,100× more imputable non-PAR sites). `bcftools` becomes a hard
+  prerequisite for the chrX path (alongside `bgzip`/`awk`). Adds: a minimal
+  in-SQL sex mechanism
   (`imputation/sex.py` + `--sex {M,F,auto}` on `prepare`/`run`, no DB column);
   `genome/par_regions.py`; the **`consensus_chrx_dosage_v`** view (the only
   schema/DDL touch — corrects male non-PAR dosage 2→1/0→0 and flags

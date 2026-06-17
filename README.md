@@ -135,10 +135,19 @@ regular runtime dependency via `uv sync`; no system tooling is required. Pass
 a local UCSC chain file with `--chain-file` (auto-download is disabled per the
 local-first privacy policy).
 
-`bcftools` and its `+liftover` plugin are **optional** and used only if you
-already have a working install — the project no longer requires them. If you
-ever want to fall back to the pure-Python implementation, pass
-`--liftover-engine pyliftover`.
+For lift-over, `bcftools` and its `+liftover` plugin are **optional** and used
+only if you already have a working install. If you ever want to fall back to the
+pure-Python implementation, pass `--liftover-engine pyliftover`.
+
+### bcftools (required for chrX imputation)
+
+`bcftools` **is** required for the chrX imputation path (PR 5a / M3-physical):
+`genome imputation panel prepare-chrx` splits the chrX reference panel into
+PAR1 / non-PAR / PAR2 subsets with `bcftools view -r`, and the chrX run
+concatenates the per-region outputs with `bcftools concat -a` (also using
+`bgzip` and `awk` for the R1 re-diploidize seam). Install `bcftools` (≥ 1.x,
+which ships `concat -a`) on PATH before running chrX. Autosomal imputation does
+not need it.
 
 ## Architecture at a glance
 

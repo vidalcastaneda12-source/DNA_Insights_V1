@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import gzip
 import io
+import shutil
 import stat
 import subprocess
 from dataclasses import dataclass, field
@@ -31,6 +32,7 @@ from genome.imputation.beagle_runner import (
     default_threads,
     run_imputation,
 )
+from genome.imputation.chrx_panel import count_haploid_gts
 from genome.imputation.ingest import import_result
 from genome.imputation.reference_panel import (
     PANEL_CHROMOSOMES,
@@ -996,7 +998,7 @@ def test_run_imputation_unlinks_truncated_partial_on_failure(
     archive_root = _archive_root(isolated_settings)
     _seed_panel(panel_root)
     # Use an autosome — the unlink-on-failure path is chromosome-independent, and
-    # chrX additionally requires the diploidized panel (covered separately).
+    # chrX runs through the separate region-split path (covered below).
     imp_id = _seed_run(archive_root=archive_root, chromosomes=("1",))
     archive = ImputationArchive.for_run(archive_root, imp_id)
 
@@ -1063,48 +1065,253 @@ def test_run_imputation_reimputes_when_existing_output_is_truncated_bgzf(
 
 
 # ---------------------------------------------------------------------------
-# M1 chrX: the runner requires the diploidized panel and points ref= at it.
+# M3-physical chrX: the runner splits into PAR1 / non-PAR / PAR2, re-diploidizes
+# the non-PAR output, and concatenates the three into one result/chrX.vcf.gz.
+# Beagle is stubbed (via _run_beagle_subprocess); bcftools / bgzip / awk run for
+# real, so the concat ordering + R1 re-diploidize are genuinely exercised.
 # ---------------------------------------------------------------------------
 
+_REGION_TOOLS = ("bcftools", "bgzip", "awk")
+_requires_region_tools = pytest.mark.skipif(
+    not all(shutil.which(t) is not None for t in _REGION_TOOLS),
+    reason="bcftools, bgzip and awk are required for the M3 chrX run path",
+)
 
-def test_run_imputation_chrx_fails_without_diploidized_panel(
+# Stubbed per-region Beagle output. The non-PAR output is HAPLOID (to exercise
+# the R1 re-diploidize seam) and carries a telomeric-sliver record at pos 5000
+# that precedes PAR1's 1000000 — so `bcftools concat -a` must re-sort across the
+# file boundary (finding-029 Decision 4).
+_REGION_OUTPUT_RECORDS: dict[str, list[tuple[int, str]]] = {
+    "par1": [(1_000_000, "0|0")],
+    "nonpar": [(5_000, "0"), (50_000_000, "0")],
+    "par2": [(155_800_000, "0|0")],
+}
+
+
+def _bgzip_chrx_vcf(dest: Path, records: list[tuple[int, str]]) -> None:
+    """Write a valid BGZF chrX VCF (contig header + DR2) with ``(pos, gt)`` records."""
+    header = (
+        "##fileformat=VCFv4.2\n"
+        "##contig=<ID=chrX>\n"
+        '##INFO=<ID=DR2,Number=1,Type=Float,Description="Dosage R-squared">\n'
+        '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n'
+        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMPLE\n"
+    )
+    body = "".join(
+        f"chrX\t{pos}\trs{pos}\tA\tG\t.\tPASS\tDR2=0.95\tGT\t{gt}\n" for pos, gt in records
+    )
+    proc = subprocess.run(  # noqa: S603
+        [shutil.which("bgzip") or "bgzip", "-c"],
+        input=(header + body).encode("ascii"),
+        capture_output=True,
+        check=True,
+    )
+    dest.write_bytes(proc.stdout)
+
+
+def _read_vcf_records(path: Path) -> list[tuple[int, str]]:
+    """Read ``(pos, gt)`` records from a BGZF VCF via ``bgzip -dc``."""
+    proc = subprocess.run(  # noqa: S603
+        [shutil.which("bgzip") or "bgzip", "-dc", str(path)],
+        capture_output=True,
+        check=True,
+    )
+    out: list[tuple[int, str]] = []
+    for line in proc.stdout.decode("ascii").splitlines():
+        if line.startswith("#") or not line.strip():
+            continue
+        fields = line.split("\t")
+        out.append((int(fields[1]), fields[-1]))
+    return out
+
+
+def _stub_beagle_region_output(
+    captured: list[list[str]],
+    *,
+    records: dict[str, list[tuple[int, str]]] | None = None,
+) -> object:
+    """A ``_run_beagle_subprocess`` stub that writes a BGZF output per region."""
+    recs = records if records is not None else _REGION_OUTPUT_RECORDS
+
+    def _stub(cmd: list[str], *, chrom: str, imputation_id: int) -> int:  # noqa: ARG001
+        captured.append(list(cmd))
+        out_arg = next(a for a in cmd if a.startswith("out="))
+        prefix = out_arg[len("out=") :]
+        region = Path(prefix).name  # par1 / nonpar / par2
+        _bgzip_chrx_vcf(Path(f"{prefix}.vcf.gz"), recs[region])
+        return 0
+
+    return _stub
+
+
+def _seed_region_panels(panel: ReferencePanel) -> None:
+    """Create the three native region panel subsets (placeholder — Beagle is stubbed)."""
+    for p in (panel.chrx_par1_panel, panel.chrx_nonpar_panel, panel.chrx_par2_panel):
+        p.write_bytes(b"panel-subset")
+
+
+def _seed_chrx_run(
+    *,
+    archive_root: Path,
+    regions: tuple[str, ...] = ("par1", "nonpar", "par2"),
+    status: str = "pending",
+) -> int:
+    """Insert a run row and stage chrX region target VCFs under chrX_regions/."""
+    init_databases()
+    with duckdb_connection() as conn:
+        imp_id = insert_run(
+            conn,
+            input_run_ids=(1,),
+            imputation_server="beagle",
+            reference_panel="1000g_phase3",
+            pipeline_version=BEAGLE_RUNNER_VERSION,
+            variants_input=100,
+        )
+        if status != "pending":
+            update_status(conn, imp_id, status=status)  # type: ignore[arg-type]
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+    archive.ensure_layout()
+    for region in regions:
+        archive.chrx_region_upload_path(region).write_bytes(b"target")  # Beagle stubbed
+    return imp_id
+
+
+def test_run_imputation_chrx_fails_without_region_panels(
     isolated_settings: dict[str, str],
     panel_root: Path,
     monkeypatch: pytest.MonkeyPatch,
     stubbed_java: None,  # noqa: ARG001 — fixture stubs check_java_available
 ) -> None:
-    """chrX is failed (not crashed mid-run) when the diploidized panel is absent."""
+    """chrX is failed (not crashed) when the region panel subsets are absent."""
     archive_root = _archive_root(isolated_settings)
-    _seed_panel(panel_root)  # base panel only — no chrX.diploidized.vcf.gz
-    imp_id = _seed_run(archive_root=archive_root, chromosomes=("X",))
+    _seed_panel(panel_root)  # base panel only — no chrX.{par1,nonpar,par2}.vcf.gz
+    imp_id = _seed_chrx_run(archive_root=archive_root)
 
-    popen_mock, captured = _make_popen_factory()
-    monkeypatch.setattr(subprocess, "Popen", popen_mock)
+    captured: list[list[str]] = []
+    monkeypatch.setattr(
+        "genome.imputation.beagle_runner._run_beagle_subprocess",
+        lambda cmd, **_kw: captured.append(cmd) or 0,
+    )
 
-    result = run_imputation(imp_id)
+    result = run_imputation(imp_id, chromosomes=frozenset({"X"}))
 
     assert result.chromosomes_failed == ("X",)
-    assert len(captured) == 0  # Beagle was never invoked for chrX
+    assert captured == []  # Beagle never invoked for chrX
 
 
-def test_run_imputation_chrx_points_ref_at_diploidized_panel(
+@_requires_region_tools
+def test_run_imputation_chrx_runs_three_regions_concats_and_rediploidizes(
     isolated_settings: dict[str, str],
     panel_root: Path,
     monkeypatch: pytest.MonkeyPatch,
     stubbed_java: None,  # noqa: ARG001 — fixture stubs check_java_available
 ) -> None:
-    """With the diploidized panel present, chrX runs and ``ref=`` targets it."""
+    """chrX runs three region Beagle invocations, re-diploidizes non-PAR, and concats."""
     archive_root = _archive_root(isolated_settings)
     panel = _seed_panel(panel_root)
-    panel.diploidized_chrx_panel.write_bytes(b"diploidized-panel")
-    imp_id = _seed_run(archive_root=archive_root, chromosomes=("X",))
+    _seed_region_panels(panel)
+    imp_id = _seed_chrx_run(archive_root=archive_root)
+    archive = ImputationArchive.for_run(archive_root, imp_id)
 
-    popen_mock, captured = _make_popen_factory()
-    monkeypatch.setattr(subprocess, "Popen", popen_mock)
+    captured: list[list[str]] = []
+    monkeypatch.setattr(
+        "genome.imputation.beagle_runner._run_beagle_subprocess",
+        _stub_beagle_region_output(captured),
+    )
 
-    result = run_imputation(imp_id)
+    result = run_imputation(imp_id, chromosomes=frozenset({"X"}))
 
     assert result.chromosomes_completed == ("X",)
-    assert len(captured) == 1
-    ref_arg = next(a for a in captured[0] if a.startswith("ref="))
-    assert ref_arg.endswith("chrX.diploidized.vcf.gz")
+    # One Beagle invocation per region, each ref= its native region subset.
+    assert len(captured) == 3
+    refs = [next(a for a in cmd if a.startswith("ref=")) for cmd in captured]
+    assert sorted(r.rsplit("/", 1)[-1] for r in refs) == [
+        "chrX.nonpar.vcf.gz",
+        "chrX.par1.vcf.gz",
+        "chrX.par2.vcf.gz",
+    ]
+
+    # The non-PAR output was re-diploidized (haploid-free) before concat.
+    diploid = archive.chrx_region_result_diploid_path()
+    assert diploid.is_file()
+    assert (
+        count_haploid_gts(
+            diploid,
+            bgzip_bin=shutil.which("bgzip") or "bgzip",
+            awk_bin=shutil.which("awk") or "awk",
+        )
+        == 0
+    )
+
+    # The single chrX result is the concat, coordinate-sorted across files: the
+    # non-PAR sliver at 5000 precedes PAR1's 1000000 (concat -a re-sorts).
+    final = archive.result_dir / "chrX.vcf.gz"
+    assert final.is_file()
+    records = _read_vcf_records(final)
+    assert [pos for pos, _gt in records] == [5_000, 1_000_000, 50_000_000, 155_800_000]
+    # The two formerly-haploid non-PAR records are stored diploid hom (R1).
+    by_pos = dict(records)
+    assert by_pos[5_000] == "0|0"
+    assert by_pos[50_000_000] == "0|0"
+    # No top-level region intermediates leaked into the result glob.
+    assert {p.name for p in archive.list_result_vcfs()} == {"chrX.vcf.gz"}
+
+
+@_requires_region_tools
+def test_run_imputation_chrx_region_empty_output_fails(
+    isolated_settings: dict[str, str],
+    panel_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stubbed_java: None,  # noqa: ARG001 — fixture stubs check_java_available
+) -> None:
+    """A region with a target but zero imputed records fails (M3 silent-failure guard)."""
+    archive_root = _archive_root(isolated_settings)
+    panel = _seed_panel(panel_root)
+    _seed_region_panels(panel)
+    imp_id = _seed_chrx_run(archive_root=archive_root)
+
+    # non-PAR imputes zero records despite having a target -> the empty guard fires.
+    records = {
+        "par1": [(1_000_000, "0|0")],
+        "nonpar": [],
+        "par2": [(155_800_000, "0|0")],
+    }
+    captured: list[list[str]] = []
+    monkeypatch.setattr(
+        "genome.imputation.beagle_runner._run_beagle_subprocess",
+        _stub_beagle_region_output(captured, records=records),
+    )
+
+    result = run_imputation(imp_id, chromosomes=frozenset({"X"}))
+
+    assert result.chromosomes_failed == ("X",)
+    # The concat is never reached, so no top-level chrX result is produced.
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+    assert not (archive.result_dir / "chrX.vcf.gz").is_file()
+
+
+def test_run_imputation_chrx_skips_when_concat_complete(
+    isolated_settings: dict[str, str],
+    panel_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stubbed_java: None,  # noqa: ARG001 — fixture stubs check_java_available
+) -> None:
+    """A complete result/chrX.vcf.gz is reused — chrX is skipped on a non-force re-run."""
+    archive_root = _archive_root(isolated_settings)
+    panel = _seed_panel(panel_root)
+    _seed_region_panels(panel)
+    imp_id = _seed_chrx_run(archive_root=archive_root)
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+    # A prior complete concat output already on disk.
+    _write_minimal_vcf(archive.result_dir / "chrX.vcf.gz", "X")
+
+    captured: list[list[str]] = []
+    monkeypatch.setattr(
+        "genome.imputation.beagle_runner._run_beagle_subprocess",
+        lambda cmd, **_kw: captured.append(cmd) or 0,
+    )
+
+    result = run_imputation(imp_id, chromosomes=frozenset({"X"}))
+
+    assert result.chromosomes_skipped == ("X",)
+    assert captured == []  # no region was re-run

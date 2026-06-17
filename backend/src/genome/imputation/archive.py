@@ -25,13 +25,20 @@ from __future__ import annotations
 
 import stat
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final, Literal
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 _OWNER_RW_ONLY = stat.S_IRUSR | stat.S_IWUSR
 _OWNER_RWX_ONLY = stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
+
+ChrxRegion = Literal["par1", "nonpar", "par2"]
+"""The three physical chrX regions M3-physical imputes independently (PR 5a)."""
+
+CHRX_REGIONS: Final[tuple[ChrxRegion, ...]] = ("par1", "nonpar", "par2")
+"""Canonical chrX region order. ``bcftools concat -a`` re-sorts by coordinate, so
+this order is for deterministic iteration, not the final record order."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +74,24 @@ class ImputationArchive:
         return self.root / "result"
 
     @property
+    def chrx_region_upload_dir(self) -> Path:
+        """``<upload_dir>/chrX_regions/`` — M3-physical chrX target subsets (PR 5a).
+
+        One level below the top-level ``chr*.vcf.gz`` upload glob, so the runner's
+        :func:`list_upload_vcfs` never sees these region files.
+        """
+        return self.upload_dir / "chrX_regions"
+
+    @property
+    def chrx_region_result_dir(self) -> Path:
+        """``<result_dir>/chrX_regions/`` — M3-physical per-region Beagle output (PR 5a).
+
+        One level below the top-level ``chr*.vcf.gz`` result glob, so the importer's
+        :func:`list_result_vcfs` sees only the concat ``result/chrX.vcf.gz``.
+        """
+        return self.result_dir / "chrX_regions"
+
+    @property
     def upload_manifest(self) -> Path:
         """``<upload_dir>/MANIFEST.json`` — what the prepare step produced."""
         return self.upload_dir / "MANIFEST.json"
@@ -86,14 +111,41 @@ class ImputationArchive:
 
         Idempotent: existing directories are left alone but their permissions
         are forced to ``0700`` so a previously-permissive parent gets tightened.
+        The two ``chrX_regions/`` subdirectories are created here too so the
+        M3-physical prepare / run steps can write into them without their own
+        ``mkdir`` (PR 5a).
         """
-        for d in (self.root, self.upload_dir, self.result_dir):
+        for d in (
+            self.root,
+            self.upload_dir,
+            self.result_dir,
+            self.chrx_region_upload_dir,
+            self.chrx_region_result_dir,
+        ):
             d.mkdir(parents=True, exist_ok=True)
             d.chmod(_OWNER_RWX_ONLY)
 
     def upload_vcf_path(self, chrom: str) -> Path:
         """Per-chromosome VCF path. ``chrom`` is the canonical label ('1'..'22','X','Y','MT')."""
         return self.upload_dir / f"chr{chrom}.vcf.gz"
+
+    def chrx_region_upload_path(self, region: ChrxRegion) -> Path:
+        """M3-physical chrX target subset path (``upload/chrX_regions/<region>.vcf.gz``)."""
+        return self.chrx_region_upload_dir / f"{region}.vcf.gz"
+
+    def chrx_region_result_path(self, region: ChrxRegion) -> Path:
+        """M3-physical per-region Beagle output path (``result/chrX_regions/<region>.vcf.gz``)."""
+        return self.chrx_region_result_dir / f"{region}.vcf.gz"
+
+    def chrx_region_result_diploid_path(self) -> Path:
+        """Non-PAR output after the R1 re-diploidize seam.
+
+        Lands at ``result/chrX_regions/nonpar.diploid.vcf.gz``. This is what feeds
+        ``bcftools concat`` for the non-PAR slot, so the
+        concat output is uniform-diploid even when Beagle emitted haploid male
+        non-PAR calls (PR 5a, finding-029 R1).
+        """
+        return self.chrx_region_result_dir / "nonpar.diploid.vcf.gz"
 
     def list_upload_vcfs(self) -> list[Path]:
         """All ``chr*.vcf.gz`` files in the upload directory, sorted alphabetically."""

@@ -158,15 +158,17 @@ def test_gate_chrx_sex_accepts_explicit_override(
 def test_chrx_in_run_scope_requires_upload_and_scope(
     isolated_settings: dict[str, str],  # noqa: ARG001 — redirects archive path
 ) -> None:
-    """chrX gates fire only when chrX is in scope AND a chrX upload exists."""
+    """chrX gates fire only when chrX is in scope AND a chrX region target exists."""
     archive = ImputationArchive.for_run(get_settings().archive_path, 1)
     archive.ensure_layout()
-    archive.upload_vcf_path("X").write_bytes(b"x")
+    # M3-physical: chrX presence is the non-PAR region target, not a top-level
+    # upload/chrX.vcf.gz (which prepare no longer writes).
+    archive.chrx_region_upload_path("nonpar").write_bytes(b"x")
 
-    # Autosome-only scope is never in chrX scope, even with a chrX upload present.
+    # Autosome-only scope is never in chrX scope, even with a chrX target present.
     assert _chrx_in_run_scope(1, frozenset({"1", "2"})) is False
-    # Full / explicit-X scope with the upload present → True.
+    # Full / explicit-X scope with the region target present → True.
     assert _chrx_in_run_scope(1, None) is True
     assert _chrx_in_run_scope(1, frozenset({"X"})) is True
-    # A run with no chrX upload (id 2) is not in scope even on a full run.
+    # A run with no chrX region target (id 2) is not in scope even on a full run.
     assert _chrx_in_run_scope(2, None) is False

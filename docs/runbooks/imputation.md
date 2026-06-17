@@ -245,14 +245,19 @@ The consensus needs to be refreshed across all three sources now that
 After this step, the entire downstream pipeline (Phases 5+) operates on
 the unified imputed set.
 
-## chrX imputation (M1 diploidized panel)
+## chrX imputation (M3-physical region split)
 
 chrX needs one extra step. The 1000 Genomes panel stores male non-PAR chrX
 **haploid**, and Beagle 5.5's reference loader requires uniform ploidy per
 sample across the whole chromosome — it aborts at the first non-PAR position
-(`HG00096 … chrX:2785078 is haploid`). PR 5a resolves this with the **M1**
-mechanic (`finding-029`): a one-time transform rewrites male non-PAR haploid
-genotypes in the panel to homozygous-diploid so Beagle accepts it.
+(`HG00096 … chrX:2785078 is haploid`). PR 5a resolves this with the
+**M3-physical** mechanic (`finding-029`): physically split the panel into three
+region subsets (PAR1 / non-PAR / PAR2), impute each natively with the
+biologically-correct ploidy (male non-PAR stays haploid), then `bcftools concat`
+the per-region outputs into one `result/chrX.vcf.gz`. (The earlier M1
+whole-panel diploidization failed its falsifiability gate — fake-homozygosing
+half the panel destroyed non-PAR information content, yielding mean DR² ≈ 0; see
+`finding-029`.)
 
 ### Step 0.5: prepare the chrX panel (one-time)
 
@@ -262,16 +267,18 @@ genome imputation panel prepare-chrx
 
 What this does:
 
-- Streams the installed `chrX.vcf.gz` through `bgzip | awk | bgzip`, doubling
-  every male non-PAR haploid genotype into a phased homozygote (PAR1 / PAR2 are
-  already diploid and are left untouched). Needs `bgzip` and `awk` on PATH.
-- Writes `chrX.diploidized.vcf.gz` beside the panel and asserts the whole
-  chromosome is haploid-free before it can be used.
-- Idempotent — an existing diploidized panel is reused; pass `--force` to
-  rebuild. This is a gated long operation (it scans the whole chromosome).
+- Ensures the panel `.tbi` index, then splits the installed `chrX.vcf.gz` into
+  three **native** (un-diploidized) subsets via `bcftools view -r` —
+  `chrX.par1.vcf.gz`, `chrX.nonpar.vcf.gz`, `chrX.par2.vcf.gz` — beside the panel.
+  Needs `bcftools` on PATH (plus `bgzip` / `awk` for the composition checks).
+- Asserts each subset's ploidy composition: the PAR subsets are haploid-free, and
+  the non-PAR subset retains the panel's male hemizygous haplotypes.
+- Idempotent — existing subsets are reused; pass `--force` to rebuild. This is a
+  gated operation (it scans the whole chromosome).
 
-`genome imputation run` with chrX in scope points the chrX `ref=` at this file
-and refuses to start (with an actionable message) if it is missing.
+`genome imputation run` with chrX in scope points each region's `ref=` at its
+matching native subset and refuses to start (with an actionable message) if the
+subsets are missing.
 
 ### Sex (`--sex`)
 
@@ -284,13 +291,18 @@ persisted to the database.
 
 ### Corrected dosage + het guard
 
-Under M1 the user's male non-PAR chrX is stored homozygous-diploid (lossless).
-The `consensus_chrx_dosage_v` view maps that back to the true hemizygous copy
-number (`corrected_dosage`: 2→1, 0→0) for a male profile and flags any
-biologically-impossible male non-PAR het (`male_nonpar_het_anomaly`). After
-`genome merge`, the male-non-PAR-het guard counts those anomalies and records
-the count on the imputed `sample_qc.qc_notes` (`[chrx_male_nonpar_het=N]`); a
-non-trivial count is the signal to revisit the mechanic (see `finding-029`).
+Under M3 the male non-PAR target is exported **haploid**; Beagle imputes it
+against the native non-PAR subset and emits haploid calls, which the runner
+re-diploidizes back to homozygous-diploid (R1: `0`→`0|0`, `1`→`1|1`) before the
+importer — so `variants_master` / `consensus_genotypes` and everything downstream
+stay byte-unchanged (lossless). The `consensus_chrx_dosage_v` view still maps the
+stored hom-diploid back to the true hemizygous copy number (`corrected_dosage`:
+2→1, 0→0) for a male profile and flags any biologically-impossible male non-PAR
+het (`male_nonpar_het_anomaly`). After `genome merge`, the male-non-PAR-het guard
+counts those anomalies and records the count on the imputed `sample_qc.qc_notes`
+(`[chrx_male_nonpar_het=N]`). Under M3 this should read ≈ 0 by construction — a
+haploid call re-diploidizes to a homozygote, never a het — so a non-trivial count
+is the signal to revisit (see `finding-029`).
 
 ### The full chrX reload sequence
 
