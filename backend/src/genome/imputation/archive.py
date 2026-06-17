@@ -97,6 +97,17 @@ class ImputationArchive:
         return self.upload_dir / "MANIFEST.json"
 
     @property
+    def chrx_loo_dir(self) -> Path:
+        """``<root>/loo/`` — scratch for the chrX non-PAR leave-one-out harness (PR 5a).
+
+        Per-fold masked targets, Beagle outputs, and the JSON report land here.
+        It sits under the per-run archive (on the big disk), deliberately **never**
+        ``/tmp`` — the chrX LOO long-op streams multi-GB Beagle scratch and the
+        host's ``/tmp`` is a small, near-full tmpfs (finding-031 / PR 5a plan).
+        """
+        return self.root / "loo"
+
+    @property
     def encrypted_archive(self) -> Path:
         """``<result_dir>/topmed_result.zip`` — legacy TopMed encrypted archive path."""
         return self.result_dir / "topmed_result.zip"

@@ -20,6 +20,7 @@ from genome.imputation.beagle_runner import (
 )
 from genome.imputation.ingest import (
     DEFAULT_BATCH_SIZE,
+    DEFAULT_DCONF_THRESHOLD,
     DEFAULT_R2_THRESHOLD,
     IMPUTATION_PIPELINE_VERSION,
     DryRunResult,
@@ -49,6 +50,7 @@ from genome.imputation.vcf_export import (
 __all__ = [
     "BEAGLE_RUNNER_VERSION",
     "DEFAULT_BATCH_SIZE",
+    "DEFAULT_DCONF_THRESHOLD",
     "DEFAULT_R2_THRESHOLD",
     "EXPORT_PIPELINE_VERSION",
     "IMPUTATION_PIPELINE_VERSION",

@@ -19,6 +19,7 @@ from genome.db.init_schema import init_databases
 from genome.db.sqlite_conn import sqlcipher_connection
 from genome.imputation import (
     DEFAULT_BATCH_SIZE,
+    DEFAULT_DCONF_THRESHOLD,
     DEFAULT_R2_THRESHOLD,
     PANEL_CHROMOSOMES,
     DryRunResult,
@@ -34,6 +35,7 @@ from genome.imputation import (
 )
 from genome.imputation.archive import ImputationArchive
 from genome.imputation.beagle_runner import DEFAULT_MEMORY_GB, DEFAULT_NE
+from genome.imputation.chrx_loo import DEFAULT_N_FOLDS, ChrxLooError, run_chrx_loo
 from genome.imputation.chrx_panel import ChrxToolingError, prepare_chrx_panel
 from genome.ingest import Source, ingest_file
 from genome.ingest.liftover import LiftoverEngine
@@ -493,10 +495,26 @@ def imputation_import(  # noqa: PLR0913 — one CLI flag per operational control
             help=(
                 "Variants with INFO/R2 below this threshold are skipped at import "
                 "time and never written to genotype_calls. Recorded on the run's "
-                "imputation_runs.r2_threshold column."
+                "imputation_runs.r2_threshold column. Does not apply to male non-PAR "
+                "chrX, which uses --dconf-threshold (DR2 is dead there; finding-031)."
             ),
         ),
     ] = DEFAULT_R2_THRESHOLD,
+    dconf_threshold: Annotated[
+        float,
+        typer.Option(
+            "--dconf-threshold",
+            min=0.5,
+            max=1.0,
+            help=(
+                "Male non-PAR chrX gate: keep variants whose dosage-confidence "
+                "max(DS, 1-DS) is at or above this (default 0.9). DR2 is structurally "
+                "0 for single-sample male hemizygous non-PAR, so this replaces it "
+                "there; typed anchors (integer DS) score 1.0 and always survive "
+                "(finding-031)."
+            ),
+        ),
+    ] = DEFAULT_DCONF_THRESHOLD,
     chromosomes: Annotated[
         str | None,
         typer.Option(
@@ -540,6 +558,10 @@ def imputation_import(  # noqa: PLR0913 — one CLI flag per operational control
             ),
         ),
     ] = False,
+    sex: Annotated[
+        str,
+        typer.Option("--sex", help=_SEX_FLAG_HELP),
+    ] = "auto",
 ) -> None:
     """Stream the imputed VCFs into the database.
 
@@ -559,7 +581,9 @@ def imputation_import(  # noqa: PLR0913 — one CLI flag per operational control
     result = import_result(
         imputation_id,
         r2_threshold=r2_threshold,
+        dconf_threshold=dconf_threshold,
         chromosomes=chromosomes_set,
+        sex=_normalize_sex_flag(sex),
         batch_size=batch_size,
         dry_run=dry_run,
         force_reimport=force_reimport,
@@ -569,6 +593,8 @@ def imputation_import(  # noqa: PLR0913 — one CLI flag per operational control
         typer.echo(
             f"[dry-run] imputation_id={result.imputation_id} "
             f"r2_threshold={result.r2_threshold:.4f} "
+            f"dconf_threshold={result.dconf_threshold:.4f} "
+            f"profile_sex={result.profile_sex or '-'} "
             f"chromosomes={list(result.chromosomes_planned)} "
             f"variants_total={result.variants_total} "
             f"variants_below_threshold={result.variants_below_threshold} "
@@ -591,6 +617,9 @@ def imputation_import(  # noqa: PLR0913 — one CLI flag per operational control
         f"new_master_rows={result.new_variants_master_rows} "
         f"deactivated_prior={result.deactivated_prior_calls} "
         f"r2_threshold={result.r2_threshold:.4f} "
+        f"dconf_threshold={result.dconf_threshold:.4f} "
+        f"profile_sex={result.profile_sex or '-'} "
+        f"nonpar_confident={result.nonpar_confident} "
         f"chromosomes={list(result.chromosomes_imported)} "
         f"mean_r2={mean_r2} "
         f"r2_above_0.3={result.variants_above_r2_0_3} "
@@ -749,6 +778,88 @@ def imputation_run(  # noqa: PLR0913 — one CLI flag per operational control
             "Next step: `genome imputation import <id>` to load the imputed "
             "VCFs into genotype_calls and variants_master.",
         )
+
+
+@imputation_app.command("chrx-loo")
+def imputation_chrx_loo(  # noqa: PLR0913 — one CLI flag per operational control
+    imputation_id: Annotated[int, typer.Argument(help="Run ID.")],
+    n_folds: Annotated[
+        int,
+        typer.Option(
+            "--n-folds",
+            min=2,
+            help="Number of disjoint leave-one-out folds (default 5).",
+        ),
+    ] = DEFAULT_N_FOLDS,
+    dconf_threshold: Annotated[
+        float,
+        typer.Option(
+            "--dconf-threshold",
+            min=0.5,
+            max=1.0,
+            help=(
+                "Dosage-confidence gate to validate (default 0.9). LOO measures the "
+                "concordance achieved at this fixed threshold — it does not search "
+                "for a looser one (finding-031)."
+            ),
+        ),
+    ] = DEFAULT_DCONF_THRESHOLD,
+    threads: Annotated[
+        int | None,
+        typer.Option("--threads", min=1, help="Beagle threads (default max(1, cpus-1))."),
+    ] = None,
+    memory_gb: Annotated[
+        int,
+        typer.Option("--memory-gb", min=1, help="Java heap for Beagle (default 8 GB)."),
+    ] = DEFAULT_MEMORY_GB,
+    ne: Annotated[
+        int,
+        typer.Option("--ne", min=1, help="Beagle effective population size (default 1,000,000)."),
+    ] = DEFAULT_NE,
+) -> None:
+    """Validate the male non-PAR chrX dosage gate by 5-fold leave-one-out.
+
+    Holds out the user's own typed non-PAR anchors in disjoint folds, re-imputes
+    each masked fold against the native non-PAR panel subset, and reports how
+    often the dosage-confidence-gated call matches the held-out truth — the
+    accuracy-grounded PASS criterion that replaces the structurally-dead non-PAR
+    DR2 (finding-031). A long op: per-fold Beagle, progress in the structlog
+    output, scratch under archive/imputation/run_<id>/loo/ (never /tmp).
+
+    Requires the male non-PAR target from `genome imputation prepare --sex M` and
+    the chrX region panels from `genome imputation panel prepare-chrx`.
+    """
+    try:
+        report = run_chrx_loo(
+            imputation_id,
+            n_folds=n_folds,
+            dconf_threshold=dconf_threshold,
+            threads=threads,
+            memory_gb=memory_gb,
+            ne=ne,
+        )
+    except ChrxLooError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    conc = "-" if report.concordance is None else f"{report.concordance:.4f}"
+    typer.echo(
+        f"imputation_id={imputation_id} n_folds={report.n_folds} "
+        f"anchors={report.n_anchors} "
+        f"dconf_threshold={report.threshold:.4f} "
+        f"at_threshold={report.n_at_or_above_threshold} "
+        f"concordant={report.n_concordant_at_threshold} "
+        f"concordance@threshold={conc}",
+    )
+    typer.echo("MAF-x-dconf cells (maf_bin conf_bin n concordance):")
+    for cell in report.cells:
+        cell_conc = "-" if cell.concordance is None else f"{cell.concordance:.4f}"
+        typer.echo(f"  maf={cell.maf_bin} conf={cell.conf_bin} n={cell.n} conc={cell_conc}")
+    typer.echo(
+        "PASS criterion: concordance@threshold >= 0.95 with no high-confidence "
+        "cell collapsing (finding-031). Report: archive/imputation/"
+        f"run_{imputation_id:04d}/loo/REPORT.json",
+    )
 
 
 @imputation_app.command("list")

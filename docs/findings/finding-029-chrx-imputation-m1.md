@@ -296,3 +296,29 @@ The Task 0 probe passed, so M3-physical was built and the M1 *code* deleted
   all-ambiguous profile actually needs it — not required for this user.
 - chrY stays skipped (the panel has no Y); `pos_grch37` recoalesce
   (`finding-005` #9) and `register-existing-result` (PR 11) remain out of scope.
+
+## Correction (PR 5a QC layer — see finding-031)
+
+The verdict above that "whole-panel diploidization destroys non-PAR information
+content, yielding mean DR² ≈ 0" **conflated a structurally dead metric with
+information loss**, and is corrected by
+[`finding-031`](finding-031-chrx-nonpar-dosage-confidence-qc.md):
+
+- `INFO/DR2` is a **cross-sample** dosage-r² estimator. For a **single** male
+  sample in the **hemizygous non-PAR** region there is no within-sample
+  heterozygosity and no across-sample dosage variance, so DR² is `0.00` for
+  **every** non-PAR marker — **imputed and typed alike**, and **regardless of M1
+  vs M3, target ploidy, or panel** (three single-sample probes confirmed this).
+  M1's first-run "31 out at DR²>0.3" and "mean DR² ≈ 0.0000" were reading a
+  *dead* metric, not measuring lost information.
+- The Task-0 GO probe's "2.3% > DR²0.3" for native-haploid non-PAR came from a
+  **12-sample leave-out** study — the multi-sample setup supplies exactly the
+  cross-sample variance the estimator needs, which single-sample production does
+  not have. So that probe could not, and did not, establish that M3 beats M1 on
+  single-sample *accuracy*; it established that the mechanic *runs* and that DR²
+  is recoverable *when a cohort is present*.
+- The M1-vs-M3 **accuracy** question is therefore **not settled by DR²** and is
+  re-evaluable only via dosage-confidence (`max(DS, 1−DS)`) and the 5-fold LOO
+  harness (finding-031). **M3-physical is kept** — built, sound, PAR DR² works,
+  non-PAR calls are real and validate under LOO — and the import gate now uses
+  the live dosage signal instead of the dead DR² for male non-PAR.

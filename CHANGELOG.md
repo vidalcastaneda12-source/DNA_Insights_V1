@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- PR 5a (pre-Phase-6): chrX non-PAR QC — replace the structurally-dead DR² gate
+  with a dosage-confidence gate + leave-one-out validation (`finding-031`).
+  Beagle's `INFO/DR2` is a cross-sample estimator and is `0.00` for **every**
+  single-sample male hemizygous non-PAR marker (imputed *and* typed), so the
+  uniform `DR2 < 0.3` import gate dropped all non-PAR — including the user's own
+  ~25,781 typed anchors — and blocked the PR. `genome imputation import` now gates
+  male non-PAR chrX on the live dosage signal (autosomes / male PAR / female X keep
+  the DR² gate), using Beagle's `INFO/IMP` to keep the **informative** subset:
+  typed anchors (no `IMP`) are always kept for anchor retention, and imputed sites
+  (`IMP`) are kept only when confident ALT-bearing (`DS >= --dconf-threshold`,
+  default 0.9 — which equals the hemizygous max genotype-posterior, so `gp=true`
+  is redundant). Confident hom-ref imputed (`DS`≈0) and the uncertain middle are
+  dropped — keeping every confident call (`max(DS,1−DS) >= 0.9`) would retain ~2.2M
+  hom-ref calls and balloon the consensus ~70% from one region; the kept yield is
+  ~10⁵ (~25.8K anchors + ~77.8K confident-ALT). One shared keep/drop helper
+  (real-import + dry-run can't diverge), with a missing-DS fail-closed, a `0..1` DS
+  scale guard, and a fail-closed `--sex` guard for a `male_nonpar_haploid` manifest.
+  The kept confidence is stored into the existing `imputation_r2` column flagged
+  `nonpar_dosage_conf` (a documented overload — no schema change; the DR² run-stats
+  stay DR²-only); a proper `dosage_confidence` column is logged as deferred
+  tech-debt. Adds `genome imputation chrx-loo` (`imputation/chrx_loo.py`): 5-fold
+  disjoint leave-one-out of the typed non-PAR anchors against the native non-PAR
+  panel, measuring the precision of the gate-kept set (re-imputed anchors with
+  `DS >= 0.9`) vs held-out truth, stratified by MAF×dconf, with a JSON report +
+  idempotent `sample_qc.qc_notes` stamp (scratch on the big disk, never `/tmp`).
+  Corrects the `finding-029` "M1 destroyed information (DR²≈0)" wording (it
+  conflated a dead metric with information loss). (PR #75)
 - PR 5a (pre-Phase-6): document `finding-030` — `genome imputation panel
   prepare-chrx`'s haploid-GT composition check (`count_haploid_gts`,
   `chrx_panel.py:123`) is O(variants × samples) and ran **~80 min** (~55 CPU-min
