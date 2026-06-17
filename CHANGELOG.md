@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- PR 5a (pre-Phase-6): document `finding-030` — `genome imputation panel
+  prepare-chrx`'s haploid-GT composition check (`count_haploid_gts`,
+  `chrx_panel.py:123`) is O(variants × samples) and ran **~80 min** (~55 CPU-min
+  pegged, no progress output) on the real 3,202-sample non-PAR chrX subset. The
+  three assertion call sites need only **existence** (`> 0`), not the exact
+  count, so the recommended fix short-circuits the count awk on the first
+  haploid GT (sub-second). **Doc-only this pass** (fix recommended, not yet
+  applied): prep-time only and idempotent (subsets cache → `skip_existing`),
+  does not affect `genome imputation run` (`rediploidize_vcf` counts the
+  single-sample Beagle output, not the panel) and does not touch the gate
+  anchors; flagged as out of the CLAUDE.md performance contract. (PR #74)
 - PR 5a (pre-Phase-6): chrX imputation via the **M3-physical** region-split
   mechanic (`finding-029`, closing `finding-008`). `genome imputation panel
   prepare-chrx` now splits the 1000G chrX panel into three **native**
