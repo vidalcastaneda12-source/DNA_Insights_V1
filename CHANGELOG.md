@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- PR 5a (pre-Phase-6): make the chrX non-PAR LOO harness allele-aware
+  (`finding-033`). `read_imputed_calls` paired each masked anchor with the
+  re-imputed output **by genomic position alone**, so at a position carrying a
+  co-located different variant (a different SNV, or — predominantly — an indel)
+  it scored the user's typed-SNV truth against that unrelated record's dosage.
+  This manufactured spurious high-confidence "misses" — a co-located deletion at
+  DS=0.99 scored against a typed SNV that itself re-imputes correctly to ref —
+  collapsing non-rare-MAF `dconf >= 0.9` cells to 0% concordance and tripping the
+  finding-031 "no high-confidence cell collapsing" PASS sub-criterion (the
+  headline 0.9782 was fine; the gate's true precision is `>= 97.82%`).
+  `read_haploid_anchors` now carries the typed SNV's `(ref, alt)`, and
+  `read_imputed_calls` matches each anchor to the single output record with the
+  same `(POS, REF, ALT)` — evaluating only that record's `DS` and reading its
+  `INFO/AF` for the MAF bin, skipping co-located records with differing alleles.
+  An anchor whose typed SNV is absent from the output is not imputable: excluded
+  from the concordance (neither concordant nor a miss) and counted in a new
+  `n_anchors_not_in_panel`, surfaced in `REPORT.json`, the CLI summary, and the
+  structlog lines. Measurement-layer only — the import dosage-confidence gate and
+  the chrX reload are unchanged. (PR #74)
 - PR 5a (pre-Phase-6): fix a pre-existing foreign-key crash on imputed-call
   re-import (`finding-032`). `genome imputation import` over an already-merged
   corpus supersedes prior imputed calls via `UPDATE genotype_calls SET

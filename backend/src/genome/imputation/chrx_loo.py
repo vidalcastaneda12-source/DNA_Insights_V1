@@ -141,6 +141,10 @@ class LooReport:
     threshold: float
     n_at_or_above_threshold: int
     n_concordant_at_threshold: int
+    n_anchors_not_in_panel: int
+    """Masked anchors whose typed SNV (matching ``(POS, REF, ALT)``) was absent from
+    the re-imputed output — not imputable, so excluded from the concordance entirely
+    (neither concordant nor a miss) and surfaced separately (finding-033)."""
     concordance: float | None
     """Precision of the gate-kept set: concordance among re-imputed anchors with
     ``imputed_dosage >= threshold`` (the confident-ALT calls the importer keeps —
@@ -158,6 +162,7 @@ class LooReport:
             "dconf_threshold": self.threshold,
             "n_at_or_above_threshold": self.n_at_or_above_threshold,
             "n_concordant_at_threshold": self.n_concordant_at_threshold,
+            "n_anchors_not_in_panel": self.n_anchors_not_in_panel,
             "concordance_at_threshold": self.concordance,
             "maf_edges": list(self.maf_edges),
             "conf_edges": list(self.conf_edges),
@@ -208,11 +213,12 @@ def _bin_label(value: float, edges: Sequence[float]) -> str:
     return f"{edges[-2]:.2f}-{edges[-1]:.2f}"
 
 
-def compute_loo_report(
+def compute_loo_report(  # noqa: PLR0913 — scoring knobs + two bin-edge tuples, keyword-only
     results: Sequence[LooAnchorResult],
     *,
     threshold: float = DEFAULT_DCONF_THRESHOLD,
     n_folds: int = DEFAULT_N_FOLDS,
+    n_not_in_panel: int = 0,
     maf_edges: tuple[float, ...] = DEFAULT_MAF_EDGES,
     conf_edges: tuple[float, ...] = DEFAULT_CONF_EDGES,
 ) -> LooReport:
@@ -229,6 +235,10 @@ def compute_loo_report(
     collapse. Anchors that re-impute below the bar are dropped by the gate and so
     excluded here — they are a sensitivity (recall) question, not a kept-call
     accuracy one.
+
+    ``results`` already excludes masked anchors whose typed SNV was absent from the
+    panel output (those are not imputable — finding-033); ``n_not_in_panel`` carries
+    their count for the report so the exclusion is visible rather than silent.
     """
     at_threshold = [r for r in results if r.imputed_dosage >= threshold]
     n_at = len(at_threshold)
@@ -250,6 +260,7 @@ def compute_loo_report(
         threshold=threshold,
         n_at_or_above_threshold=n_at,
         n_concordant_at_threshold=n_conc,
+        n_anchors_not_in_panel=n_not_in_panel,
         concordance=overall,
         cells=cells,
         maf_edges=maf_edges,
@@ -262,15 +273,18 @@ def compute_loo_report(
 # ---------------------------------------------------------------------------
 
 
-def read_haploid_anchors(target_vcf: Path) -> dict[int, int]:
-    """Read ``pos -> truth haploid allele`` from a male non-PAR target VCF.
+def read_haploid_anchors(target_vcf: Path) -> dict[int, tuple[str, str, int]]:
+    """Read ``pos -> (ref, alt, truth haploid allele)`` from a male non-PAR target VCF.
 
     The prepare step writes the non-PAR target as plain-gzip text with a single
     ``GT`` FORMAT field and a haploid sample token (``0`` / ``1`` / ``.``). Only
     biallelic-SNV rows with a determinate haploid call (``0`` or ``1``) are
-    anchors; no-calls and anything malformed are skipped.
+    anchors; no-calls and anything malformed are skipped. The typed SNV's
+    ``(ref, alt)`` is carried alongside the truth so :func:`read_imputed_calls` can
+    match each anchor to the *same* variant record and never score it against a
+    co-located indel or different SNV at the position (finding-033).
     """
-    anchors: dict[int, int] = {}
+    anchors: dict[int, tuple[str, str, int]] = {}
     with gzip.open(target_vcf, "rt", encoding="ascii") as fh:
         for line in fh:
             if not line or line.startswith("#"):
@@ -283,7 +297,7 @@ def read_haploid_anchors(target_vcf: Path) -> dict[int, int]:
                 continue
             gt = sample.split(":", 1)[0]
             if gt in {"0", "1"}:
-                anchors[int(cols[1])] = int(gt)
+                anchors[int(cols[1])] = (ref, alt, int(gt))
     return anchors
 
 
@@ -314,28 +328,51 @@ def write_masked_target(src_vcf: Path, dst_vcf: Path, mask_positions: frozenset[
     return masked
 
 
+@dataclass(frozen=True, slots=True)
+class FoldCalls:
+    """The re-imputed read of one masked fold.
+
+    ``results`` holds one :class:`LooAnchorResult` per masked anchor whose typed SNV
+    re-imputed — a matching ``(POS, REF, ALT)`` record with a readable ``FORMAT/DS``.
+    ``n_not_in_panel`` counts masked anchors whose typed SNV was absent from the
+    output (not imputable; excluded from the concordance and surfaced separately —
+    finding-033)."""
+
+    results: list[LooAnchorResult]
+    n_not_in_panel: int
+
+
 def read_imputed_calls(
     result_vcf: Path,
-    anchors_truth: dict[int, int],
+    anchors: dict[int, tuple[str, str, int]],
     mask_positions: frozenset[int],
-) -> list[LooAnchorResult]:
-    """Read the re-imputed DS + AF at ``mask_positions`` and pair with truth.
+) -> FoldCalls:
+    """Read the re-imputed DS + AF at ``mask_positions`` and pair with the typed truth.
 
-    Returns one :class:`LooAnchorResult` per masked position present in
-    ``result_vcf`` with a readable haploid ``FORMAT/DS``. ``INFO/AF`` (Beagle's
-    panel alt frequency) drives the MAF stratification; a missing AF yields
-    ``maf=None`` (the ``na`` bin) without dropping the anchor from the overall
-    concordance.
+    Each masked anchor is matched to the output record whose ``(POS, REF, ALT)``
+    equals the held-out **typed SNV's** — a co-located record (a different SNV, or
+    an indel sharing the coordinate) is skipped so the anchor's truth is never
+    scored against an unrelated variant's dosage (finding-033). ``INFO/AF`` for the
+    MAF stratification is read from that *same* matched record; a missing AF yields
+    ``maf=None`` (the ``na`` bin) without dropping the anchor. A masked anchor whose
+    typed SNV is absent from the output is **not imputable**: it is excluded from
+    the concordance (neither concordant nor a miss) and tallied in
+    :attr:`FoldCalls.n_not_in_panel`.
     """
     import cyvcf2  # noqa: PLC0415 — deferred so the module loads without cyvcf2 at type-check time
 
     out: list[LooAnchorResult] = []
+    matched: set[int] = set()
     reader = cyvcf2.VCF(str(result_vcf))
     try:
         for v in reader:
             pos = int(v.POS)
-            if pos not in mask_positions or pos not in anchors_truth:
+            if pos not in mask_positions or pos not in anchors:
                 continue
+            ref, alt, truth = anchors[pos]
+            if not _record_matches_snv(v, ref, alt):
+                continue
+            matched.add(pos)
             ds = _read_sample_ds(v)
             if ds is None:
                 continue
@@ -344,12 +381,11 @@ def read_imputed_calls(
             if af_raw is not None:
                 af = float(af_raw)
                 maf = min(af, 1.0 - af)
-            out.append(
-                LooAnchorResult(pos=pos, truth=anchors_truth[pos], imputed_dosage=ds, maf=maf),
-            )
+            out.append(LooAnchorResult(pos=pos, truth=truth, imputed_dosage=ds, maf=maf))
     finally:
         reader.close()
-    return out
+    n_not_in_panel = len((mask_positions & anchors.keys()) - matched)
+    return FoldCalls(results=out, n_not_in_panel=n_not_in_panel)
 
 
 def _read_sample_ds(variant: _cyvcf2_typing.Variant) -> float | None:
@@ -367,6 +403,17 @@ def _read_sample_ds(variant: _cyvcf2_typing.Variant) -> float | None:
         return None
     value = float(arr[0][0])
     return None if math.isnan(value) else value
+
+
+def _record_matches_snv(variant: _cyvcf2_typing.Variant, ref: str, alt: str) -> bool:
+    """True iff ``variant`` is exactly the biallelic SNV ``ref/alt``.
+
+    The non-PAR panel is biallelic-split (locked decision #3), so the typed SNV's
+    output record carries that REF and a single-element ALT list. A co-located
+    record — a different SNV, or an indel sharing the coordinate — fails this and is
+    skipped, so it is never scored against the anchor's held-out truth (finding-033).
+    """
+    return bool(ref == variant.REF and [alt] == variant.ALT)
 
 
 # ---------------------------------------------------------------------------
@@ -474,12 +521,12 @@ def _impute_fold(  # noqa: PLR0913 — per-fold Beagle config + the fold's held-
     *,
     fold: int,
     fold_positions: frozenset[int],
-    anchors: dict[int, int],
+    anchors: dict[int, tuple[str, str, int]],
     threads: int,
     memory_gb: int,
     ne: int,
     imputation_id: int,
-) -> list[LooAnchorResult]:
+) -> FoldCalls:
     """Mask one fold, re-impute it, and return the held-out anchor comparisons."""
     loo_dir = inputs.archive.chrx_loo_dir
     masked_target = loo_dir / f"fold_{fold}.target.vcf.gz"
@@ -502,14 +549,15 @@ def _impute_fold(  # noqa: PLR0913 — per-fold Beagle config + the fold's held-
         fold=fold,
         imputation_id=imputation_id,
     )
-    results = read_imputed_calls(out_vcf, anchors, fold_positions)
+    fold_calls = read_imputed_calls(out_vcf, anchors, fold_positions)
     logger.info(
         "imputation.chrx_loo.fold.complete",
         imputation_id=imputation_id,
         fold=fold,
-        evaluated=len(results),
+        evaluated=len(fold_calls.results),
+        not_in_panel=fold_calls.n_not_in_panel,
     )
-    return results
+    return fold_calls
 
 
 def _write_report_artifact(archive: ImputationArchive, report: LooReport) -> Path:
@@ -604,23 +652,29 @@ def run_chrx_loo(  # noqa: PLR0913 — operational controls map 1:1 to the CLI s
     log.info("imputation.chrx_loo.anchors", n_anchors=len(anchors), n_folds=n_folds)
 
     all_results: list[LooAnchorResult] = []
+    n_not_in_panel = 0
     for fold, fold_positions in enumerate(folds):
         if not fold_positions:
             continue
-        all_results.extend(
-            _impute_fold(
-                inputs,
-                fold=fold,
-                fold_positions=fold_positions,
-                anchors=anchors,
-                threads=threads,
-                memory_gb=memory_gb,
-                ne=ne,
-                imputation_id=imputation_id,
-            ),
+        fold_calls = _impute_fold(
+            inputs,
+            fold=fold,
+            fold_positions=fold_positions,
+            anchors=anchors,
+            threads=threads,
+            memory_gb=memory_gb,
+            ne=ne,
+            imputation_id=imputation_id,
         )
+        all_results.extend(fold_calls.results)
+        n_not_in_panel += fold_calls.n_not_in_panel
 
-    report = compute_loo_report(all_results, threshold=dconf_threshold, n_folds=n_folds)
+    report = compute_loo_report(
+        all_results,
+        threshold=dconf_threshold,
+        n_folds=n_folds,
+        n_not_in_panel=n_not_in_panel,
+    )
     report_path = _write_report_artifact(inputs.archive, report)
     with duckdb_connection(duckdb_path) as conn:
         _stamp_loo_qc_notes(conn, report)
@@ -628,6 +682,7 @@ def run_chrx_loo(  # noqa: PLR0913 — operational controls map 1:1 to the CLI s
         "imputation.chrx_loo.complete",
         n_anchors=report.n_anchors,
         n_at_threshold=report.n_at_or_above_threshold,
+        n_not_in_panel=report.n_anchors_not_in_panel,
         concordance=report.concordance,
         report=str(report_path),
     )
@@ -638,6 +693,7 @@ __all__ = [
     "DEFAULT_N_FOLDS",
     "LOO_PIPELINE_VERSION",
     "ChrxLooError",
+    "FoldCalls",
     "LooAnchorResult",
     "LooCell",
     "LooReport",

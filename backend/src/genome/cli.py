@@ -846,6 +846,7 @@ def imputation_chrx_loo(  # noqa: PLR0913 — one CLI flag per operational contr
     typer.echo(
         f"imputation_id={imputation_id} n_folds={report.n_folds} "
         f"anchors={report.n_anchors} "
+        f"not_in_panel={report.n_anchors_not_in_panel} "
         f"dconf_threshold={report.threshold:.4f} "
         f"at_threshold={report.n_at_or_above_threshold} "
         f"concordant={report.n_concordant_at_threshold} "

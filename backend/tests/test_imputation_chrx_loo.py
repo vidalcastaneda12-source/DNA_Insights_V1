@@ -151,6 +151,16 @@ def test_report_to_dict_round_trips_key_fields() -> None:
     assert isinstance(d["cells"], list)
 
 
+def test_report_threads_not_in_panel_count() -> None:
+    # Not-in-panel anchors (typed SNV absent from output) are excluded from the
+    # results but their count rides through to the report for transparency.
+    report = compute_loo_report(_sample_results(), threshold=0.9, n_not_in_panel=4)
+    assert report.n_anchors_not_in_panel == 4
+    assert report.to_dict()["n_anchors_not_in_panel"] == 4
+    # Defaults to zero when the orchestration supplies none.
+    assert compute_loo_report(_sample_results(), threshold=0.9).n_anchors_not_in_panel == 0
+
+
 # ---------------------------------------------------------------------------
 # gzip-VCF helpers
 # ---------------------------------------------------------------------------
@@ -180,7 +190,7 @@ def test_read_haploid_anchors_keeps_only_called_biallelic_snvs(tmp_path: Path) -
     target = tmp_path / "nonpar.vcf.gz"
     _write_target(target)
     anchors = read_haploid_anchors(target)
-    assert anchors == {_NONPAR: 1, _NONPAR + 1: 0}
+    assert anchors == {_NONPAR: ("A", "G", 1), _NONPAR + 1: ("A", "G", 0)}
 
 
 def test_write_masked_target_sets_fold_to_missing(tmp_path: Path) -> None:
@@ -192,7 +202,7 @@ def test_write_masked_target_sets_fold_to_missing(tmp_path: Path) -> None:
     assert n == 1
 
     # The masked anchor is now a no-call (dropped from anchors); the other survives.
-    assert read_haploid_anchors(masked) == {_NONPAR + 1: 0}
+    assert read_haploid_anchors(masked) == {_NONPAR + 1: ("A", "G", 0)}
     # Header is preserved verbatim and the masked record carries a '.' sample.
     with gzip.open(masked, "rt", encoding="ascii") as fh:
         text = fh.read()
@@ -200,31 +210,96 @@ def test_write_masked_target_sets_fold_to_missing(tmp_path: Path) -> None:
     assert f"chrX\t{_NONPAR}\trs1\tA\tG\t.\tPASS\t.\tGT\t.\n" in text
 
 
-def test_read_imputed_calls_pairs_ds_af_with_truth(tmp_path: Path) -> None:
-    result = tmp_path / "fold_out.vcf.gz"
-    header = (
-        "##fileformat=VCFv4.2\n"
-        "##contig=<ID=chrX,length=156040895,assembly=GRCh38>\n"
-        '##INFO=<ID=AF,Number=A,Type=Float,Description="Alt frequency">\n'
-        '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n'
-        '##FORMAT=<ID=DS,Number=A,Type=Float,Description="Dosage">\n'
-        "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMPLE\n"
-    )
-    rows = [
-        f"chrX\t{_NONPAR}\t.\tA\tG\t.\tPASS\tAF=0.30\tGT:DS\t1:0.97\n",  # masked → read
-        f"chrX\t{_NONPAR + 1}\t.\tA\tG\t.\tPASS\tAF=0.10\tGT:DS\t0:0.02\n",  # not masked → skip
-    ]
-    with gzip.open(result, "wt", encoding="ascii") as out:
-        out.write(header)
+_RESULT_HEADER = (
+    "##fileformat=VCFv4.2\n"
+    "##contig=<ID=chrX,length=156040895,assembly=GRCh38>\n"
+    '##INFO=<ID=AF,Number=A,Type=Float,Description="Alt frequency">\n'
+    '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n'
+    '##FORMAT=<ID=DS,Number=A,Type=Float,Description="Dosage">\n'
+    "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tSAMPLE\n"
+)
+
+
+def _write_result(path: Path, rows: list[str]) -> None:
+    """Write a re-imputed fold-output VCF (plain-gzip; AF + DS declared)."""
+    with gzip.open(path, "wt", encoding="ascii") as out:
+        out.write(_RESULT_HEADER)
         out.writelines(rows)
 
-    anchors_truth = {_NONPAR: 1, _NONPAR + 1: 0}
-    calls = read_imputed_calls(result, anchors_truth, frozenset({_NONPAR}))
-    assert len(calls) == 1
-    call = calls[0]
+
+def test_read_imputed_calls_pairs_ds_af_with_truth(tmp_path: Path) -> None:
+    result = tmp_path / "fold_out.vcf.gz"
+    _write_result(
+        result,
+        [
+            f"chrX\t{_NONPAR}\t.\tA\tG\t.\tPASS\tAF=0.30\tGT:DS\t1:0.97\n",  # masked → read
+            f"chrX\t{_NONPAR + 1}\t.\tA\tG\t.\tPASS\tAF=0.10\tGT:DS\t0:0.02\n",  # not masked → skip
+        ],
+    )
+    anchors = {_NONPAR: ("A", "G", 1), _NONPAR + 1: ("A", "G", 0)}
+    fold_calls = read_imputed_calls(result, anchors, frozenset({_NONPAR}))
+    assert fold_calls.n_not_in_panel == 0
+    assert len(fold_calls.results) == 1
+    call = fold_calls.results[0]
     assert call.pos == _NONPAR
     assert call.truth == 1
     assert call.imputed_dosage == pytest.approx(0.97, abs=1e-4)
     assert call.maf == pytest.approx(0.30, abs=1e-4)
     assert call.dosage_confidence == pytest.approx(0.97, abs=1e-4)
     assert call.concordant is True
+
+
+def test_read_imputed_calls_scores_only_matching_allele_record(tmp_path: Path) -> None:
+    # finding-033 regression: at a position carrying co-located records (a deletion
+    # and a different SNV) the typed SNV's truth must be scored ONLY against the
+    # matching-(ref,alt) record — never the indel/other SNV. Smoking gun: a typed
+    # A/G with truth=ref re-imputes correctly to DS≈0, while the co-located deletion
+    # carries DS=0.99 and would be a spurious "miss" under position-only matching.
+    result = tmp_path / "fold_out.vcf.gz"
+    _write_result(
+        result,
+        [
+            f"chrX\t{_NONPAR}\t.\tA\tG\t.\tPASS\tAF=0.30\tGT:DS\t0:0.02\n",  # typed SNV → scored
+            f"chrX\t{_NONPAR}\t.\tATG\tA\t.\tPASS\tAF=0.40\tGT:DS\t1:0.99\n",  # co-located deletion
+            f"chrX\t{_NONPAR}\t.\tA\tC\t.\tPASS\tAF=0.45\tGT:DS\t1:0.97\n",  # co-located other SNV
+        ],
+    )
+    anchors = {_NONPAR: ("A", "G", 0)}
+    fold_calls = read_imputed_calls(result, anchors, frozenset({_NONPAR}))
+    assert fold_calls.n_not_in_panel == 0
+    # Exactly one result — the typed SNV; the indel (0.99) and other SNV (0.97) are
+    # skipped, never scored against this anchor's truth.
+    assert len(fold_calls.results) == 1
+    call = fold_calls.results[0]
+    assert call.imputed_dosage == pytest.approx(0.02, abs=1e-4)
+    assert call.maf == pytest.approx(0.30, abs=1e-4)  # the SNV's AF, not the indel's
+    assert call.truth == 0
+    assert call.concordant is True
+    # The SNV re-imputes to confident hom-REF (DS 0.02 < 0.9), so the gate drops it
+    # and the gate-kept set is empty here — no spurious 0%-concordance cell. Under
+    # position-only matching the co-located DS=0.99 indel would instead be kept and
+    # scored as a miss against this anchor's truth, collapsing the cell.
+    report = compute_loo_report(fold_calls.results, threshold=0.9)
+    assert report.n_at_or_above_threshold == 0
+    assert report.concordance is None
+    assert report.cells == ()
+
+
+def test_read_imputed_calls_typed_snv_absent_is_not_in_panel(tmp_path: Path) -> None:
+    # finding-033: a masked anchor whose typed (ref,alt) is absent from the output —
+    # only a different co-located SNV is present — is not imputable. It is excluded
+    # from the concordance (neither concordant nor a miss) and counted separately.
+    absent = _NONPAR + 5
+    result = tmp_path / "fold_out.vcf.gz"
+    _write_result(
+        result,
+        [
+            f"chrX\t{_NONPAR}\t.\tA\tG\t.\tPASS\tAF=0.30\tGT:DS\t1:0.95\n",  # typed SNV present
+            f"chrX\t{absent}\t.\tC\tT\t.\tPASS\tAF=0.20\tGT:DS\t1:0.95\n",  # NOT the typed C/A
+        ],
+    )
+    anchors = {_NONPAR: ("A", "G", 1), absent: ("C", "A", 0)}
+    fold_calls = read_imputed_calls(result, anchors, frozenset({_NONPAR, absent}))
+    assert len(fold_calls.results) == 1
+    assert fold_calls.results[0].pos == _NONPAR
+    assert fold_calls.n_not_in_panel == 1
