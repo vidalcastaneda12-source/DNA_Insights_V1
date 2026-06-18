@@ -212,6 +212,12 @@ Operational flags:
 Idempotence: re-running supersedes prior imputed calls at the same
 positions rather than duplicating.
 
+Re-importing over an already-merged corpus is FK-safe: the supersession flips
+`genotype_calls.is_active`, which DuckDB runs as a delete+reinsert that would
+otherwise trip the `discrepancies` -> `genotype_calls(call_id)` foreign key, so
+the import first clears the referencing `discrepancies` rows in a committed
+pre-step (rebuilt by the following `genome merge`). See `finding-032`.
+
 Expected runtime: a few minutes for a few-million-variant Beagle output on
 a laptop with a recent SSD. The pipeline streams per chromosome and
 batches 50K rows per Arrow Table for the DuckDB bulk load, so memory

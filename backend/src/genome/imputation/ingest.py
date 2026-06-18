@@ -771,6 +771,77 @@ def _deactivate_prior_imputed_calls(
     return 0
 
 
+# ``discrepancies`` is the only table that FK-references ``genotype_calls(call_id)``
+# (``call_a_id`` / ``call_b_id``; ddl/group_1_genotype.sql). A discrepancy row that
+# references an *active* ``beagle_imputed`` call is exactly a row that can block the
+# supersession ``UPDATE genotype_calls SET is_active = FALSE`` in
+# :func:`_deactivate_prior_imputed_calls`: that UPDATE touches the indexed
+# ``is_active`` (``idx_gc_active``), so DuckDB runs it as delete+reinsert of the row,
+# which fires the parent-side FK. Every call this import supersedes is an active
+# imputed call when the gate runs (before the import transaction), so this count is
+# a superset of the blockers — non-zero means the pre-clear must fire (finding-032).
+_IMPUTED_REFERENCING_DISCREPANCIES_COUNT_SQL: Final[str] = """
+SELECT COUNT(*)
+  FROM discrepancies
+ WHERE call_a_id IN (
+        SELECT call_id FROM genotype_calls
+         WHERE source = 'beagle_imputed'::source_enum AND is_active)
+    OR call_b_id IN (
+        SELECT call_id FROM genotype_calls
+         WHERE source = 'beagle_imputed'::source_enum AND is_active)
+"""
+
+
+def _preclear_discrepancies_for_supersession(conn: DuckDBPyConnection) -> int:
+    """Clear ``discrepancies`` before the import TX so supersession is FK-safe.
+
+    :func:`_deactivate_prior_imputed_calls` flips ``genotype_calls.is_active`` to
+    FALSE on the prior imputed calls. ``is_active`` is indexed (``idx_gc_active``),
+    so DuckDB runs that UPDATE as delete+reinsert of each row, firing the
+    parent-side FK from ``discrepancies(call_a_id / call_b_id)`` ->
+    ``genotype_calls(call_id)`` — the only table that FK-references
+    ``genotype_calls``. DuckDB's FK enforcement reads *pre-transaction* state, so
+    any referencing ``discrepancies`` rows must be gone as of a prior **committed**
+    transaction; an in-transaction delete is invisible to the check. This is the
+    same TX0 split :mod:`genome.annotate.canonicalize` and
+    :mod:`genome.annotate.strand_collapse` use for the identical quirk
+    (finding-020, finding-032).
+
+    Gated on the presence of >= 1 discrepancy referencing an active
+    ``beagle_imputed`` call. When present we ``DELETE FROM discrepancies``
+    wholesale, matching both TX0 precedents and the ``collapse-duplicate-variants``
+    / ``merge`` steps that immediately follow in the reload runbook and rebuild it
+    from the active calls. A first import (or any state with no imputed-referencing
+    discrepancy) is a no-op, so additive ingests and the chip-only state are left
+    untouched. Returns the number of ``discrepancies`` rows deleted.
+
+    Runs in its **own committed transaction**, before the caller opens the import
+    transaction. A crash after this commit (but before / within the import) leaves
+    ``discrepancies`` empty with ``genotype_calls`` otherwise intact — a
+    re-mergeable state, since ``merge`` rebuilds ``discrepancies`` + consensus.
+    """
+    gate = conn.execute(_IMPUTED_REFERENCING_DISCREPANCIES_COUNT_SQL).fetchone()
+    referencing = int(gate[0]) if gate is not None and gate[0] is not None else 0
+    if referencing == 0:
+        return 0
+    total = conn.execute("SELECT COUNT(*) FROM discrepancies").fetchone()
+    total_n = int(total[0]) if total is not None and total[0] is not None else 0
+    # Committed transaction (TX0) BEFORE the caller's import transaction: the
+    # referencing discrepancies must be gone as of a prior commit for DuckDB's
+    # pre-transaction FK check to clear the per-batch ``is_active`` flip. The
+    # explicit BEGIN also fails loudly if this is ever mis-placed inside an open
+    # transaction (DuckDB forbids a nested BEGIN), instead of silently re-breaking.
+    conn.execute("BEGIN TRANSACTION")
+    conn.execute("DELETE FROM discrepancies")
+    conn.execute("COMMIT")
+    logger.info(
+        "imputation.import.discrepancies_precleared",
+        referencing_active_imputed=referencing,
+        total_cleared=total_n,
+    )
+    return total_n
+
+
 def _insert_imputed_calls(
     conn: DuckDBPyConnection,
     *,
@@ -1397,6 +1468,15 @@ def _execute_import(  # noqa: PLR0913 — options pass through directly to the w
     counters = _ImportCounters()
 
     with duckdb_connection(duckdb_path) as conn:
+        # Pre-clear discrepancies that FK-reference active imputed calls, in a
+        # committed transaction *before* the import transaction opens. The per-batch
+        # supersession (``genotype_calls.is_active = FALSE``) delete+reinserts those
+        # rows (``is_active`` is indexed), firing the parent-side ``discrepancies``
+        # FK; DuckDB's FK check reads pre-transaction state, so the referencing rows
+        # must already be committed-away (finding-032; the same TX0 split
+        # canonicalize / strand_collapse use). ``merge`` rebuilds ``discrepancies``,
+        # and the reload always re-merges after import, so this is safe.
+        discrepancies_precleared = _preclear_discrepancies_for_supersession(conn)
         conn.execute("BEGIN TRANSACTION")
         try:
             run_id = insert_ingestion_run(
@@ -1497,6 +1577,7 @@ def _execute_import(  # noqa: PLR0913 — options pass through directly to the w
         nonpar_confident=counters.nonpar_confident,
         new_master_rows=new_master_total,
         deactivated_prior_calls=deactivated_total,
+        discrepancies_precleared=discrepancies_precleared,
         mean_r2=mean_r2,
     )
     return ImportResult(

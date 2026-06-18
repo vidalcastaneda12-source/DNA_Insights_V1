@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- PR 5a (pre-Phase-6): fix a pre-existing foreign-key crash on imputed-call
+  re-import (`finding-032`). `genome imputation import` over an already-merged
+  corpus supersedes prior imputed calls via `UPDATE genotype_calls SET
+  is_active = FALSE`; because `is_active` is indexed (`idx_gc_active`), DuckDB
+  runs that UPDATE as a delete+reinsert that fires the parent-side
+  `discrepancies(call_a_id/call_b_id)` -> `genotype_calls(call_id)` foreign key,
+  so the first chrX M1->M3 re-import aborted with a `ConstraintException`. The
+  importer now pre-clears the imputed-referencing `discrepancies` rows in a
+  committed transaction *before* the import transaction (the same TX0 split
+  `canonicalize` / `collapse-duplicate-variants` already use for this DuckDB
+  quirk); `merge` rebuilds `discrepancies`, and the reload always re-merges after
+  import. Gated so first imports / chip-only states are untouched. General (any
+  imputed re-import, not chrX-specific); not introduced by the `finding-031` QC
+  commit. (PR #74)
 - PR 5a (pre-Phase-6): chrX non-PAR QC — replace the structurally-dead DR² gate
   with a dosage-confidence gate + leave-one-out validation (`finding-031`).
   Beagle's `INFO/DR2` is a cross-sample estimator and is `0.00` for **every**

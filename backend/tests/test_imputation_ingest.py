@@ -625,6 +625,104 @@ def test_force_reimport_supersedes_prior_calls(
     assert inactive == 5
 
 
+def test_reimport_supersedes_calls_referenced_by_discrepancies(
+    isolated_settings: dict[str, str],
+) -> None:
+    """Re-import succeeds when a discrepancy FK-references a prior imputed call.
+
+    Regression for finding-032. The per-batch supersession
+    (``UPDATE genotype_calls SET is_active = FALSE``) delete+reinserts each row
+    because ``is_active`` is indexed (``idx_gc_active``), firing the parent-side
+    ``discrepancies(call_a_id / call_b_id)`` -> ``genotype_calls(call_id)`` FK.
+    With a discrepancy pointing at a superseded call this raised a DuckDB
+    ``ConstraintException`` (the first real chrX M1->M3 re-import crash). The
+    pre-import ``discrepancies`` clear makes the flip FK-safe; ``merge`` rebuilds
+    ``discrepancies`` afterward.
+    """
+    init_databases()
+    archive_root = isolated_settings_archive_root(isolated_settings)
+    imp_id = _seed_completed_run(archive_root=archive_root)
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+    _write_synthetic_vcf(archive.result_dir / "chr1.dose.vcf.gz", n_variants=5)
+
+    import_result(imp_id, archive_root=archive_root)
+
+    # Mimic the shape `merge` writes after the first import: a discrepancy whose
+    # call_a_id references one of the active imputed calls.
+    with duckdb_connection() as conn:
+        call_id, variant_id = conn.execute(
+            "SELECT call_id, variant_id FROM genotype_calls "
+            "WHERE source = 'beagle_imputed' AND is_active ORDER BY call_id LIMIT 1",
+        ).fetchone()
+        conn.execute(
+            """
+            INSERT INTO discrepancies
+                (discrepancy_id, variant_id, discrepancy_type, severity,
+                 source_a, call_a_id)
+            VALUES (1, ?, 'genotype_mismatch', 'major', 'beagle_imputed', ?)
+            """,
+            [variant_id, call_id],
+        )
+
+    # Must NOT raise — pre-fix this aborted with a foreign-key ConstraintException.
+    second = import_result(imp_id, archive_root=archive_root, force_reimport=True)
+    assert isinstance(second, ImportResult)
+    assert second.deactivated_prior_calls == 5
+
+    with duckdb_connection() as conn:
+        active = conn.execute(
+            "SELECT COUNT(*) FROM genotype_calls WHERE is_active",
+        ).fetchone()[0]
+        inactive = conn.execute(
+            "SELECT COUNT(*) FROM genotype_calls WHERE NOT is_active",
+        ).fetchone()[0]
+        disc = conn.execute("SELECT COUNT(*) FROM discrepancies").fetchone()[0]
+    assert active == 5
+    assert inactive == 5
+    assert disc == 0  # the stale discrepancy was pre-cleared; merge rebuilds it
+
+
+def test_reimport_keeps_discrepancies_not_referencing_imputed_calls(
+    isolated_settings: dict[str, str],
+) -> None:
+    """The pre-import clear is gated, not an unconditional wipe (finding-032).
+
+    A discrepancy that references a real variant but **no** genotype call is not
+    an FK hazard, so it must survive a re-import even though active imputed calls
+    exist. Pins the gate against a future regression to an unconditional clear.
+    """
+    init_databases()
+    archive_root = isolated_settings_archive_root(isolated_settings)
+    imp_id = _seed_completed_run(archive_root=archive_root)
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+    _write_synthetic_vcf(archive.result_dir / "chr1.dose.vcf.gz", n_variants=5)
+
+    import_result(imp_id, archive_root=archive_root)
+
+    with duckdb_connection() as conn:
+        variant_id = conn.execute(
+            "SELECT variant_id FROM genotype_calls "
+            "WHERE source = 'beagle_imputed' AND is_active LIMIT 1",
+        ).fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO discrepancies
+                (discrepancy_id, variant_id, discrepancy_type, severity,
+                 source_a, call_a_id, call_b_id)
+            VALUES (1, ?, 'platform_unique', 'info', '23andme', NULL, NULL)
+            """,
+            [variant_id],
+        )
+
+    second = import_result(imp_id, archive_root=archive_root, force_reimport=True)
+    assert isinstance(second, ImportResult)
+    assert second.deactivated_prior_calls == 5
+
+    with duckdb_connection() as conn:
+        disc = conn.execute("SELECT COUNT(*) FROM discrepancies").fetchone()[0]
+    assert disc == 1  # gate did not fire — the non-referencing discrepancy survived
+
+
 def test_chromosomes_filter_allows_adding_chromosomes_without_force(
     isolated_settings: dict[str, str],
 ) -> None:
