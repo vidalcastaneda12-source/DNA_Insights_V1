@@ -114,6 +114,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exactly `MAX(variant_id)` → duplicate-PK on the next insert. Now resyncs by
   peeking one `nextval` and draining the gap (robust to the `last_value`
   ambiguity); regression-tested on a fresh connection.
+- Parallelize the gnomAD annotation import. `genome annotate refresh --source gnomad`
+  gains `--jobs N` (default 8): chromosomes now stream concurrently in worker
+  *processes* (process-based, not threads, because `remote_tabix._StderrTap`
+  redirects process-global fd 2 to detect HTTP/2 corruption; spawn, not fork,
+  because the parent holds the only DuckDB writer). Workers stage filtered rows to
+  per-chromosome Parquet files; the parent merges them serially in canonical order,
+  so every output row, dedup decision, and `freq_id` is byte-identical to the
+  sequential path (the locked drift identifiers are unchanged). Targets the
+  ~14.6 h single-stream full-genome load (finding-012). The loader/library default
+  stays `jobs=1` (sequential) so direct callers and the registry bare-form are
+  unchanged; only the CLI defaults to parallel. dbsnp rejects `--jobs` for now.
+- finding-035: gnomAD filter-set consumer audit. Every reader of
+  `gnomad_frequencies` (the `variant_annotations_index` rollup and the loader's own
+  summary) INNER-JOINs to `variants_master`, so the ClinVar/GWAS-only positions
+  (~76% of loaded rows) are loaded but never read. Narrowing the filter to
+  `user_only` would lose no consumed data and cut the load ~4–5× — recommended but
+  deferred to VSC-User as a follow-up, since it reverses finding-011's three-way
+  choice. No code change in this PR; the three-way filter stays.
 - PR 5b-pre (pre-Phase-6): `consensus_v1` chip-no-call completion — a chip
   *no-call* must not clobber a real imputed genotype. `merge/consensus.py:resolve()`
   gains a guard so that when a real `beagle_imputed` call is present and the only

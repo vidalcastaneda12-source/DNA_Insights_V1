@@ -1348,11 +1348,28 @@ for the coalesce-distance choice rationale and the 1000 bp →
 50,000 bp default bump that took the loader from > 24 h projected
 wall-clock to 14.6 h real wall-clock.
 
+**Parallelism (`--jobs N`).** The sequential load streams one
+chromosome at a time, so the wire is mostly idle (the cost is
+network-latency-bound). `--jobs N` (default 8) streams N chromosomes
+concurrently in worker *processes* — processes, not threads, because
+the fd-2 stderr corruption detector above is process-global; spawn,
+not fork, because the parent holds the only DuckDB writer. Workers
+stage filtered rows to per-chromosome Parquet files; the parent merges
+them serially in canonical order, so **every locked drift identifier
+below is byte-identical to the sequential run** (`rows_loaded`, the
+per-chrom counts, `match_rate`, AF buckets, per-pop presence, even
+`freq_id`). Only the wall-clock changes. `--jobs 1` reproduces the
+sequential path exactly; tune `--jobs 4/8/16` to your connection and
+watch the per-chromosome `gnomad.chrom.complete` progress lines and the
+aggregate `gnomad.chrom.htslib_recover` reopen count (concurrency may
+raise reopens). The achieved wall-clock at `--jobs 8` is captured at
+this verification, not pre-stated. dbsnp does not yet parallelize.
+
 **Real-data verification commands.**
 
 ```
 genome config set external_calls_enabled true
-genome annotate refresh --source gnomad
+genome annotate refresh --source gnomad --jobs 8
 ```
 
 Capture from the `gnomad.refresh.complete` structlog line:
@@ -1368,7 +1385,8 @@ Capture from the `gnomad.refresh.complete` structlog line:
 | `rows_loaded` | 7,275,664 |
 | `match_rate` (vs `variants_master`) | 0.988 |
 | `mean_af_user_overlap` | 0.1766 |
-| First-load wall-clock | ~14.6 h (`--coalesce-distance 50000`) |
+| First-load wall-clock (sequential, `--jobs 1`) | ~14.6 h (`--coalesce-distance 50000`) |
+| First-load wall-clock (`--jobs 8`) | captured at verification (parallel; rows unchanged) |
 
 Filter set composition (`(user ∪ clinvar ∪ gwas)`, distinct
 `(chrom, pos_grch38)`):

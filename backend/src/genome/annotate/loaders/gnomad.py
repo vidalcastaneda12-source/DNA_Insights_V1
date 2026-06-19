@@ -54,13 +54,20 @@ before the new version becomes user-visible.
 
 from __future__ import annotations
 
+import contextlib
+import shutil
+import tempfile
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from multiprocessing import get_context
+from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 import httpx
 import pyarrow as pa
+import pyarrow.parquet as pq
 import structlog
 
 from genome.annotate.filter_set import FilterSet, build_filter_set
@@ -187,6 +194,19 @@ genome and completed the full run in 14.6 h. See
 ``docs/findings/finding-012-coalesce-distance-and-http2-reliability.md``.
 """
 
+DEFAULT_PARALLEL_JOBS: Final[int] = 8
+"""Default number of concurrent per-chromosome worker processes.
+
+The full-genome load is network-latency-bound: each worker streams one
+chromosome's remote VCFs (exomes + genomes) from GCS, so N workers keep
+N tabix range requests in flight at once instead of one. 8 is a
+conservative default that delivers a large speedup over the ~14.6 h
+single-stream baseline while staying gentle on the uplink and on gnomAD's
+HTTP/2 framing (finding-012); the CLI ``--jobs N`` flag tunes it. The
+library default in :func:`load` / :func:`refresh` stays ``1`` (sequential)
+so existing callers and the registry bare-form are unchanged.
+"""
+
 SUPPORTED_CHROMS: Final[tuple[str, ...]] = (*(str(n) for n in range(1, 23)), "X")
 """Canonical autosomal + X chromosomes loaded from gnomAD.
 
@@ -223,6 +243,13 @@ _ARROW_SCHEMA: Final[pa.Schema] = pa.schema(
         pa.field("retrieval_date", pa.timestamp("us"), nullable=False),
     ],
 )
+
+
+# ``_ARROW_SCHEMA`` without the leading ``freq_id`` field (index 0). The
+# parallel worker stages filtered rows to Parquet without ``freq_id``; the
+# parent assigns ``freq_id`` at merge time (:func:`_merge_chromosome_parquet`)
+# so the surrogate key stays gap-free under the single DuckDB writer.
+_STAGING_SCHEMA: Final[pa.Schema] = _ARROW_SCHEMA.remove(0)
 
 
 # ---------------------------------------------------------------------------
@@ -456,6 +483,39 @@ def _next_freq_id(conn: DuckDBPyConnection) -> int:
     return int(row[0]) + 1 if row is not None else 1
 
 
+def _rows_to_arrow_columns(rows: list[dict[str, object]]) -> dict[str, pa.Array]:
+    """Build the per-column PyArrow arrays for every column except ``freq_id``.
+
+    Shared by :func:`_insert_batch` (which prepends the ``freq_id`` column for
+    the sequential in-process insert) and the parallel worker's Parquet writer
+    (which stages rows without ``freq_id``, the parent assigning it at merge
+    time). Column set + dtypes mirror :data:`_ARROW_SCHEMA` minus ``freq_id``.
+    """
+    cols: dict[str, pa.Array] = {
+        "rsid": pa.array([r["rsid"] for r in rows], type=pa.string()),
+        "chrom": pa.array([r["chrom"] for r in rows], type=pa.string()),
+        "pos_grch38": pa.array([r["pos_grch38"] for r in rows], type=pa.int64()),
+        "ref_allele": pa.array([r["ref_allele"] for r in rows], type=pa.string()),
+        "alt_allele": pa.array([r["alt_allele"] for r in rows], type=pa.string()),
+        "af_global": pa.array([r["af_global"] for r in rows], type=pa.float64()),
+        "ac_global": pa.array([r["ac_global"] for r in rows], type=pa.int32()),
+        "an_global": pa.array([r["an_global"] for r in rows], type=pa.int32()),
+    }
+    for pop in GNOMAD_POPULATIONS:
+        col = f"af_{pop}"
+        cols[col] = pa.array([r[col] for r in rows], type=pa.float64())
+    cols["filter_status"] = pa.array([r["filter_status"] for r in rows], type=pa.string())
+    cols["source_version_id"] = pa.array(
+        [r["source_version_id"] for r in rows],
+        type=pa.int64(),
+    )
+    cols["retrieval_date"] = pa.array(
+        [r["retrieval_date"] for r in rows],
+        type=pa.timestamp("us"),
+    )
+    return cols
+
+
 def _insert_batch(
     conn: DuckDBPyConnection,
     rows: list[dict[str, object]],
@@ -474,30 +534,8 @@ def _insert_batch(
     n = len(rows)
     table_data: dict[str, pa.Array] = {
         "freq_id": pa.array(range(base_id, base_id + n), type=pa.int64()),
-        "rsid": pa.array([r["rsid"] for r in rows], type=pa.string()),
-        "chrom": pa.array([r["chrom"] for r in rows], type=pa.string()),
-        "pos_grch38": pa.array([r["pos_grch38"] for r in rows], type=pa.int64()),
-        "ref_allele": pa.array([r["ref_allele"] for r in rows], type=pa.string()),
-        "alt_allele": pa.array([r["alt_allele"] for r in rows], type=pa.string()),
-        "af_global": pa.array([r["af_global"] for r in rows], type=pa.float64()),
-        "ac_global": pa.array([r["ac_global"] for r in rows], type=pa.int32()),
-        "an_global": pa.array([r["an_global"] for r in rows], type=pa.int32()),
+        **_rows_to_arrow_columns(rows),
     }
-    for pop in GNOMAD_POPULATIONS:
-        col = f"af_{pop}"
-        table_data[col] = pa.array([r[col] for r in rows], type=pa.float64())
-    table_data["filter_status"] = pa.array(
-        [r["filter_status"] for r in rows],
-        type=pa.string(),
-    )
-    table_data["source_version_id"] = pa.array(
-        [r["source_version_id"] for r in rows],
-        type=pa.int64(),
-    )
-    table_data["retrieval_date"] = pa.array(
-        [r["retrieval_date"] for r in rows],
-        type=pa.timestamp("us"),
-    )
     table = pa.table(table_data, schema=_ARROW_SCHEMA)
 
     pop_cols = ", ".join(f"af_{pop}" for pop in GNOMAD_POPULATIONS)
@@ -883,6 +921,391 @@ def _summarize_run(
 
 
 # ---------------------------------------------------------------------------
+# Parallel per-chromosome load (process pool + staged-Parquet merge).
+#
+# The full-genome load is network-latency-bound: the sequential path streams
+# one chromosome's exomes-then-genomes VCFs at a time, so exactly one tabix
+# range request is ever in flight. The parallel path runs N chromosomes
+# concurrently in worker *processes* (not threads — iter_remote_vcf_regions'
+# _StderrTap redirects process-global fd 2 to detect HTTP/2 corruption, which
+# is unsafe to share across threads; spawn, not fork, because the parent holds
+# an open DuckDB connection + httpx/ExternalClient that fork would leak).
+# Workers stage filtered rows (no freq_id) to per-chromosome Parquet files;
+# the parent — the single DuckDB writer — merges them serially in canonical
+# order, so every output row, dedup decision, and the gap-free freq_id
+# allocation match the sequential path exactly.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _ChromTask:
+    """One chromosome's parallel-load work unit (picklable for spawn workers).
+
+    Carries everything a worker process needs to stream + filter + dedup one
+    chromosome without touching the database or the audited client: the
+    pre-formatted tabix region strings, the exact filter positions, the
+    staging directory to write its Parquet file into, and the row-tagging
+    metadata (``source_version_id`` / ``retrieval_datetime``) the parent
+    allocated before dispatch. All fields are plain picklable types.
+    """
+
+    chrom: str
+    region_strings: list[str]
+    filter_positions: frozenset[int]
+    source_version_id: int
+    retrieval_datetime: datetime
+    batch_size: int
+    staging_dir: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ChromResult:
+    """Outcome of one :func:`_stream_chromosome_to_parquet` worker call.
+
+    ``status`` is ``"ok"`` or ``"failed"``. On success ``parquet_path`` names
+    the staged file (or ``None`` when the chromosome produced zero rows) and
+    ``row_count`` is the deduped row count. On failure ``error`` carries the
+    original exception — constructed parent-side in :func:`_run_workers` from
+    the worker's propagated (pickled-and-re-raised) exception — so the
+    orchestrator can re-raise it faithfully, preserving the sequential
+    loader's "log the drift summary, then raise the cause" contract.
+    """
+
+    chrom: str
+    parquet_path: str | None
+    row_count: int
+    status: str
+    error: BaseException | None = None
+
+
+def _stream_chromosome_to_parquet(task: _ChromTask) -> _ChromResult:  # noqa: C901 — irreducible filter+dedup+stream loop (mirrors _load_chromosome)
+    """Worker: stream one chromosome's gnomAD VCFs into a staged Parquet file.
+
+    Runs in a separate (spawned) process — opens NO DuckDB connection and NO
+    audited client (the parent issues the audited HEADs and owns every DB
+    write). For each ``data_type`` in ``("exomes", "genomes")`` it streams via
+    :func:`iter_remote_vcf_regions` (whose per-process ``_StderrTap`` HTTP/2
+    detector is safe here because each process has its own fd 2), applies the
+    exact filter + ``(chrom, pos, ref, alt)`` exomes-win dedup as the
+    sequential :func:`_load_chromosome`, and appends ``freq_id``-less rows to a
+    :class:`pyarrow.parquet.ParquetWriter`.
+
+    Returns an ``"ok"`` :class:`_ChromResult` (``parquet_path=None`` when zero
+    rows landed). On any streaming error it closes a partial writer and
+    re-raises, letting the executor propagate the exception to the parent,
+    where :func:`_run_workers` records it as a ``"failed"`` result.
+    """
+    seen_keys: set[tuple[str, int, str, str]] = set()
+    pending: list[dict[str, object]] = []
+    row_count = 0
+    parquet_path = str(Path(task.staging_dir) / f"gnomad_chr{task.chrom}.parquet")
+    writer: pq.ParquetWriter | None = None
+
+    def _flush() -> None:
+        nonlocal pending, writer, row_count
+        if not pending:
+            return
+        table = pa.table(_rows_to_arrow_columns(pending), schema=_STAGING_SCHEMA)
+        if writer is None:
+            writer = pq.ParquetWriter(parquet_path, _STAGING_SCHEMA)  # type: ignore[no-untyped-call]  # pyarrow.parquet untyped
+        writer.write_table(table)  # type: ignore[no-untyped-call]  # pyarrow.parquet untyped
+        row_count += len(pending)
+        pending = []
+
+    try:
+        for data_type in ("exomes", "genomes"):
+            url = GNOMAD_URL_TEMPLATE.format(data_type=data_type, chrom=task.chrom)
+            for record in iter_remote_vcf_regions(
+                url,
+                task.region_strings,
+                event_prefix=SOURCE_DB,
+                log_context={"chrom": task.chrom, "data_type": data_type},
+                log=logger,
+            ):
+                row = _record_to_row(record, task.source_version_id, task.retrieval_datetime)
+                if row is None:
+                    continue
+                pos_obj = row["pos_grch38"]
+                if not isinstance(pos_obj, int):
+                    continue
+                if pos_obj not in task.filter_positions:
+                    continue
+                key = (
+                    str(row["chrom"]),
+                    pos_obj,
+                    str(row["ref_allele"]),
+                    str(row["alt_allele"]),
+                )
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                pending.append(row)
+                if len(pending) >= task.batch_size:
+                    _flush()
+        _flush()
+        if writer is None:
+            return _ChromResult(chrom=task.chrom, parquet_path=None, row_count=0, status="ok")
+        writer.close()  # type: ignore[no-untyped-call]  # pyarrow.parquet untyped
+        writer = None
+        return _ChromResult(
+            chrom=task.chrom,
+            parquet_path=parquet_path,
+            row_count=row_count,
+            status="ok",
+        )
+    finally:
+        if writer is not None:
+            with contextlib.suppress(Exception):
+                writer.close()  # type: ignore[no-untyped-call]  # pyarrow.parquet untyped
+
+
+def _run_workers(tasks: list[_ChromTask], jobs: int) -> list[_ChromResult]:
+    """Run chromosome workers in a spawned process pool; collect results.
+
+    The ONLY function that touches :class:`ProcessPoolExecutor`, so tests
+    monkeypatch it with a synchronous in-process shim (spawn workers would not
+    see a test's ``cyvcf2.VCF`` monkeypatch). ``spawn`` is mandatory: the
+    parent holds an open DuckDB connection + httpx client + ExternalClient that
+    ``fork`` would leak into children. A worker that raises is normalised here
+    into a ``"failed"`` :class:`_ChromResult` carrying the exception, so one
+    chromosome's failure never aborts the pool or loses the cause.
+    """
+    if not tasks:
+        return []
+    results: list[_ChromResult] = []
+    max_workers = max(1, min(jobs, len(tasks)))
+    ctx = get_context("spawn")
+    with ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
+        future_to_chrom = {
+            executor.submit(_stream_chromosome_to_parquet, task): task.chrom for task in tasks
+        }
+        for future in as_completed(future_to_chrom):
+            chrom = future_to_chrom[future]
+            try:
+                results.append(future.result())
+            except Exception as exc:  # noqa: BLE001 — normalise any worker failure into a result
+                results.append(
+                    _ChromResult(
+                        chrom=chrom,
+                        parquet_path=None,
+                        row_count=0,
+                        status="failed",
+                        error=exc,
+                    ),
+                )
+    return results
+
+
+def _merge_chromosome_parquet(conn: DuckDBPyConnection, parquet_path: str) -> None:
+    """Insert one chromosome's staged Parquet rows into ``gnomad_frequencies``.
+
+    Allocates a contiguous ``freq_id`` block starting at :func:`_next_freq_id`
+    and streams the staged rows straight from Parquet via DuckDB's
+    ``read_parquet`` (no Python row round-trip). Called serially by the parent
+    in canonical chromosome order, so ``freq_id`` allocation is gap-free and
+    deterministic under the single writer. ``source_version_id`` and
+    ``retrieval_date`` are already present in the staged rows (the worker wrote
+    them), so they flow through the ``SELECT`` unchanged.
+    """
+    base_id = _next_freq_id(conn)
+    pop_cols = ", ".join(f"af_{pop}" for pop in GNOMAD_POPULATIONS)
+    conn.execute(
+        f"""
+        INSERT INTO {_TARGET_TABLE} (
+            freq_id, rsid, chrom, pos_grch38, ref_allele, alt_allele,
+            af_global, ac_global, an_global,
+            {pop_cols},
+            filter_status, source_version_id, retrieval_date
+        )
+        SELECT
+            (CAST(? AS BIGINT) - 1) + row_number() OVER () AS freq_id,
+            rsid, chrom::chromosome_enum, pos_grch38, ref_allele, alt_allele,
+            af_global, ac_global, an_global,
+            {pop_cols},
+            filter_status, source_version_id, retrieval_date
+          FROM read_parquet(?)
+        """,  # noqa: S608 — table + column lists are module-controlled
+        [base_id, parquet_path],
+    )
+
+
+def _run_parallel_load(  # noqa: PLR0913 — orchestration config is irreducible
+    conn: DuckDBPyConnection,
+    audited_client: ExternalClient,
+    *,
+    requested: list[str],
+    filter_set: FilterSet,
+    source_version_id: int,
+    retrieval_datetime: datetime,
+    coalesce_distance: int,
+    batch_size: int,
+    jobs: int,
+) -> tuple[list[str], list[str], BaseException | None]:
+    """Parallel analogue of ``load``'s per-chromosome loop.
+
+    Streams chromosomes concurrently (one worker process per chromosome, both
+    data types) and merges each staged Parquet file serially into
+    ``gnomad_frequencies`` under the single DuckDB writer. Returns the same
+    ``(succeeded, failed, capture_failure)`` triple the sequential loop
+    produces, so ``load``'s downstream pointer-flip / orphan-cleanup / summary
+    steps are shared and unchanged.
+
+    Mirrors the sequential semantics: chromosomes with no filter positions
+    succeed without a worker; the parent issues the two audited HEADs per
+    loaded chromosome up front (workers can't write ``app.db``); rows land
+    under ``source_version_id`` as each chromosome merges; a worker failure
+    records that chromosome as failed, captures the first cause, and is
+    fail-soft (already-succeeded chromosomes still merge, the pointer never
+    flips on a failure). ``succeeded`` / ``failed`` are returned in canonical
+    ``requested`` order, the same order ``freq_id`` is allocated in.
+    """
+    succeeded: list[str] = []
+    failed: list[str] = []
+    capture_failure: BaseException | None = None
+    no_position: set[str] = set()
+    tasks: list[_ChromTask] = []
+    staging_dir = tempfile.mkdtemp(prefix="gnomad_stage_")
+    try:
+        for chrom in requested:
+            positions = filter_set.positions.get(chrom, [])
+            if not positions:
+                logger.info("gnomad.chrom.no_filter_positions", chrom=chrom)
+                no_position.add(chrom)
+                continue
+            regions = _coalesce_positions(positions, coalesce_distance)
+            region_strings = [f"chr{chrom}:{start}-{end}" for start, end in regions]
+            # Audited HEADs up front — the parent owns app.db; workers can't.
+            for data_type in ("exomes", "genomes"):
+                url = GNOMAD_URL_TEMPLATE.format(data_type=data_type, chrom=chrom)
+                _audited_head(audited_client, url)
+            tasks.append(
+                _ChromTask(
+                    chrom=chrom,
+                    region_strings=region_strings,
+                    filter_positions=frozenset(positions),
+                    source_version_id=source_version_id,
+                    retrieval_datetime=retrieval_datetime,
+                    batch_size=batch_size,
+                    staging_dir=staging_dir,
+                ),
+            )
+
+        logger.info(
+            "gnomad.parallel.dispatch",
+            chroms=[task.chrom for task in tasks],
+            jobs=jobs,
+            staging_dir=staging_dir,
+        )
+        results = {result.chrom: result for result in _run_workers(tasks, jobs)}
+
+        # Merge in canonical (requested) order: deterministic, gap-free freq_id.
+        for chrom in requested:
+            if chrom in no_position:
+                succeeded.append(chrom)
+                continue
+            result = results.get(chrom)
+            if result is None:
+                continue
+            if result.status == "failed":
+                failed.append(chrom)
+                if capture_failure is None:
+                    capture_failure = result.error
+                logger.error("gnomad.chrom.failed", chrom=chrom, error=repr(result.error))
+                continue
+            chrom_started = time.monotonic()
+            if result.parquet_path is not None and result.row_count > 0:
+                _merge_chromosome_parquet(conn, result.parquet_path)
+            conn.commit()
+            logger.info(
+                "gnomad.chrom.complete",
+                chrom=chrom,
+                rows=result.row_count,
+                elapsed_seconds=round(time.monotonic() - chrom_started, 1),
+                parallel=True,
+            )
+            succeeded.append(chrom)
+        return succeeded, failed, capture_failure
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+
+
+def _run_sequential_load(  # noqa: PLR0913 — orchestration config is irreducible
+    conn: DuckDBPyConnection,
+    audited_client: ExternalClient,
+    *,
+    requested: list[str],
+    filter_set: FilterSet,
+    source_version_id: int,
+    retrieval_datetime: datetime,
+    coalesce_distance: int,
+    batch_size: int,
+    log: structlog.stdlib.BoundLogger,
+) -> tuple[list[str], list[str], BaseException | None]:
+    """Sequential per-chromosome load — the original ``load`` loop, extracted.
+
+    One chromosome at a time, one data type at a time; each chromosome commits
+    independently and a failure stops the run (``break``) leaving the
+    already-loaded chromosomes under ``source_version_id``. Returns the
+    ``(succeeded, failed, capture_failure)`` triple ``load`` threads into the
+    shared pointer-flip / summary tail. ``jobs <= 1`` routes here, so every
+    existing direct-``load`` caller and the registry bare-form run this path
+    unchanged.
+    """
+    succeeded: list[str] = []
+    failed: list[str] = []
+    capture_failure: BaseException | None = None
+    for chrom in requested:
+        positions = filter_set.positions.get(chrom, [])
+        if not positions:
+            log.info("gnomad.chrom.no_filter_positions", chrom=chrom)
+            succeeded.append(chrom)
+            continue
+        regions = _coalesce_positions(positions, coalesce_distance)
+        filter_set_pos = frozenset(positions)
+        chrom_started = time.monotonic()
+        try:
+            n = _load_chromosome(
+                conn,
+                audited_client,
+                chrom,
+                regions,
+                filter_set_pos,
+                source_version_id,
+                retrieval_datetime,
+                batch_size,
+            )
+            conn.commit()
+            elapsed = time.monotonic() - chrom_started
+            log.info(
+                "gnomad.chrom.complete",
+                chrom=chrom,
+                rows=n,
+                regions=len(regions),
+                elapsed_seconds=round(elapsed, 1),
+            )
+            succeeded.append(chrom)
+        except Exception as exc:
+            # Best-effort rollback — when the failure happens before
+            # any INSERT executed against this chrom (e.g. the remote
+            # VCF open raises), DuckDB has not auto-started a
+            # transaction yet and rollback() raises. The chrom-failed
+            # path swallows that nested error and re-raises the
+            # original cause below.
+            with contextlib.suppress(Exception):
+                conn.rollback()
+            elapsed = time.monotonic() - chrom_started
+            log.exception(
+                "gnomad.chrom.failed",
+                chrom=chrom,
+                elapsed_seconds=round(elapsed, 1),
+            )
+            failed.append(chrom)
+            capture_failure = exc
+            break
+    return succeeded, failed, capture_failure
+
+
+# ---------------------------------------------------------------------------
 # Top-level entrypoint — load.
 # ---------------------------------------------------------------------------
 
@@ -897,6 +1320,7 @@ def load(  # noqa: C901, PLR0912, PLR0913, PLR0915 — single entry point; the p
     resume: bool = False,
     coalesce_distance: int = DEFAULT_COALESCE_DISTANCE_BP,
     batch_size: int = DEFAULT_BATCH_SIZE,
+    jobs: int = 1,
 ) -> GnomadLoadResult:
     """Load gnomAD v4.1.1 filtered allele frequencies.
 
@@ -916,13 +1340,21 @@ def load(  # noqa: C901, PLR0912, PLR0913, PLR0915 — single entry point; the p
     6. Per chromosome: coalesce filter positions into tabix ranges,
        open the remote VCFs, filter records, dedup, chunk-insert.
        Partial failures stop the run but leave already-loaded
-       chromosomes under the new ``source_version_id``.
+       chromosomes under the new ``source_version_id``. With ``jobs >
+       1`` the chromosomes stream concurrently in worker processes
+       (:func:`_run_parallel_load`); the parent merges each staged
+       Parquet file serially, so the output rows + ``freq_id`` match
+       the sequential path exactly. ``jobs <= 1`` runs the original
+       sequential loop (:func:`_run_sequential_load`).
     7. When the full chrom set landed (and the caller didn't restrict
        via ``chromosomes``), flip the ``annotation_sources`` pointer
        and commit.
     8. Compute the drift-identifier summary and return.
 
-    See finding-011 for the three-way-vs-four-way design discussion.
+    ``jobs`` defaults to ``1`` (sequential) so direct callers and the
+    registry bare-form are unchanged; the CLI resolves a higher default
+    (:data:`DEFAULT_PARALLEL_JOBS`). See finding-011 for the
+    three-way-vs-four-way design discussion.
     """
     started = time.monotonic()
     log = logger.bind(source=SOURCE_DB, version=version)
@@ -1015,61 +1447,34 @@ def load(  # noqa: C901, PLR0912, PLR0913, PLR0915 — single entry point; the p
             log.info("gnomad.resume_skip_chroms", skip=sorted(already))
 
     retrieval_datetime = datetime.now(UTC)
-    succeeded: list[str] = []
-    failed: list[str] = []
-    capture_failure: BaseException | None = None
 
-    # 6. Per-chromosome load.
-    for chrom in requested:
-        positions = filter_set.positions.get(chrom, [])
-        if not positions:
-            log.info("gnomad.chrom.no_filter_positions", chrom=chrom)
-            succeeded.append(chrom)
-            continue
-        regions = _coalesce_positions(positions, coalesce_distance)
-        filter_set_pos = frozenset(positions)
-        chrom_started = time.monotonic()
-        try:
-            n = _load_chromosome(
-                conn,
-                audited_client,
-                chrom,
-                regions,
-                filter_set_pos,
-                source_version_id,
-                retrieval_datetime,
-                batch_size,
-            )
-            conn.commit()
-            elapsed = time.monotonic() - chrom_started
-            log.info(
-                "gnomad.chrom.complete",
-                chrom=chrom,
-                rows=n,
-                regions=len(regions),
-                elapsed_seconds=round(elapsed, 1),
-            )
-            succeeded.append(chrom)
-        except Exception as exc:
-            # Best-effort rollback — when the failure happens before
-            # any INSERT executed against this chrom (e.g. the remote
-            # VCF open raises), DuckDB has not auto-started a
-            # transaction yet and rollback() raises. The chrom-failed
-            # path swallows that nested error and re-raises the
-            # original cause below.
-            import contextlib  # noqa: PLC0415 — local import keeps module-level surface narrow
-
-            with contextlib.suppress(Exception):
-                conn.rollback()
-            elapsed = time.monotonic() - chrom_started
-            log.exception(
-                "gnomad.chrom.failed",
-                chrom=chrom,
-                elapsed_seconds=round(elapsed, 1),
-            )
-            failed.append(chrom)
-            capture_failure = exc
-            break
+    # 6. Per-chromosome load — parallel across chromosomes when jobs > 1,
+    #    else the original sequential loop. Both return the same
+    #    (succeeded, failed, capture_failure) triple the shared tail consumes.
+    if jobs > 1:
+        succeeded, failed, capture_failure = _run_parallel_load(
+            conn,
+            audited_client,
+            requested=requested,
+            filter_set=filter_set,
+            source_version_id=source_version_id,
+            retrieval_datetime=retrieval_datetime,
+            coalesce_distance=coalesce_distance,
+            batch_size=batch_size,
+            jobs=jobs,
+        )
+    else:
+        succeeded, failed, capture_failure = _run_sequential_load(
+            conn,
+            audited_client,
+            requested=requested,
+            filter_set=filter_set,
+            source_version_id=source_version_id,
+            retrieval_datetime=retrieval_datetime,
+            coalesce_distance=coalesce_distance,
+            batch_size=batch_size,
+            log=log,
+        )
 
     # 7. Pointer flip (only on a full successful run that wasn't
     # restricted by --chromosomes).
@@ -1212,6 +1617,7 @@ def refresh(  # noqa: PLR0913 — registry signature + gnomad-specific kwargs
     chromosomes: Sequence[str] | None = None,
     resume: bool = False,
     coalesce_distance: int = DEFAULT_COALESCE_DISTANCE_BP,
+    jobs: int = 1,
 ) -> RefreshResult:
     """Refresh gnomAD filtered allele frequencies.
 
@@ -1219,7 +1625,8 @@ def refresh(  # noqa: PLR0913 — registry signature + gnomad-specific kwargs
     signature is ``(force, skip_if_same_version) -> RefreshResult``;
     the gnomad CLI threads the rich kwargs through. The bare-form
     ``refresh(force, skip_if_same_version)`` from the registry path
-    runs against the full SUPPORTED_CHROMS set with default coalesce.
+    runs against the full SUPPORTED_CHROMS set with default coalesce
+    and ``jobs=1`` (sequential); the CLI passes ``--jobs`` explicitly.
 
     ``skip_if_same_version`` is accepted for signature parity but
     unused: the gnomad pre-flight already short-circuits on
@@ -1248,6 +1655,7 @@ def refresh(  # noqa: PLR0913 — registry signature + gnomad-specific kwargs
             chromosomes=chromosomes,
             resume=resume,
             coalesce_distance=coalesce_distance,
+            jobs=jobs,
         )
 
     return RefreshResult(
