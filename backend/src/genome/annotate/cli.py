@@ -122,6 +122,7 @@ def _refresh_remote_tabix(  # noqa: PLR0913 — CLI flag passthrough
     chrom_filter: tuple[str, ...] | None,
     resume: bool,
     coalesce_distance: int | None,
+    jobs: int | None,
 ) -> RefreshResult:
     """Dispatch ``annotate refresh`` to a remote-tabix loader (gnomad / dbsnp).
 
@@ -129,6 +130,12 @@ def _refresh_remote_tabix(  # noqa: PLR0913 — CLI flag passthrough
     differences are the locked default version and default coalesce distance,
     which the loader module exposes as constants. The user's ``--version`` /
     ``--coalesce-distance`` (when given) override those defaults.
+
+    ``--jobs`` parallelizes the per-chromosome stream. Only gnomad implements
+    it (the ~14.6 h full-genome load); it resolves to
+    :data:`gnomad.DEFAULT_PARALLEL_JOBS` when omitted. dbsnp does not yet
+    parallelize, so an explicit ``--jobs`` for dbsnp is rejected rather than
+    silently ignored.
     """
     if source == "gnomad":
         from genome.annotate.loaders import gnomad  # noqa: PLC0415
@@ -144,7 +151,12 @@ def _refresh_remote_tabix(  # noqa: PLR0913 — CLI flag passthrough
                 if coalesce_distance is not None
                 else gnomad.DEFAULT_COALESCE_DISTANCE_BP
             ),
+            jobs=jobs if jobs is not None else gnomad.DEFAULT_PARALLEL_JOBS,
         )
+
+    if jobs is not None:
+        msg = "--jobs is only implemented for gnomad; dbsnp streams sequentially — omit --jobs"
+        raise typer.BadParameter(msg)
 
     from genome.annotate.loaders import dbsnp  # noqa: PLC0415
 
@@ -249,6 +261,19 @@ def annotate_refresh(  # noqa: PLR0913 — irreducible CLI surface; gnomad-speci
             ),
         ),
     ] = None,
+    jobs: Annotated[
+        int | None,
+        typer.Option(
+            "--jobs",
+            help=(
+                "[gnomad only] Number of chromosomes to stream concurrently "
+                "(worker processes). The full-genome gnomad load is "
+                "network-latency-bound; higher values keep more tabix requests "
+                "in flight. Defaults to 8. Set 1 for the sequential path. "
+                "Tune to your connection (try 4/8/16). Rejected for dbsnp."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Refresh one annotation source.
 
@@ -272,6 +297,7 @@ def annotate_refresh(  # noqa: PLR0913 — irreducible CLI surface; gnomad-speci
             chrom_filter=chrom_filter,
             resume=resume,
             coalesce_distance=coalesce_distance,
+            jobs=jobs,
         )
     else:
         # Reject remote-tabix-only flags on other sources — passing them is a
@@ -284,6 +310,8 @@ def annotate_refresh(  # noqa: PLR0913 — irreducible CLI surface; gnomad-speci
             _reject_remote_tabix_only_flag("resume", source)
         if coalesce_distance is not None:
             _reject_remote_tabix_only_flag("coalesce-distance", source)
+        if jobs is not None:
+            _reject_remote_tabix_only_flag("jobs", source)
         result = loader(force, skip_if_same_version)
     typer.echo(
         f"source_db={result.source_db} "

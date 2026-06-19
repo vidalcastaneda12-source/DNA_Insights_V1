@@ -21,8 +21,10 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import httpx
+import pyarrow.parquet as pq
 import pytest
 import structlog
+import typer
 from typer.testing import CliRunner
 
 from genome.annotate.loaders import gnomad as gnomad_loader
@@ -38,9 +40,13 @@ from genome.annotate.loaders.gnomad import (
     GnomadLibcurlMissingError,
     GnomadRemoteIterationError,
     _build_filter_set,
+    _ChromResult,
+    _ChromTask,
     _coalesce_positions,
+    _merge_chromosome_parquet,
     _record_to_row,
     _scan_for_htslib_errors,
+    _stream_chromosome_to_parquet,
     load,
 )
 from genome.annotate.source_versions import insert_source_version
@@ -56,6 +62,7 @@ from genome.privacy.external_client import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
+    from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
@@ -614,6 +621,38 @@ def test_dedup_first_write_wins_exomes_genomes(monkeypatch: pytest.MonkeyPatch) 
 
 def _patch_check_libcurl(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(gnomad_loader, "_check_libcurl_available", lambda: None)
+
+
+def _patch_serial_workers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replace ``_run_workers`` with an in-process serial shim.
+
+    Real ``ProcessPoolExecutor`` workers run in spawned subprocesses that don't
+    see the test's ``cyvcf2.VCF`` monkeypatch (and would hang on real network).
+    The shim runs each worker in-process — where the monkeypatch applies —
+    while preserving ``_run_workers``' exact contract: a worker that raises
+    becomes a ``"failed"`` :class:`_ChromResult` carrying the exception. Used by
+    the parallel-path tests and by the CLI tests, whose ``--jobs`` default
+    (:data:`DEFAULT_PARALLEL_JOBS`) now routes through the parallel orchestrator.
+    """
+
+    def _serial(tasks: list[_ChromTask], jobs: int) -> list[_ChromResult]:  # noqa: ARG001 — jobs unused in-process
+        out: list[_ChromResult] = []
+        for task in tasks:
+            try:
+                out.append(_stream_chromosome_to_parquet(task))
+            except Exception as exc:  # noqa: BLE001 — mirror _run_workers' normalisation
+                out.append(
+                    _ChromResult(
+                        chrom=task.chrom,
+                        parquet_path=None,
+                        row_count=0,
+                        status="failed",
+                        error=exc,
+                    ),
+                )
+        return out
+
+    monkeypatch.setattr(gnomad_loader, "_run_workers", _serial)
 
 
 def test_short_circuit_already_current_no_force(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1435,6 +1474,7 @@ def test_genome_annotate_refresh_gnomad_force(
         GNOMAD_URL_TEMPLATE.format(data_type="genomes", chrom="22"): [],
     }
     _patch_cyvcf2(monkeypatch, _VCFFactory(by_url=by_url))
+    _patch_serial_workers(monkeypatch)  # CLI default --jobs > 1 routes through the parallel path
 
     with duckdb_connection() as conn:
         _seed_user_variants(conn, [("22", 100)])
@@ -1482,6 +1522,7 @@ def test_genome_annotate_refresh_gnomad_chromosomes_filter(
         GNOMAD_URL_TEMPLATE.format(data_type="genomes", chrom="22"): [],
     }
     _patch_cyvcf2(monkeypatch, _VCFFactory(by_url=by_url))
+    _patch_serial_workers(monkeypatch)  # CLI default --jobs > 1 routes through the parallel path
 
     with duckdb_connection() as conn:
         _seed_user_variants(conn, [("22", 100)])
@@ -1528,6 +1569,7 @@ def test_genome_annotate_refresh_gnomad_resume(
         ]
         by_url[GNOMAD_URL_TEMPLATE.format(data_type="genomes", chrom=c)] = []
     _patch_cyvcf2(monkeypatch, _VCFFactory(by_url=by_url))
+    _patch_serial_workers(monkeypatch)  # CLI default --jobs > 1 routes through the parallel path
 
     with duckdb_connection() as conn:
         for c in SUPPORTED_CHROMS:
@@ -1575,6 +1617,415 @@ def test_genome_annotate_refresh_gnomad_resume(
         ).fetchone()
     assert pointer is not None
     assert pointer[0] == sv_id
+
+
+# ---------------------------------------------------------------------------
+# Parallel per-chromosome load (process pool + staged-Parquet merge)
+#
+# The worker (_stream_chromosome_to_parquet) is exercised directly in-process
+# (it's a plain function); the load(jobs > 1) integration tests use the
+# _patch_serial_workers shim so the orchestration runs in-process where the
+# cyvcf2.VCF monkeypatch applies (spawned subprocesses would not see it).
+# ---------------------------------------------------------------------------
+
+
+def _chrom_task(
+    chrom: str,
+    positions: set[int],
+    staging_dir: Path,
+    *,
+    source_version_id: int = 7,
+    region: str | None = None,
+) -> _ChromTask:
+    """Build a ``_ChromTask`` for the worker tests."""
+    return _ChromTask(
+        chrom=chrom,
+        region_strings=[region or f"chr{chrom}:1-100000"],
+        filter_positions=frozenset(positions),
+        source_version_id=source_version_id,
+        retrieval_datetime=datetime(2026, 5, 19, tzinfo=UTC),
+        batch_size=50_000,
+        staging_dir=str(staging_dir),
+    )
+
+
+def test_stream_chromosome_to_parquet_writes_deduped_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker stages deduped rows (exomes-win) to Parquet without freq_id."""
+    _patch_cyvcf2(monkeypatch, _build_overlap_factory())
+    result = _stream_chromosome_to_parquet(_chrom_task("22", {1000}, tmp_path))
+    assert result.status == "ok"
+    assert result.row_count == 1
+    assert result.parquet_path is not None
+    table = pq.read_table(result.parquet_path)
+    assert "freq_id" not in table.column_names
+    assert table.num_rows == 1
+    row = table.to_pylist()[0]
+    assert row["chrom"] == "22"
+    assert row["pos_grch38"] == 1000
+    assert row["ref_allele"] == "A"
+    assert row["alt_allele"] == "C"
+    assert row["af_global"] == 0.10  # exomes (0.10) wins over genomes (0.20)
+    assert row["source_version_id"] == 7
+
+
+def test_stream_chromosome_to_parquet_filters_positions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A record whose position is outside filter_positions is dropped → 0 rows."""
+    by_url: dict[str, list[FakeVariant]] = {
+        GNOMAD_URL_TEMPLATE.format(data_type="exomes", chrom="22"): [
+            _make_record("chr22", 1000, "A", "C", {"AF": 0.1, "AC": 1, "AN": 10}),
+        ],
+        GNOMAD_URL_TEMPLATE.format(data_type="genomes", chrom="22"): [],
+    }
+    _patch_cyvcf2(monkeypatch, _VCFFactory(by_url=by_url))
+    # filter_positions excludes 1000.
+    result = _stream_chromosome_to_parquet(_chrom_task("22", {2000}, tmp_path))
+    assert result.status == "ok"
+    assert result.row_count == 0
+    assert result.parquet_path is None
+
+
+def test_stream_chromosome_to_parquet_propagates_open_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A cyvcf2 open failure propagates out of the worker (not swallowed).
+
+    _run_workers normalises the propagated exception into a failed result; the
+    worker itself must re-raise so the cause reaches the parent intact.
+    """
+    import cyvcf2  # noqa: PLC0415
+
+    def _explode(_url: str) -> _FakeVCF:
+        msg = "boom open chr22"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(cyvcf2, "VCF", _explode)
+    with pytest.raises(RuntimeError, match="boom open chr22"):
+        _stream_chromosome_to_parquet(_chrom_task("22", {1000}, tmp_path))
+
+
+def test_merge_chromosome_parquet_assigns_contiguous_freq_ids(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Merging two staged chromosomes assigns gap-free, ordered freq_ids."""
+    init_databases()
+    by_url: dict[str, list[FakeVariant]] = {
+        GNOMAD_URL_TEMPLATE.format(data_type="exomes", chrom="1"): [
+            _make_record("chr1", 100, "A", "C", {"AF": 0.1, "AC": 1, "AN": 10}),
+            _make_record("chr1", 200, "A", "G", {"AF": 0.2, "AC": 2, "AN": 10}),
+        ],
+        GNOMAD_URL_TEMPLATE.format(data_type="genomes", chrom="1"): [],
+        GNOMAD_URL_TEMPLATE.format(data_type="exomes", chrom="2"): [
+            _make_record("chr2", 300, "A", "T", {"AF": 0.3, "AC": 3, "AN": 10}),
+        ],
+        GNOMAD_URL_TEMPLATE.format(data_type="genomes", chrom="2"): [],
+    }
+    _patch_cyvcf2(monkeypatch, _VCFFactory(by_url=by_url))
+
+    with duckdb_connection() as conn:
+        # A real source-version row so the gnomad_frequencies FK is satisfied.
+        sv_id = insert_source_version(
+            conn,
+            source_db=SOURCE_DB,
+            version=GNOMAD_VERSION,
+            source_url=GNOMAD_URL_TEMPLATE,
+            source_file_hash="merge-test",
+            source_file_size=0,
+            record_count=None,
+        )
+        r1 = _stream_chromosome_to_parquet(
+            _chrom_task("1", {100, 200}, tmp_path, source_version_id=sv_id),
+        )
+        r2 = _stream_chromosome_to_parquet(
+            _chrom_task("2", {300}, tmp_path, source_version_id=sv_id),
+        )
+        assert r1.parquet_path is not None
+        assert r2.parquet_path is not None
+        _merge_chromosome_parquet(conn, r1.parquet_path)
+        _merge_chromosome_parquet(conn, r2.parquet_path)
+        rows = conn.execute(
+            "SELECT freq_id, chrom::VARCHAR, source_version_id"
+            " FROM gnomad_frequencies ORDER BY freq_id",
+        ).fetchall()
+    assert [r[0] for r in rows] == [1, 2, 3]  # gap-free across both chroms
+    assert [r[1] for r in rows] == ["1", "1", "2"]
+    assert all(r[2] == sv_id for r in rows)
+
+
+_PARALLEL_SPECS: dict[str, list[tuple[int, str, str, float]]] = {
+    "1": [(100, "A", "C", 0.1), (200, "A", "G", 0.2)],
+    "2": [(300, "A", "T", 0.3)],
+    "22": [(400, "C", "T", 0.4)],
+}
+
+
+def _build_multichrom_factory() -> _VCFFactory:
+    """Factory across chr1/2/22 with one genomes/exomes overlap per chrom."""
+    by_url: dict[str, list[FakeVariant]] = {}
+    for chrom, recs in _PARALLEL_SPECS.items():
+        by_url[GNOMAD_URL_TEMPLATE.format(data_type="exomes", chrom=chrom)] = [
+            _make_record(f"chr{chrom}", pos, ref, alt, {"AF": af, "AC": 1, "AN": 100})
+            for pos, ref, alt, af in recs
+        ]
+        pos, ref, alt, _af = recs[0]
+        # genomes carries the same first site with a different AF → exomes must win.
+        by_url[GNOMAD_URL_TEMPLATE.format(data_type="genomes", chrom=chrom)] = [
+            _make_record(f"chr{chrom}", pos, ref, alt, {"AF": 0.99, "AC": 1, "AN": 100}),
+        ]
+    return _VCFFactory(by_url=by_url)
+
+
+def _collect_gnomad_rows(
+    conn: object,
+    source_version_id: int | None,
+) -> list[tuple[object, ...]]:
+    """Sorted (chrom, pos, ref, alt, af_global) for one source-version."""
+    return conn.execute(  # type: ignore[attr-defined]
+        "SELECT chrom::VARCHAR, pos_grch38, ref_allele, alt_allele, af_global"  # noqa: S608
+        f" FROM {gnomad_loader._TARGET_TABLE}"  # noqa: SLF001
+        " WHERE source_version_id = ?"
+        " ORDER BY chrom, pos_grch38, ref_allele, alt_allele",
+        [source_version_id],
+    ).fetchall()
+
+
+def test_parallel_load_reproduces_sequential_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """load(jobs=2) produces byte-identical rows + counts to load(jobs=1).
+
+    Both runs execute against one database (force allocates a distinct
+    source-version each time; the version-pointer pattern keeps the prior
+    version's rows queryable), so the two row sets compare directly.
+    """
+    init_databases()
+    _enable_external_calls()
+    _patch_check_libcurl(monkeypatch)
+    with duckdb_connection() as conn:
+        for chrom, recs in _PARALLEL_SPECS.items():
+            _seed_user_variants(conn, [(chrom, pos) for pos, _r, _a, _af in recs])
+
+    # Sequential baseline.
+    _patch_cyvcf2(monkeypatch, _build_multichrom_factory())
+    with duckdb_connection() as conn:
+        audited, http = _mock_audited_client()
+        try:
+            seq = load(conn, audited, force=True, jobs=1)
+        finally:
+            audited.close()
+            http.close()
+        seq_rows = _collect_gnomad_rows(conn, seq.source_version_id)
+
+    # Parallel run (in-process shim) into a fresh source-version.
+    _patch_cyvcf2(monkeypatch, _build_multichrom_factory())
+    _patch_serial_workers(monkeypatch)
+    with duckdb_connection() as conn:
+        audited, http = _mock_audited_client()
+        try:
+            par = load(conn, audited, force=True, jobs=2)
+        finally:
+            audited.close()
+            http.close()
+        par_rows = _collect_gnomad_rows(conn, par.source_version_id)
+
+    assert par.source_version_id != seq.source_version_id
+    assert par.rows_loaded == seq.rows_loaded
+    assert par_rows == seq_rows
+    # The overlapping (1,100,A,C) site kept the exomes AF (0.1), not genomes 0.99.
+    assert ("1", 100, "A", "C", 0.1) in par_rows
+    # Four distinct sites across chr1/2/22 (one exomes/genomes overlap deduped).
+    expected_rows = 4
+    assert par.rows_loaded == expected_rows
+
+
+def test_parallel_load_partial_failure_merges_successes_no_flip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One chrom's worker fails → successes still merge, pointer unflipped, raises.
+
+    Parallel analogue of test_partial_failure_leaves_pointer_unflipped. Unlike
+    the sequential ``break``-on-first-failure, the parallel path is fail-soft:
+    every dispatched chromosome except the failed one merges, so all but chr7
+    land. The pointer never flips on a failure and the cause re-raises.
+    """
+    init_databases()
+    _enable_external_calls()
+    _patch_check_libcurl(monkeypatch)
+
+    chrom_records: dict[str, list[FakeVariant]] = {
+        c: [_make_record(f"chr{c}", 100, "A", "C", {"AF": 0.1, "AC": 1, "AN": 10})]
+        for c in SUPPORTED_CHROMS
+    }
+    boom_chrom = "7"
+
+    class _BoomFactory:
+        def __call__(self, url: str) -> _FakeVCF:
+            for c in SUPPORTED_CHROMS:
+                if f"chr{c}.vcf.bgz" in url:
+                    if c == boom_chrom:
+                        msg = "boom on chr7"
+                        raise RuntimeError(msg)
+                    return _FakeVCF(records=list(chrom_records[c]))
+            return _FakeVCF(records=[])
+
+    monkeypatch.setattr("cyvcf2.VCF", _BoomFactory())
+    _patch_serial_workers(monkeypatch)
+    with duckdb_connection() as conn:
+        for c in SUPPORTED_CHROMS:
+            _seed_user_variants(conn, [(c, 100)])
+        audited, http = _mock_audited_client()
+        try:
+            with pytest.raises(RuntimeError, match="boom on chr7"):
+                load(conn, audited, force=True, jobs=4)
+        finally:
+            audited.close()
+            http.close()
+        pointer = conn.execute(
+            "SELECT current_source_version_id FROM annotation_sources WHERE source_db='gnomad'",
+        ).fetchone()
+        rows_landed = conn.execute(
+            f"SELECT COUNT(*) FROM {gnomad_loader._TARGET_TABLE}",  # noqa: SLF001 S608
+        ).fetchone()
+        version_rows = conn.execute(
+            "SELECT COUNT(*) FROM annotation_source_versions WHERE source_db='gnomad'",
+        ).fetchone()
+    assert pointer is None
+    assert rows_landed is not None
+    # Every chrom except chr7 merged (fail-soft, not break-on-first-failure).
+    assert rows_landed[0] == len(SUPPORTED_CHROMS) - 1
+    assert version_rows is not None
+    assert version_rows[0] == 1
+
+
+def test_parallel_load_audited_heads_count_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Parallel run still writes 2 HEAD audit events (intent+result) per loaded chrom."""
+    init_databases()
+    _enable_external_calls()
+    _patch_check_libcurl(monkeypatch)
+    chroms = ["21", "22"]
+    by_url: dict[str, list[FakeVariant]] = {}
+    for c in chroms:
+        by_url[GNOMAD_URL_TEMPLATE.format(data_type="exomes", chrom=c)] = [
+            _make_record(f"chr{c}", 100, "A", "C", {"AF": 0.1, "AC": 1, "AN": 10}),
+        ]
+        by_url[GNOMAD_URL_TEMPLATE.format(data_type="genomes", chrom=c)] = []
+    _patch_cyvcf2(monkeypatch, _VCFFactory(by_url=by_url))
+    _patch_serial_workers(monkeypatch)
+    with duckdb_connection() as conn:
+        for c in chroms:
+            _seed_user_variants(conn, [(c, 100)])
+        audited, http = _mock_audited_client()
+        try:
+            load(conn, audited, force=True, chromosomes=chroms, jobs=2)
+        finally:
+            audited.close()
+            http.close()
+    head_rows = [r for r in _audit_rows() if r[2] == "gnomad_remote_vcf_open"]
+    # 2 chroms by 2 data_types by (intent + result) = 8.
+    assert len(head_rows) == 2 * 2 * 2
+
+
+def test_jobs_one_uses_sequential_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """jobs=1 never reaches the process pool (the sequential fallback runs)."""
+    init_databases()
+    _enable_external_calls()
+    _patch_check_libcurl(monkeypatch)
+    by_url: dict[str, list[FakeVariant]] = {
+        GNOMAD_URL_TEMPLATE.format(data_type="exomes", chrom="22"): [
+            _make_record("chr22", 100, "A", "C", {"AF": 0.1, "AC": 1, "AN": 10}),
+        ],
+        GNOMAD_URL_TEMPLATE.format(data_type="genomes", chrom="22"): [],
+    }
+    _patch_cyvcf2(monkeypatch, _VCFFactory(by_url=by_url))
+
+    def _boom(_tasks: object, _jobs: object) -> list[_ChromResult]:
+        msg = "jobs=1 must not call _run_workers"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(gnomad_loader, "_run_workers", _boom)
+    with duckdb_connection() as conn:
+        _seed_user_variants(conn, [("22", 100)])
+        audited, http = _mock_audited_client()
+        try:
+            result = load(conn, audited, force=True, chromosomes=["22"], jobs=1)
+        finally:
+            audited.close()
+            http.close()
+    assert result.rows_loaded == 1
+
+
+def test_genome_annotate_refresh_gnomad_jobs_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CLI --jobs 2 runs the parallel path (via the in-process shim) and lands rows."""
+    init_databases()
+    _enable_external_calls()
+    _patch_check_libcurl(monkeypatch)
+    by_url: dict[str, list[FakeVariant]] = {
+        GNOMAD_URL_TEMPLATE.format(data_type="exomes", chrom="22"): [
+            _make_record("chr22", 100, "A", "C", {"AF": 0.05, "AC": 1, "AN": 100}),
+        ],
+        GNOMAD_URL_TEMPLATE.format(data_type="genomes", chrom="22"): [],
+    }
+    _patch_cyvcf2(monkeypatch, _VCFFactory(by_url=by_url))
+    _patch_serial_workers(monkeypatch)
+    with duckdb_connection() as conn:
+        _seed_user_variants(conn, [("22", 100)])
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "annotate",
+            "refresh",
+            "--source",
+            "gnomad",
+            "--force",
+            "--chromosomes",
+            "22",
+            "--jobs",
+            "2",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    with duckdb_connection() as conn:
+        row = conn.execute("SELECT COUNT(*) FROM gnomad_frequencies").fetchone()
+    assert row is not None
+    assert row[0] >= 1
+
+
+def test_refresh_remote_tabix_rejects_jobs_for_dbsnp() -> None:
+    """--jobs on dbsnp is rejected before any load (only gnomad parallelizes).
+
+    Unit-tests the dispatch helper directly so the assertion does not depend on
+    the global loader registry's order-sensitive state across the suite.
+    """
+    from genome.annotate.cli import _refresh_remote_tabix  # noqa: PLC0415
+
+    with pytest.raises(typer.BadParameter, match="--jobs"):
+        _refresh_remote_tabix(
+            "dbsnp",
+            force=False,
+            skip_if_same_version=False,
+            version=None,
+            chrom_filter=None,
+            resume=False,
+            coalesce_distance=None,
+            jobs=2,
+        )
+
+
+def test_reject_jobs_flag_for_non_remote_tabix_source() -> None:
+    """--jobs on a non-remote-tabix source raises BadParameter (the else-branch guard)."""
+    from genome.annotate.cli import _reject_remote_tabix_only_flag  # noqa: PLC0415
+
+    with pytest.raises(typer.BadParameter, match="--jobs"):
+        _reject_remote_tabix_only_flag("jobs", "clinvar")
 
 
 # ---------------------------------------------------------------------------
