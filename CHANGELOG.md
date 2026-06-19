@@ -6,6 +6,114 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- PR 5a (pre-Phase-6): make the chrX non-PAR LOO harness allele-aware
+  (`finding-033`). `read_imputed_calls` paired each masked anchor with the
+  re-imputed output **by genomic position alone**, so at a position carrying a
+  co-located different variant (a different SNV, or — predominantly — an indel)
+  it scored the user's typed-SNV truth against that unrelated record's dosage.
+  This manufactured spurious high-confidence "misses" — a co-located deletion at
+  DS=0.99 scored against a typed SNV that itself re-imputes correctly to ref —
+  collapsing non-rare-MAF `dconf >= 0.9` cells to 0% concordance and tripping the
+  finding-031 "no high-confidence cell collapsing" PASS sub-criterion (the
+  headline 0.9782 was fine; the gate's true precision is `>= 97.82%`).
+  `read_haploid_anchors` now carries the typed SNV's `(ref, alt)`, and
+  `read_imputed_calls` matches each anchor to the single output record with the
+  same `(POS, REF, ALT)` — evaluating only that record's `DS` and reading its
+  `INFO/AF` for the MAF bin, skipping co-located records with differing alleles.
+  An anchor whose typed SNV is absent from the output is not imputable: excluded
+  from the concordance (neither concordant nor a miss) and counted in a new
+  `n_anchors_not_in_panel`, surfaced in `REPORT.json`, the CLI summary, and the
+  structlog lines. Measurement-layer only — the import dosage-confidence gate and
+  the chrX reload are unchanged. (PR #74)
+- PR 5a (pre-Phase-6): fix a pre-existing foreign-key crash on imputed-call
+  re-import (`finding-032`). `genome imputation import` over an already-merged
+  corpus supersedes prior imputed calls via `UPDATE genotype_calls SET
+  is_active = FALSE`; because `is_active` is indexed (`idx_gc_active`), DuckDB
+  runs that UPDATE as a delete+reinsert that fires the parent-side
+  `discrepancies(call_a_id/call_b_id)` -> `genotype_calls(call_id)` foreign key,
+  so the first chrX M1->M3 re-import aborted with a `ConstraintException`. The
+  importer now pre-clears the imputed-referencing `discrepancies` rows in a
+  committed transaction *before* the import transaction (the same TX0 split
+  `canonicalize` / `collapse-duplicate-variants` already use for this DuckDB
+  quirk); `merge` rebuilds `discrepancies`, and the reload always re-merges after
+  import. Gated so first imports / chip-only states are untouched. General (any
+  imputed re-import, not chrX-specific); not introduced by the `finding-031` QC
+  commit. (PR #74)
+- PR 5a (pre-Phase-6): chrX non-PAR QC — replace the structurally-dead DR² gate
+  with a dosage-confidence gate + leave-one-out validation (`finding-031`).
+  Beagle's `INFO/DR2` is a cross-sample estimator and is `0.00` for **every**
+  single-sample male hemizygous non-PAR marker (imputed *and* typed), so the
+  uniform `DR2 < 0.3` import gate dropped all non-PAR — including the user's own
+  ~25,781 typed anchors — and blocked the PR. `genome imputation import` now gates
+  male non-PAR chrX on the live dosage signal (autosomes / male PAR / female X keep
+  the DR² gate), using Beagle's `INFO/IMP` to keep the **informative** subset:
+  typed anchors (no `IMP`) are always kept for anchor retention, and imputed sites
+  (`IMP`) are kept only when confident ALT-bearing (`DS >= --dconf-threshold`,
+  default 0.9 — which equals the hemizygous max genotype-posterior, so `gp=true`
+  is redundant). Confident hom-ref imputed (`DS`≈0) and the uncertain middle are
+  dropped — keeping every confident call (`max(DS,1−DS) >= 0.9`) would retain ~2.2M
+  hom-ref calls and balloon the consensus ~70% from one region; the kept yield is
+  ~10⁵ (~25.8K anchors + ~77.8K confident-ALT). One shared keep/drop helper
+  (real-import + dry-run can't diverge), with a missing-DS fail-closed, a `0..1` DS
+  scale guard, and a fail-closed `--sex` guard for a `male_nonpar_haploid` manifest.
+  The kept confidence is stored into the existing `imputation_r2` column flagged
+  `nonpar_dosage_conf` (a documented overload — no schema change; the DR² run-stats
+  stay DR²-only); a proper `dosage_confidence` column is logged as deferred
+  tech-debt. Adds `genome imputation chrx-loo` (`imputation/chrx_loo.py`): 5-fold
+  disjoint leave-one-out of the typed non-PAR anchors against the native non-PAR
+  panel, measuring the precision of the gate-kept set (re-imputed anchors with
+  `DS >= 0.9`) vs held-out truth, stratified by MAF×dconf, with a JSON report +
+  idempotent `sample_qc.qc_notes` stamp (scratch on the big disk, never `/tmp`).
+  Corrects the `finding-029` "M1 destroyed information (DR²≈0)" wording (it
+  conflated a dead metric with information loss). (PR #75)
+- PR 5a (pre-Phase-6): document `finding-030` — `genome imputation panel
+  prepare-chrx`'s haploid-GT composition check (`count_haploid_gts`,
+  `chrx_panel.py:123`) is O(variants × samples) and ran **~80 min** (~55 CPU-min
+  pegged, no progress output) on the real 3,202-sample non-PAR chrX subset. The
+  three assertion call sites need only **existence** (`> 0`), not the exact
+  count, so the recommended fix short-circuits the count awk on the first
+  haploid GT (sub-second). **Doc-only this pass** (fix recommended, not yet
+  applied): prep-time only and idempotent (subsets cache → `skip_existing`),
+  does not affect `genome imputation run` (`rediploidize_vcf` counts the
+  single-sample Beagle output, not the panel) and does not touch the gate
+  anchors; flagged as out of the CLAUDE.md performance contract. (PR #74)
+- PR 5a (pre-Phase-6): chrX imputation via the **M3-physical** region-split
+  mechanic (`finding-029`, closing `finding-008`). `genome imputation panel
+  prepare-chrx` now splits the 1000G chrX panel into three **native**
+  (un-diploidized) subsets — `chrX.{par1,nonpar,par2}.vcf.gz` — via `bcftools
+  view -r` (ensuring the panel `.tbi` first; asserting the PAR subsets are
+  haploid-free and the non-PAR subset retains the male hemizygous haplotypes).
+  The runner imputes each region against its matching native subset with the
+  biologically-correct ploidy (male non-PAR stays **haploid**), re-diploidizes
+  the male non-PAR output back to hom-diploid (R1 seam — idempotent, so
+  `variants_master`/`consensus_genotypes` storage is byte-unchanged), and
+  `bcftools concat -a`s the three region outputs into one `result/chrX.vcf.gz`.
+  This **supersedes** the prior M1 whole-panel diploidization, which failed its
+  falsifiability gate (fake-homozygosing half the panel drove non-PAR mean
+  DR² ≈ 0; the finding-029 Task 0 probe confirms native-haploid imputation
+  recovers it — ~1,100× more imputable non-PAR sites). `bcftools` becomes a hard
+  prerequisite for the chrX path (alongside `bgzip`/`awk`). Adds: a minimal
+  in-SQL sex mechanism
+  (`imputation/sex.py` + `--sex {M,F,auto}` on `prepare`/`run`, no DB column);
+  `genome/par_regions.py`; the **`consensus_chrx_dosage_v`** view (the only
+  schema/DDL touch — corrects male non-PAR dosage 2→1/0→0 and flags
+  `male_nonpar_het_anomaly`) materialized via a targeted `CREATE OR REPLACE VIEW`
+  — **view-only ⇒ no `rm -rf data/` rebuild** (PR #68 precedent), still compiled
+  through `genome init`; and a post-merge male-non-PAR-het guard recorded on the
+  imputed `sample_qc.qc_notes`. Also lands the `finding-008` safety fixes
+  (shared `imputation/bgzf.py`; the runner unlinks partial output and re-imputes
+  an EOF-less BGZF instead of skipping it; the import refuses a cleanly-empty
+  chromosome with a non-trivial manifest count) and genetic-map hardening
+  (idempotent `normalize_map_chrom` with `23→X`/`24→Y`, stray `chrchr*` cleanup,
+  a chrX-map column-1 assertion in `validate_panel`). Also fixes a latent
+  off-by-one in `canonicalize`'s `_resync_variant_id_sequence` that the chrX
+  import (the first default-`nextval` `variants_master` insert after a
+  canonicalize) surfaced: DuckDB 1.5.x reports `duckdb_sequences().last_value`
+  as the *next* value on a fresh connection (the connection canonicalize runs
+  on), so the old resync under-drained by one and stranded the sequence at
+  exactly `MAX(variant_id)` → duplicate-PK on the next insert. Now resyncs by
+  peeking one `nextval` and draining the gap (robust to the `last_value`
+  ambiguity); regression-tested on a fresh connection.
 - Parallelize the gnomAD annotation import. `genome annotate refresh --source gnomad`
   gains `--jobs N` (default 8): chromosomes now stream concurrently in worker
   *processes* (process-based, not threads, because `remote_tabix._StderrTap`

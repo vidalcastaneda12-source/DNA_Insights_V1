@@ -7,6 +7,7 @@ behavior is gone now that the schema is DuckDB-clean.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
@@ -154,6 +155,42 @@ def _apply_duckdb_ddl(conn: DuckDBPyConnection, files: Iterable[Path]) -> None:
         log.info("applying duckdb ddl")
         for stmt in _split_sql(path.read_text(encoding="utf-8")):
             conn.execute(stmt)
+
+
+_CREATE_VIEW_RE: Final[re.Pattern[str]] = re.compile(r"\bCREATE\s+VIEW\b", re.IGNORECASE)
+
+
+def _find_create_view(ddl_text: str, view_name: str) -> str | None:
+    """Return the ``CREATE VIEW <view_name>`` statement from ``ddl_text``, or None."""
+    pattern = re.compile(rf"\bCREATE\s+VIEW\s+{re.escape(view_name)}\b", re.IGNORECASE)
+    for stmt in _split_sql(ddl_text):
+        if pattern.search(stmt):
+            return stmt
+    return None
+
+
+def materialize_view(
+    conn: DuckDBPyConnection,
+    view_name: str,
+    *,
+    ddl_file: str = "group_1_genotype.sql",
+) -> None:
+    """Create-or-replace a single view from its canonical DDL definition.
+
+    A fresh ``genome init`` creates every view; an existing ``genome.duckdb``
+    that predates a view-only schema addition needs the new view materialized
+    *without* a full rebuild — the PR #68 "view-only ⇒ no ``rm -rf data/``"
+    path. This reads the canonical ``CREATE VIEW`` statement from the DDL file
+    (the source of truth, kept in lock-step with the schema markdown) and runs
+    it as ``CREATE OR REPLACE VIEW``, so it is idempotent and a no-op when the
+    live view already matches.
+    """
+    text = (DDL_DIR / ddl_file).read_text(encoding="utf-8")
+    statement = _find_create_view(text, view_name)
+    if statement is None:
+        msg = f"CREATE VIEW {view_name!r} not found in {ddl_file}"
+        raise ValueError(msg)
+    conn.execute(_CREATE_VIEW_RE.sub("CREATE OR REPLACE VIEW", statement, count=1))
 
 
 def _seed_user_preferences(conn: object) -> None:

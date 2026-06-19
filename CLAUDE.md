@@ -10,18 +10,19 @@ A local-first personal DNA insights application that ingests 23andMe + Ancestry 
 
 ## Working with this codebase
 
-This codebase is built collaboratively across four actors. The boundaries between them are part of the convention.
+This codebase is built collaboratively across five actors. The boundaries between them are part of the convention.
 
-- **AI-Claude** — the planning chat (claude.ai / Claude desktop). Roadmap planning, plan review, handoff review, test-results review. Does not touch the codebase or run commands.
-- **VSC-ClaudeCodePlanning** — Claude Code in plan mode — toggled locally via Shift+Tab, or invoked in the cloud via /ultraplan for inline-comment review. Reads the repo, produces a technical plan, surfaces questions. Does not write code or run commands.
-- **VSC-ClaudeCode** — Claude Code in normal mode. Writes code, runs the dev-loop tests, commits, pushes, opens PRs, produces an end-of-session handoff via `/handoff`.
+- **ClaudeCodeVerification** — Claude Code. the pre and post implementation chat. Plan review, handoff review. Does not touch the codebase or run commands.
+- **ClaudeCodeTestingBugs** — Claude Code. the post implementation chat. Test-results review and test assistance. Does not touch the codebase or run commands.
+- **ClaudeCodePlanning** — Claude Code in plan mode — toggled locally via Shift+Tab, or invoked in the cloud via /ultraplan for inline-comment review. Reads the repo, produces a technical plan, surfaces questions. Does not write code or run commands.
+- **ClaudeCodeDevelopment** — Claude Code. Writes code, runs the dev-loop tests, commits, pushes, opens PRs, produces an end-of-session handoff via `/handoff`.
 - **VSC-User** — the human operator. Approves plans, runs the formal verification protocol (`docs/runbooks/verification.md`), merges.
 
-Older docs and CHANGELOG entries use **VSC-Claude** as a single name. That maps to VSC-ClaudeCode (implementation mode) by default — VSC-ClaudeCodePlanning is the newer split.
+Older docs and CHANGELOG entries use **VSC-Claude** as a single name. That maps to VSC-ClaudeCodeDevelopment (implementation mode) by default.
 
 ### Plan mode first
 
-For any non-trivial change — anything that touches multiple files, modifies behavior, alters the schema, or adds a dependency — Claude Code starts in plan mode. Implementation does not begin until VSC-User has approved the plan. Trivial work (typo fixes, single-line docstring edits, comment clarifications) can proceed without plan mode.
+For any non-trivial change — anything that touches multiple files, modifies behavior, alters the schema, or adds a dependency — Claude Code starts in plan mode. Implementation does not begin until VSC-User has approved the plan.
 
 When in plan mode, read the listed inputs first — `CLAUDE.md`, `ROADMAP.md`, relevant `docs/findings/`, and the relevant `backend/src/genome/` subdirectory — then produce a plan containing:
 
@@ -34,16 +35,17 @@ When in plan mode, read the listed inputs first — `CLAUDE.md`, `ROADMAP.md`, r
 7. **Out-of-scope** — explicit list. Phase boundaries, optional features, things to defer.
 8. **End-of-session handoff** — `/handoff` at session end.
 
-If plan mode surfaces a question that needs judgment outside the code (roadmap-level trade-offs, architectural fit, alignment with locked decisions), pause and ask VSC-User. VSC-User routes the question to AI-Claude and returns with an answer.
+If plan mode surfaces a question that needs judgment outside the code (roadmap-level trade-offs, architectural fit, alignment with locked decisions), pause and ask VSC-User. VSC-User routes the question to ClaudeCodePlanning and returns with an answer.
 
 ### Implementation contract
 
-Once VSC-User approves the plan, VSC-ClaudeCode executes it. The expectation is mechanical execution — surprises at this stage usually mean the plan missed something, and the right move is to pause and escalate rather than improvise.
+Once VSC-User approves the plan, ClaudeCodeDevelopment executes it. The expectation is mechanical execution — surprises at this stage usually mean the plan missed something, and the right move is to pause and escalate rather than improvise.
 
 Every implementation session produces:
 - A new branch from `main`.
 - A clean dev-loop (`pytest`, `ruff check`, `ruff format --check`, `mypy --strict backend/src`).
 - A commit + push.
+- An open PR, or a new commit to an existing PR where appropriate.
 - An end-of-session handoff via `/handoff` (`.claude/commands/handoff.md`).
 
 VSC-User runs the canonical verification independently against the pushed branch — see `docs/runbooks/verification.md`. That independence is the gate that catches selective test runs, test mutation, and number-interpretation slippage. It is not optional and is not negotiable.
@@ -102,7 +104,7 @@ VSC-User runs the canonical verification independently against the pushed branch
    - Input to Beagle: 204,153 polymorphic SNVs across chromosomes 1-22 + X. Hom-only positions are filtered at prepare per finding-005 #6.
    - Imputed output at DR² > 0.3: 2,369,171 variants.
    - Mean DR²: 0.8242. High-quality (DR² > 0.8): 1,592,735 (~67% of imported).
-   - chrX imputed variants: 0 for males, because hemizygous positions land as `ref==alt` at the prepare layer (finding-005 #6) and so are dropped before Beagle ever sees them.
+   - chrX imputed variants: 0 for males, because hemizygous positions land as `ref==alt` at the prepare layer (finding-005 #6) and so are dropped before Beagle ever sees them. **Superseded by PR-3 hom-only recovery + PR 5a M3-physical chrX imputation:** the recovered chrX positions now carry a real ALT and impute via the region-split mechanic, so chrX is no longer 0. The first-authoritative-run M3 chrX numbers (expected non-PAR yield order ~10⁴–10⁵, `male_nonpar_het_anomaly` ≈ 0) are captured at the gate and locked in [`finding-029`](docs/findings/finding-029-chrx-imputation-m1.md); re-lock this bullet then.
    - Full-genome runtime: ~30 min on Linux, 16 threads, 8 GB heap.
    - Post-merge `consensus_genotypes`: 3,210,371 rows (942,620 chip-derived; 2,267,751 imputed-only under the `consensus_v1` Phase 4 extension; the 101,420 chip+imputed overlap variants stay chip-derived with the imputed call appended to `contributing_calls` as confirming evidence).
    - Phase 3 numbers preserved exactly through Phase 4: `both_concordant=120,516`, `disagreement_resolved=106`, `single_source=821,998`, shared-call concordance=1.0000, `strand_flip_resolutions=106`, palindromic shared variants=31.

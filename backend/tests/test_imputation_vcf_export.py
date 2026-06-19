@@ -86,6 +86,13 @@ def _seed_variant_with_consensus(  # noqa: PLR0913 — explicit per-variant inse
     )
 
 
+def _region_genotypes(path: Path) -> dict[int, str]:
+    """Read ``{pos: genotype}`` from a region target VCF (last column is the GT)."""
+    with gzip.open(path, "rt") as f:
+        rows = [ln.rstrip("\n").split("\t") for ln in f if not ln.startswith("#")]
+    return {int(r[1]): r[-1] for r in rows}
+
+
 def test_prepare_run_writes_per_chrom_vcfs_with_beagle_headers(
     isolated_settings: dict[str, str],  # noqa: ARG001 — fixture forces tmp-scoped settings
     tmp_path: Path,  # noqa: ARG001 — isolated_settings already redirects paths
@@ -174,12 +181,16 @@ def test_prepare_run_writes_per_chrom_vcfs_with_beagle_headers(
     assert result.variants_per_chrom == {"1": 3, "2": 2, "X": 1}
     assert result.input_run_ids == (1,)
 
-    # Three files on disk, one per exported chromosome.
-    assert {p.name for p in result.vcf_paths} == {
-        "chr1.vcf.gz",
-        "chr2.vcf.gz",
-        "chrX.vcf.gz",
-    }
+    # Autosomes are top-level chr*.vcf.gz; chrX is region-split under chrX_regions/
+    # (M3-physical), not a top-level chrX.vcf.gz. The chrX variant (pos 42, non-PAR;
+    # ambiguous sex -> diploid) lands in the non-PAR region target.
+    names = {p.name for p in result.vcf_paths}
+    assert "chr1.vcf.gz" in names
+    assert "chr2.vcf.gz" in names
+    assert "chrX.vcf.gz" not in names
+    assert "nonpar.vcf.gz" in names
+    assert result.archive.chrx_region_upload_path("nonpar").is_file()
+    assert result.chrx_regions == {"par1": 0, "nonpar": 1, "par2": 0}
     for p in result.vcf_paths:
         assert p.is_file()
         with gzip.open(p, "rt") as f:
@@ -198,6 +209,9 @@ def test_prepare_run_writes_per_chrom_vcfs_with_beagle_headers(
     assert manifest["build"] == "GRCh38"
     assert manifest["variants_total"] == 6
     assert manifest["chromosomes_exported"] == ["1", "2", "X"]
+    # M3 chrX provenance: per-region counts + the ploidy decision (ambiguous -> diploid).
+    assert manifest["chrx_regions"] == {"par1": 0, "nonpar": 1, "par2": 0}
+    assert manifest["chrx_ploidy"] == "diploid"
     # Old TopMed-era manifest fields are gone.
     assert "topmed_recommended_compression" not in manifest
     assert "compression_note" not in manifest
@@ -506,3 +520,246 @@ def test_pipeline_version_stamp_matches_constant(
             "SELECT pipeline_version FROM imputation_runs WHERE imputation_id = 1",
         ).fetchone()
     assert row[0] == EXPORT_PIPELINE_VERSION
+
+
+def test_prepare_exports_recovered_chrx_and_skips_hom_only(
+    isolated_settings: dict[str, str],  # noqa: ARG001 — fixture redirects paths
+) -> None:
+    """A canonical chrX SNV (ref != alt) exports; a hom-only (ref == alt) drops.
+
+    Post-canonicalization the recovered chrX positions carry a real ALT and flow
+    through the export; the ``ref != alt`` SQL filter still drops any residual
+    hom-only row. Under M3 the surviving chrX rows land in the region targets.
+    """
+    init_databases()
+    with duckdb_connection() as conn:
+        _seed_ingestion_run(conn, 1, "23andme")
+        _seed_variant_with_consensus(  # recovered: ref != alt -> exported
+            conn,
+            variant_id=1,
+            rsid="rs_recovered",
+            chrom="X",
+            pos=50_000_000,
+            ref="A",
+            alt="G",
+            consensus_a1="A",
+            consensus_a2="G",
+            dosage=1,
+        )
+        _seed_variant_with_consensus(  # hom-only: ref == alt -> dropped
+            conn,
+            variant_id=2,
+            rsid="rs_homonly",
+            chrom="X",
+            pos=50_000_001,
+            ref="C",
+            alt="C",
+            consensus_a1="C",
+            consensus_a2="C",
+            dosage=0,
+        )
+
+    result = prepare_run(sample_id="x")
+
+    assert result.variants_per_chrom == {"X": 1}
+    # M3: chrX exports as region files; the non-PAR core position lands in non-PAR.
+    chrx_vcf = result.archive.chrx_region_upload_path("nonpar")
+    with gzip.open(chrx_vcf, "rt") as f:
+        body = f.read()
+    assert "\t50000000\t" in body  # recovered chrX position exported
+    assert "\t50000001\t" not in body  # hom-only position dropped
+    assert result.chrx_regions == {"par1": 0, "nonpar": 1, "par2": 0}
+
+
+def test_prepare_chrx_male_renders_nonpar_haploid_par_diploid(
+    isolated_settings: dict[str, str],  # noqa: ARG001 — fixture redirects paths
+) -> None:
+    """M3 male export: non-PAR rows render haploid (0/1), PAR rows stay diploid."""
+    init_databases()
+    with duckdb_connection() as conn:
+        _seed_ingestion_run(conn, 1, "23andme")
+        _seed_variant_with_consensus(  # non-PAR core, hom-ref -> haploid "0"
+            conn,
+            variant_id=1,
+            rsid="rs1",
+            chrom="X",
+            pos=50_000_000,
+            ref="A",
+            alt="G",
+            consensus_a1="A",
+            consensus_a2="A",
+            dosage=0,
+        )
+        _seed_variant_with_consensus(  # non-PAR core, hom-alt -> haploid "1"
+            conn,
+            variant_id=2,
+            rsid="rs2",
+            chrom="X",
+            pos=50_000_002,
+            ref="A",
+            alt="G",
+            consensus_a1="G",
+            consensus_a2="G",
+            dosage=2,
+        )
+        _seed_variant_with_consensus(  # PAR1, het -> diploid "0/1"
+            conn,
+            variant_id=3,
+            rsid="rs3",
+            chrom="X",
+            pos=1_000_000,
+            ref="A",
+            alt="G",
+            consensus_a1="A",
+            consensus_a2="G",
+            dosage=1,
+        )
+
+    result = prepare_run(sample_id="x", sex="M")
+
+    assert result.profile_sex == "M"
+    assert result.chrx_regions == {"par1": 1, "nonpar": 2, "par2": 0}
+    assert _region_genotypes(result.archive.chrx_region_upload_path("nonpar")) == {
+        50_000_000: "0",
+        50_000_002: "1",
+    }
+    assert _region_genotypes(result.archive.chrx_region_upload_path("par1")) == {
+        1_000_000: "0/1",
+    }
+    # An empty region (no PAR2 rows) writes no file.
+    assert not result.archive.chrx_region_upload_path("par2").is_file()
+
+
+def test_prepare_chrx_male_nonpar_dosage1_is_haploid_no_call(
+    isolated_settings: dict[str, str],  # noqa: ARG001 — fixture redirects paths
+) -> None:
+    """A male non-PAR het (dosage 1, biologically impossible) renders as ``.`` for Beagle."""
+    init_databases()
+    with duckdb_connection() as conn:
+        _seed_ingestion_run(conn, 1, "23andme")
+        _seed_variant_with_consensus(
+            conn,
+            variant_id=1,
+            rsid="rs1",
+            chrom="X",
+            pos=50_000_000,
+            ref="A",
+            alt="G",
+            consensus_a1="A",
+            consensus_a2="G",
+            dosage=1,
+        )
+
+    result = prepare_run(sample_id="x", sex="M")
+
+    assert _region_genotypes(result.archive.chrx_region_upload_path("nonpar")) == {
+        50_000_000: ".",
+    }
+
+
+def test_prepare_chrx_female_renders_nonpar_diploid(
+    isolated_settings: dict[str, str],  # noqa: ARG001 — fixture redirects paths
+) -> None:
+    """M3 female export: chrX non-PAR renders diploid (a female het stays ``0/1``)."""
+    init_databases()
+    with duckdb_connection() as conn:
+        _seed_ingestion_run(conn, 1, "23andme")
+        _seed_variant_with_consensus(
+            conn,
+            variant_id=1,
+            rsid="rs1",
+            chrom="X",
+            pos=50_000_000,
+            ref="A",
+            alt="G",
+            consensus_a1="A",
+            consensus_a2="G",
+            dosage=1,
+        )
+
+    result = prepare_run(sample_id="x", sex="F")
+
+    assert result.profile_sex == "F"
+    assert _region_genotypes(result.archive.chrx_region_upload_path("nonpar")) == {
+        50_000_000: "0/1",
+    }
+    manifest = json.loads(result.manifest_path.read_text())
+    assert manifest["chrx_ploidy"] == "diploid"
+
+
+def test_prepare_chrx_buckets_across_three_regions(
+    isolated_settings: dict[str, str],  # noqa: ARG001 — fixture redirects paths
+) -> None:
+    """chrX rows split into PAR1 / non-PAR / PAR2; both slivers count as non-PAR."""
+    init_databases()
+    with duckdb_connection() as conn:
+        _seed_ingestion_run(conn, 1, "23andme")
+        rows = [
+            (1, "rs_sliver", 5_000, 0),  # non-PAR lower sliver
+            (2, "rs_par1", 1_000_000, 1),  # PAR1
+            (3, "rs_core", 50_000_000, 2),  # non-PAR core
+            (4, "rs_par2", 155_800_000, 1),  # PAR2
+        ]
+        for variant_id, rsid, pos, dosage in rows:
+            a1, a2 = ("A", "G") if dosage == 1 else (("A", "A") if dosage == 0 else ("G", "G"))
+            _seed_variant_with_consensus(
+                conn,
+                variant_id=variant_id,
+                rsid=rsid,
+                chrom="X",
+                pos=pos,
+                ref="A",
+                alt="G",
+                consensus_a1=a1,
+                consensus_a2=a2,
+                dosage=dosage,
+            )
+
+    result = prepare_run(sample_id="x", sex="M")
+
+    assert result.variants_per_chrom["X"] == 4  # whole-chromosome total
+    assert result.chrx_regions == {"par1": 1, "nonpar": 2, "par2": 1}
+    assert set(_region_genotypes(result.archive.chrx_region_upload_path("par1"))) == {1_000_000}
+    assert set(_region_genotypes(result.archive.chrx_region_upload_path("par2"))) == {155_800_000}
+    assert set(_region_genotypes(result.archive.chrx_region_upload_path("nonpar"))) == {
+        5_000,
+        50_000_000,
+    }
+    manifest = json.loads(result.manifest_path.read_text())
+    assert manifest["chrx_regions"] == {"par1": 1, "nonpar": 2, "par2": 1}
+    assert manifest["chrx_ploidy"] == "male_nonpar_haploid"
+
+
+def test_prepare_manifest_records_profile_sex(
+    isolated_settings: dict[str, str],  # noqa: ARG001 — fixture redirects paths
+) -> None:
+    """The prepare manifest carries the resolved profile sex (transient provenance)."""
+    init_databases()
+    with duckdb_connection() as conn:
+        _seed_ingestion_run(conn, 1, "23andme")
+        conn.execute(
+            "INSERT INTO sample_qc (qc_id, run_id, sex_inferred, qc_status) "
+            "VALUES (1, 1, 'M', 'pass')",
+        )
+        _seed_variant_with_consensus(
+            conn,
+            variant_id=1,
+            rsid="rs_a",
+            chrom="1",
+            pos=1000,
+            ref="A",
+            alt="G",
+            consensus_a1="A",
+            consensus_a2="G",
+            dosage=1,
+        )
+
+    # auto resolves to the chip aggregate ('M')...
+    result = prepare_run(sample_id="x")
+    assert result.profile_sex == "M"
+    assert json.loads(result.manifest_path.read_text())["profile_sex"] == "M"
+
+    # ...and an explicit --sex override wins.
+    forced = prepare_run(sample_id="x", force_new=True, sex="F")
+    assert forced.profile_sex == "F"
+    assert json.loads(forced.manifest_path.read_text())["profile_sex"] == "F"

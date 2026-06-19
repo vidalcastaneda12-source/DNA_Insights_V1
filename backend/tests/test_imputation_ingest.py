@@ -13,6 +13,7 @@ a guard against regression.
 from __future__ import annotations
 
 import gzip
+import json
 import time
 from typing import TYPE_CHECKING
 
@@ -624,6 +625,104 @@ def test_force_reimport_supersedes_prior_calls(
     assert inactive == 5
 
 
+def test_reimport_supersedes_calls_referenced_by_discrepancies(
+    isolated_settings: dict[str, str],
+) -> None:
+    """Re-import succeeds when a discrepancy FK-references a prior imputed call.
+
+    Regression for finding-032. The per-batch supersession
+    (``UPDATE genotype_calls SET is_active = FALSE``) delete+reinserts each row
+    because ``is_active`` is indexed (``idx_gc_active``), firing the parent-side
+    ``discrepancies(call_a_id / call_b_id)`` -> ``genotype_calls(call_id)`` FK.
+    With a discrepancy pointing at a superseded call this raised a DuckDB
+    ``ConstraintException`` (the first real chrX M1->M3 re-import crash). The
+    pre-import ``discrepancies`` clear makes the flip FK-safe; ``merge`` rebuilds
+    ``discrepancies`` afterward.
+    """
+    init_databases()
+    archive_root = isolated_settings_archive_root(isolated_settings)
+    imp_id = _seed_completed_run(archive_root=archive_root)
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+    _write_synthetic_vcf(archive.result_dir / "chr1.dose.vcf.gz", n_variants=5)
+
+    import_result(imp_id, archive_root=archive_root)
+
+    # Mimic the shape `merge` writes after the first import: a discrepancy whose
+    # call_a_id references one of the active imputed calls.
+    with duckdb_connection() as conn:
+        call_id, variant_id = conn.execute(
+            "SELECT call_id, variant_id FROM genotype_calls "
+            "WHERE source = 'beagle_imputed' AND is_active ORDER BY call_id LIMIT 1",
+        ).fetchone()
+        conn.execute(
+            """
+            INSERT INTO discrepancies
+                (discrepancy_id, variant_id, discrepancy_type, severity,
+                 source_a, call_a_id)
+            VALUES (1, ?, 'genotype_mismatch', 'major', 'beagle_imputed', ?)
+            """,
+            [variant_id, call_id],
+        )
+
+    # Must NOT raise — pre-fix this aborted with a foreign-key ConstraintException.
+    second = import_result(imp_id, archive_root=archive_root, force_reimport=True)
+    assert isinstance(second, ImportResult)
+    assert second.deactivated_prior_calls == 5
+
+    with duckdb_connection() as conn:
+        active = conn.execute(
+            "SELECT COUNT(*) FROM genotype_calls WHERE is_active",
+        ).fetchone()[0]
+        inactive = conn.execute(
+            "SELECT COUNT(*) FROM genotype_calls WHERE NOT is_active",
+        ).fetchone()[0]
+        disc = conn.execute("SELECT COUNT(*) FROM discrepancies").fetchone()[0]
+    assert active == 5
+    assert inactive == 5
+    assert disc == 0  # the stale discrepancy was pre-cleared; merge rebuilds it
+
+
+def test_reimport_keeps_discrepancies_not_referencing_imputed_calls(
+    isolated_settings: dict[str, str],
+) -> None:
+    """The pre-import clear is gated, not an unconditional wipe (finding-032).
+
+    A discrepancy that references a real variant but **no** genotype call is not
+    an FK hazard, so it must survive a re-import even though active imputed calls
+    exist. Pins the gate against a future regression to an unconditional clear.
+    """
+    init_databases()
+    archive_root = isolated_settings_archive_root(isolated_settings)
+    imp_id = _seed_completed_run(archive_root=archive_root)
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+    _write_synthetic_vcf(archive.result_dir / "chr1.dose.vcf.gz", n_variants=5)
+
+    import_result(imp_id, archive_root=archive_root)
+
+    with duckdb_connection() as conn:
+        variant_id = conn.execute(
+            "SELECT variant_id FROM genotype_calls "
+            "WHERE source = 'beagle_imputed' AND is_active LIMIT 1",
+        ).fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO discrepancies
+                (discrepancy_id, variant_id, discrepancy_type, severity,
+                 source_a, call_a_id, call_b_id)
+            VALUES (1, ?, 'platform_unique', 'info', '23andme', NULL, NULL)
+            """,
+            [variant_id],
+        )
+
+    second = import_result(imp_id, archive_root=archive_root, force_reimport=True)
+    assert isinstance(second, ImportResult)
+    assert second.deactivated_prior_calls == 5
+
+    with duckdb_connection() as conn:
+        disc = conn.execute("SELECT COUNT(*) FROM discrepancies").fetchone()[0]
+    assert disc == 1  # gate did not fire — the non-referencing discrepancy survived
+
+
 def test_chromosomes_filter_allows_adding_chromosomes_without_force(
     isolated_settings: dict[str, str],
 ) -> None:
@@ -822,3 +921,88 @@ def test_dry_run_also_rejects_truncated_bgzf_result_vcf(
 def test_dbsnp_rsid_or_none(vcf_id: str | None, expected: str | None) -> None:
     """Only a strict ``rs<n>`` survives; synthetic / malformed IDs become NULL."""
     assert _dbsnp_rsid_or_none(vcf_id) == expected
+
+
+# ---------------------------------------------------------------------------
+# Pre-Phase-6: manifest-robust empty-output guard (finding-008 #2).
+#
+# The BGZF EOF guard above catches a *truncated* result; this one catches a
+# *cleanly-closed-yet-empty* result by cross-checking the prepare manifest's
+# per-chromosome upload count.
+# ---------------------------------------------------------------------------
+
+
+def _write_upload_manifest(archive: ImputationArchive, variants_per_chrom: dict[str, int]) -> None:
+    """Write a minimal prepare ``MANIFEST.json`` carrying ``variants_per_chrom``."""
+    archive.upload_dir.mkdir(parents=True, exist_ok=True)
+    archive.upload_manifest.write_text(
+        json.dumps({"variants_per_chrom": variants_per_chrom}),
+        encoding="utf-8",
+    )
+
+
+def test_import_raises_on_empty_chrom_with_nontrivial_manifest(
+    isolated_settings: dict[str, str],
+) -> None:
+    """Zero output records for a chromosome the manifest says had input → raise.
+
+    A cleanly-closed (plain-gzip, header-only) result VCF slips past the BGZF
+    EOF guard but is still a silent Beagle failure when the prepare manifest
+    recorded uploaded variants for that chromosome.
+    """
+    init_databases()
+    archive_root = isolated_settings_archive_root(isolated_settings)
+    imp_id = _seed_completed_run(archive_root=archive_root)
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+
+    _write_upload_manifest(archive, {"1": 5})
+    _write_synthetic_vcf(archive.result_dir / "chr1.dose.vcf.gz", chrom="chr1", n_variants=0)
+
+    with pytest.raises(RuntimeError, match="streamed zero variant records"):
+        import_result(imp_id, archive_root=archive_root)
+
+
+def test_import_empty_chrom_without_manifest_is_not_raised(
+    isolated_settings: dict[str, str],
+) -> None:
+    """Without a manifest the empty guard is skipped — the same empty output
+    that raises *with* a manifest must import quietly *without* one
+    (the explicit_vcf_paths / non-standard-layout case).
+    """
+    init_databases()
+    archive_root = isolated_settings_archive_root(isolated_settings)
+    imp_id = _seed_completed_run(archive_root=archive_root)
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+
+    # No manifest written.
+    _write_synthetic_vcf(archive.result_dir / "chr1.dose.vcf.gz", chrom="chr1", n_variants=0)
+
+    result = import_result(imp_id, archive_root=archive_root)
+    assert isinstance(result, ImportResult)
+    assert result.variants_total == 0
+
+
+def test_import_all_below_threshold_does_not_trip_empty_guard(
+    isolated_settings: dict[str, str],
+) -> None:
+    """All-below-R²-threshold is a legitimate zero-*kept* result, not an empty
+    one: the chromosome still streamed raw records, so the guard stays quiet.
+    """
+    init_databases()
+    archive_root = isolated_settings_archive_root(isolated_settings)
+    imp_id = _seed_completed_run(archive_root=archive_root)
+    archive = ImputationArchive.for_run(archive_root, imp_id)
+
+    _write_upload_manifest(archive, {"1": 5})
+    # Five variants, all at R²=0.25 — below the default 0.3 import threshold.
+    _write_synthetic_vcf(
+        archive.result_dir / "chr1.dose.vcf.gz",
+        chrom="chr1",
+        n_variants=5,
+        r2_low_count=5,
+    )
+
+    result = import_result(imp_id, archive_root=archive_root)
+    assert isinstance(result, ImportResult)
+    assert result.variants_total == 0
+    assert result.variants_below_threshold == 5

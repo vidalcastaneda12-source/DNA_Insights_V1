@@ -395,3 +395,47 @@ LEFT JOIN genotype_calls gc       ON gc.variant_id = vm.variant_id AND gc.is_act
 LEFT JOIN consensus_genotypes cg  ON cg.variant_id = vm.variant_id
 GROUP BY vm.variant_id, vm.rsid, vm.chrom, vm.pos_grch38, vm.ref_allele,
          vm.alt_allele, cg.consensus_allele_1, cg.consensus_allele_2, cg.consensus_method;
+
+-- chrX corrected-dosage view (PR 5a, finding-029).
+-- Male non-PAR chrX is stored homozygous-diploid under R1; corrected_dosage
+-- maps that 2->1 / 0->0 to the true hemizygous copy number, and
+-- male_nonpar_het_anomaly flags the biologically-impossible male non-PAR het
+-- (stored dosage 1). PAR, female, and autosomal rows pass through unchanged.
+-- Profile sex is derived in-SQL from the chip sample_qc rows (the profile_sex
+-- CTE mirrors genome.imputation.sex.profile_sex_label exactly); nothing is
+-- persisted. The non-PAR predicate is the strict complement of PAR1/PAR2
+-- (matching genome.par_regions.is_nonpar), so the telomeric slivers count as
+-- non-PAR.
+CREATE VIEW consensus_chrx_dosage_v AS
+WITH profile_sex AS (
+  SELECT CASE
+    WHEN COUNT(*) FILTER (WHERE sq.sex_inferred = 'M') > 0
+     AND COUNT(*) FILTER (WHERE sq.sex_inferred = 'F') = 0 THEN 'M'
+    WHEN COUNT(*) FILTER (WHERE sq.sex_inferred = 'F') > 0
+     AND COUNT(*) FILTER (WHERE sq.sex_inferred = 'M') = 0 THEN 'F'
+    ELSE 'ambiguous'
+  END AS sex
+  FROM sample_qc sq
+  JOIN ingestion_runs ir ON ir.run_id = sq.run_id
+  WHERE CAST(ir.source AS VARCHAR) IN ('23andme', 'ancestry')
+)
+SELECT
+  cg.variant_id,
+  vm.chrom,
+  vm.pos_grch38,
+  cg.dosage AS stored_dosage,
+  CASE
+    WHEN CAST(vm.chrom AS VARCHAR) = 'X'
+     AND (SELECT sex FROM profile_sex) = 'M'
+     AND NOT (vm.pos_grch38 BETWEEN 10001 AND 2781479
+           OR vm.pos_grch38 BETWEEN 155701383 AND 156030895)
+    THEN CASE cg.dosage WHEN 2 THEN 1 WHEN 0 THEN 0 ELSE cg.dosage END
+    ELSE cg.dosage
+  END AS corrected_dosage,
+  (CAST(vm.chrom AS VARCHAR) = 'X'
+   AND (SELECT sex FROM profile_sex) = 'M'
+   AND NOT (vm.pos_grch38 BETWEEN 10001 AND 2781479
+         OR vm.pos_grch38 BETWEEN 155701383 AND 156030895)
+   AND cg.dosage = 1) AS male_nonpar_het_anomaly
+FROM consensus_genotypes cg
+JOIN variants_master vm ON vm.variant_id = cg.variant_id;

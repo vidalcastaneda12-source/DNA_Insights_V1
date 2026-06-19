@@ -20,6 +20,7 @@ import structlog
 
 from genome.config import get_settings
 from genome.db.duckdb_conn import duckdb_connection
+from genome.merge.chrx_qc import apply_chrx_het_guard
 from genome.merge.consensus import resolve
 from genome.merge.models import (
     MERGE_VERSION,
@@ -576,6 +577,10 @@ def merge_all(*, duckdb_path: Path | None = None) -> MergeResult:
             base_discrepancy_id = _next_id(conn, "discrepancies", "discrepancy_id")
             consensus_n = _flush_consensus(conn)
             discrepancy_n = _flush_discrepancies(conn, base_discrepancy_id)
+            # Post-consensus chrX QC (PR 5a): count male non-PAR het anomalies
+            # and record them on the imputed sample_qc row — atomic with the
+            # consensus it describes.
+            chrx_het_anomalies = apply_chrx_het_guard(conn)
             conn.execute("DROP TABLE IF EXISTS _merge_consensus_stage")
             conn.execute("DROP TABLE IF EXISTS _merge_discrepancy_stage")
             conn.execute("COMMIT")
@@ -590,6 +595,7 @@ def merge_all(*, duckdb_path: Path | None = None) -> MergeResult:
         consensus_rows=consensus_n,
         discrepancy_rows=discrepancy_n,
         strand_flip_resolutions=strand_flips,
+        chrx_male_nonpar_het_anomalies=chrx_het_anomalies,
         method_counts=result.method_counts,
         discrepancy_type_counts=result.discrepancy_type_counts,
         severity_counts=result.severity_counts,

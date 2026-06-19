@@ -19,6 +19,7 @@ from genome.db.init_schema import init_databases
 from genome.db.sqlite_conn import sqlcipher_connection
 from genome.imputation import (
     DEFAULT_BATCH_SIZE,
+    DEFAULT_DCONF_THRESHOLD,
     DEFAULT_R2_THRESHOLD,
     PANEL_CHROMOSOMES,
     DryRunResult,
@@ -32,7 +33,10 @@ from genome.imputation import (
     run_imputation,
     validate_panel,
 )
+from genome.imputation.archive import ImputationArchive
 from genome.imputation.beagle_runner import DEFAULT_MEMORY_GB, DEFAULT_NE
+from genome.imputation.chrx_loo import DEFAULT_N_FOLDS, ChrxLooError, run_chrx_loo
+from genome.imputation.chrx_panel import ChrxToolingError, prepare_chrx_panel
 from genome.ingest import Source, ingest_file
 from genome.ingest.liftover import LiftoverEngine
 from genome.merge import merge_all
@@ -352,6 +356,83 @@ def config_set(
 # -----------------------------------------------------------------------------
 
 
+_SEX_FLAG_HELP = (
+    "Profile sex for the chrX path: 'M', 'F', or 'auto' (default — resolve from "
+    "the chip sample_qc rows). Drives only the transient prepare/run/import-QC "
+    "path; no DB column is written (PR 5a)."
+)
+
+
+def _normalize_sex_flag(raw: str) -> str | None:
+    """Validate a ``--sex`` value; return ``'M'`` / ``'F'``, or ``None`` for ``auto``."""
+    value = raw.strip()
+    if value.lower() == "auto":
+        return None
+    if value.upper() in {"M", "F"}:
+        return value.upper()
+    msg = "--sex must be one of: M, F, auto"
+    raise typer.BadParameter(msg, param_hint="--sex")
+
+
+def _gate_chrx_sex(chromosomes_set: frozenset[str] | None, sex: str) -> None:
+    """Require a determinate profile sex when chrX is in the run scope (PR 5a).
+
+    chrX imputation needs a known sex to correct male non-PAR dosage downstream.
+    ``auto`` resolves it from chip QC; an ambiguous result there aborts with a
+    request for an explicit ``--sex``. Autosome-only runs never consult it.
+    """
+    includes_x = chromosomes_set is None or "X" in chromosomes_set
+    if not includes_x:
+        return
+    from genome.imputation.sex import AmbiguousSexError, resolve_sex  # noqa: PLC0415
+
+    explicit = _normalize_sex_flag(sex)
+    try:
+        with duckdb_connection() as conn:
+            resolved = resolve_sex(conn, explicit)
+    except AmbiguousSexError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--sex") from exc
+    typer.echo(f"chrX imputation profile sex: {resolved}")
+
+
+def _require_chrx_region_panels(chromosomes_set: frozenset[str] | None) -> None:
+    """Abort a chrX run if the chrX region panel subsets haven't been prepared (PR 5a).
+
+    M3-physical needs the three native panel subsets (PAR1 / non-PAR / PAR2) from
+    ``panel prepare-chrx``; without them the chrX region runs have no ``ref=``.
+    Surface that as a friendly pre-flight when chrX is in scope (finding-029).
+    """
+    includes_x = chromosomes_set is None or "X" in chromosomes_set
+    if not includes_x:
+        return
+    panel = ReferencePanel.resolve()
+    region_panels = (panel.chrx_par1_panel, panel.chrx_nonpar_panel, panel.chrx_par2_panel)
+    if not all(p.is_file() for p in region_panels):
+        msg = (
+            "chrX is in scope but the chrX region reference panels are missing. "
+            "Run `genome imputation panel prepare-chrx` first (M3-physical — finding-029)."
+        )
+        typer.echo(msg, err=True)
+        raise typer.Exit(code=1)
+
+
+def _chrx_in_run_scope(imputation_id: int, chromosomes_set: frozenset[str] | None) -> bool:
+    """True iff chrX will actually be imputed in this run (PR 5a).
+
+    chrX runs only when it is in the chromosome scope AND a chrX upload VCF was
+    prepared for this run. An autosome-only corpus (no chrX upload) never trips
+    the chrX preconditions, even on a full run, so the chrX gates fire exactly
+    when chrX is genuinely about to be imputed.
+    """
+    if chromosomes_set is not None and "X" not in chromosomes_set:
+        return False
+    archive = ImputationArchive.for_run(get_settings().archive_path, imputation_id)
+    # M3-physical: chrX is prepared as region targets under chrX_regions/, not a
+    # top-level upload/chrX.vcf.gz. The non-PAR region is always present when chrX
+    # has any exportable rows, so it is the presence signal (PR 5a).
+    return archive.chrx_region_upload_path("nonpar").is_file()
+
+
 @imputation_app.command("prepare")
 def imputation_prepare(
     sample_id: Annotated[
@@ -372,6 +453,10 @@ def imputation_prepare(
             ),
         ),
     ] = False,
+    sex: Annotated[
+        str,
+        typer.Option("--sex", help=_SEX_FLAG_HELP),
+    ] = "auto",
 ) -> None:
     """Export the merged consensus genotype set as per-chromosome VCFs.
 
@@ -381,10 +466,11 @@ def imputation_prepare(
     panel, then ``genome imputation import <id>`` to ingest the imputed
     output. See ``docs/runbooks/imputation.md`` for the end-to-end flow.
     """
-    result = prepare_run(sample_id=sample_id, force_new=force_new)
+    result = prepare_run(sample_id=sample_id, force_new=force_new, sex=_normalize_sex_flag(sex))
     typer.echo(
         f"imputation_id={result.imputation_id} "
         f"variants={result.variants_total} "
+        f"profile_sex={result.profile_sex} "
         f"chroms_exported={sorted(result.variants_per_chrom)} "
         f"upload_dir={result.archive.upload_dir}",
     )
@@ -409,10 +495,26 @@ def imputation_import(  # noqa: PLR0913 — one CLI flag per operational control
             help=(
                 "Variants with INFO/R2 below this threshold are skipped at import "
                 "time and never written to genotype_calls. Recorded on the run's "
-                "imputation_runs.r2_threshold column."
+                "imputation_runs.r2_threshold column. Does not apply to male non-PAR "
+                "chrX, which uses --dconf-threshold (DR2 is dead there; finding-031)."
             ),
         ),
     ] = DEFAULT_R2_THRESHOLD,
+    dconf_threshold: Annotated[
+        float,
+        typer.Option(
+            "--dconf-threshold",
+            min=0.5,
+            max=1.0,
+            help=(
+                "Male non-PAR chrX gate: keep variants whose dosage-confidence "
+                "max(DS, 1-DS) is at or above this (default 0.9). DR2 is structurally "
+                "0 for single-sample male hemizygous non-PAR, so this replaces it "
+                "there; typed anchors (integer DS) score 1.0 and always survive "
+                "(finding-031)."
+            ),
+        ),
+    ] = DEFAULT_DCONF_THRESHOLD,
     chromosomes: Annotated[
         str | None,
         typer.Option(
@@ -456,6 +558,10 @@ def imputation_import(  # noqa: PLR0913 — one CLI flag per operational control
             ),
         ),
     ] = False,
+    sex: Annotated[
+        str,
+        typer.Option("--sex", help=_SEX_FLAG_HELP),
+    ] = "auto",
 ) -> None:
     """Stream the imputed VCFs into the database.
 
@@ -475,7 +581,9 @@ def imputation_import(  # noqa: PLR0913 — one CLI flag per operational control
     result = import_result(
         imputation_id,
         r2_threshold=r2_threshold,
+        dconf_threshold=dconf_threshold,
         chromosomes=chromosomes_set,
+        sex=_normalize_sex_flag(sex),
         batch_size=batch_size,
         dry_run=dry_run,
         force_reimport=force_reimport,
@@ -485,6 +593,8 @@ def imputation_import(  # noqa: PLR0913 — one CLI flag per operational control
         typer.echo(
             f"[dry-run] imputation_id={result.imputation_id} "
             f"r2_threshold={result.r2_threshold:.4f} "
+            f"dconf_threshold={result.dconf_threshold:.4f} "
+            f"profile_sex={result.profile_sex or '-'} "
             f"chromosomes={list(result.chromosomes_planned)} "
             f"variants_total={result.variants_total} "
             f"variants_below_threshold={result.variants_below_threshold} "
@@ -507,6 +617,9 @@ def imputation_import(  # noqa: PLR0913 — one CLI flag per operational control
         f"new_master_rows={result.new_variants_master_rows} "
         f"deactivated_prior={result.deactivated_prior_calls} "
         f"r2_threshold={result.r2_threshold:.4f} "
+        f"dconf_threshold={result.dconf_threshold:.4f} "
+        f"profile_sex={result.profile_sex or '-'} "
+        f"nonpar_confident={result.nonpar_confident} "
         f"chromosomes={list(result.chromosomes_imported)} "
         f"mean_r2={mean_r2} "
         f"r2_above_0.3={result.variants_above_r2_0_3} "
@@ -604,6 +717,10 @@ def imputation_run(  # noqa: PLR0913 — one CLI flag per operational control
             ),
         ),
     ] = False,
+    sex: Annotated[
+        str,
+        typer.Option("--sex", help=_SEX_FLAG_HELP),
+    ] = "auto",
 ) -> None:
     """Run Beagle 5.5 against the prepared upload VCFs for one run.
 
@@ -623,6 +740,13 @@ def imputation_run(  # noqa: PLR0913 — one CLI flag per operational control
         chromosomes_set = _parse_run_chromosomes(chromosomes)
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--chromosomes") from exc
+
+    # chrX imputation needs a determinate profile sex and the region panel subsets.
+    # Gate both before the long run — but only when chrX will actually run (in
+    # scope AND chrX region targets exist), so autosome-only runs are unaffected.
+    if _chrx_in_run_scope(imputation_id, chromosomes_set):
+        _gate_chrx_sex(chromosomes_set, sex)
+        _require_chrx_region_panels(chromosomes_set)
 
     result = run_imputation(
         imputation_id,
@@ -654,6 +778,89 @@ def imputation_run(  # noqa: PLR0913 — one CLI flag per operational control
             "Next step: `genome imputation import <id>` to load the imputed "
             "VCFs into genotype_calls and variants_master.",
         )
+
+
+@imputation_app.command("chrx-loo")
+def imputation_chrx_loo(  # noqa: PLR0913 — one CLI flag per operational control
+    imputation_id: Annotated[int, typer.Argument(help="Run ID.")],
+    n_folds: Annotated[
+        int,
+        typer.Option(
+            "--n-folds",
+            min=2,
+            help="Number of disjoint leave-one-out folds (default 5).",
+        ),
+    ] = DEFAULT_N_FOLDS,
+    dconf_threshold: Annotated[
+        float,
+        typer.Option(
+            "--dconf-threshold",
+            min=0.5,
+            max=1.0,
+            help=(
+                "Dosage-confidence gate to validate (default 0.9). LOO measures the "
+                "concordance achieved at this fixed threshold — it does not search "
+                "for a looser one (finding-031)."
+            ),
+        ),
+    ] = DEFAULT_DCONF_THRESHOLD,
+    threads: Annotated[
+        int | None,
+        typer.Option("--threads", min=1, help="Beagle threads (default max(1, cpus-1))."),
+    ] = None,
+    memory_gb: Annotated[
+        int,
+        typer.Option("--memory-gb", min=1, help="Java heap for Beagle (default 8 GB)."),
+    ] = DEFAULT_MEMORY_GB,
+    ne: Annotated[
+        int,
+        typer.Option("--ne", min=1, help="Beagle effective population size (default 1,000,000)."),
+    ] = DEFAULT_NE,
+) -> None:
+    """Validate the male non-PAR chrX dosage gate by 5-fold leave-one-out.
+
+    Holds out the user's own typed non-PAR anchors in disjoint folds, re-imputes
+    each masked fold against the native non-PAR panel subset, and reports how
+    often the dosage-confidence-gated call matches the held-out truth — the
+    accuracy-grounded PASS criterion that replaces the structurally-dead non-PAR
+    DR2 (finding-031). A long op: per-fold Beagle, progress in the structlog
+    output, scratch under archive/imputation/run_<id>/loo/ (never /tmp).
+
+    Requires the male non-PAR target from `genome imputation prepare --sex M` and
+    the chrX region panels from `genome imputation panel prepare-chrx`.
+    """
+    try:
+        report = run_chrx_loo(
+            imputation_id,
+            n_folds=n_folds,
+            dconf_threshold=dconf_threshold,
+            threads=threads,
+            memory_gb=memory_gb,
+            ne=ne,
+        )
+    except ChrxLooError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    conc = "-" if report.concordance is None else f"{report.concordance:.4f}"
+    typer.echo(
+        f"imputation_id={imputation_id} n_folds={report.n_folds} "
+        f"anchors={report.n_anchors} "
+        f"not_in_panel={report.n_anchors_not_in_panel} "
+        f"dconf_threshold={report.threshold:.4f} "
+        f"at_threshold={report.n_at_or_above_threshold} "
+        f"concordant={report.n_concordant_at_threshold} "
+        f"concordance@threshold={conc}",
+    )
+    typer.echo("MAF-x-dconf cells (maf_bin conf_bin n concordance):")
+    for cell in report.cells:
+        cell_conc = "-" if cell.concordance is None else f"{cell.concordance:.4f}"
+        typer.echo(f"  maf={cell.maf_bin} conf={cell.conf_bin} n={cell.n} conc={cell_conc}")
+    typer.echo(
+        "PASS criterion: concordance@threshold >= 0.95 with no high-confidence "
+        "cell collapsing (finding-031). Report: archive/imputation/"
+        f"run_{imputation_id:04d}/loo/REPORT.json",
+    )
 
 
 @imputation_app.command("list")
@@ -793,6 +1000,50 @@ def panel_install(
         typer.echo(f"after install, {len(problems)} component(s) still missing:")
         for p in problems:
             typer.echo(f"  - {p}")
+
+
+@panel_app.command("prepare-chrx")
+def panel_prepare_chrx(
+    force: Annotated[  # noqa: FBT002 — typer boolean flag, --force is opt-in
+        bool,
+        typer.Option(
+            "--force",
+            help="Rebuild the chrX region subsets even if they already exist.",
+        ),
+    ] = False,
+) -> None:
+    """Split the chrX reference panel into native region subsets for Beagle (M3 — finding-029).
+
+    Emits three native (un-diploidized) subsets of the installed 1000G chrX panel
+    — ``chrX.par1.vcf.gz`` / ``chrX.nonpar.vcf.gz`` / ``chrX.par2.vcf.gz`` — via
+    ``bcftools view -r``, so each region loads into Beagle 5.5 with the
+    biologically-correct ploidy (male non-PAR stays haploid). Required before
+    ``genome imputation run`` with chrX in scope; one-time and idempotent. Ensures
+    the panel ``.tbi`` first and asserts each subset's ploidy composition.
+    Requires ``bcftools`` on PATH.
+    """
+    panel = ReferencePanel.resolve()
+    try:
+        result = prepare_chrx_panel(panel, force=force)
+    except ChrxToolingError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    if result.skipped:
+        typer.echo(
+            f"chrX region panels already present: {result.par1_path.name}, "
+            f"{result.nonpar_path.name}, {result.par2_path.name} "
+            "(pass --force to rebuild)",
+        )
+        return
+    typer.echo(
+        f"chrX panel split into region subsets beside {result.par1_path.parent}: "
+        f"{result.par1_path.name}, {result.nonpar_path.name}, {result.par2_path.name} "
+        f"(non-PAR haploid GTs={result.nonpar_haploid_gts})",
+    )
+    typer.echo(
+        "Next: `genome imputation run <id> --chromosomes X` (or a full run including X).",
+    )
 
 
 @app.command()

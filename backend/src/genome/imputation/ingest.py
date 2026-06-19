@@ -44,7 +44,8 @@ Schema fields we write:
 from __future__ import annotations
 
 import contextlib
-import os
+import json
+import math
 import re
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -56,6 +57,7 @@ import structlog
 from genome.config import get_settings
 from genome.db.duckdb_conn import duckdb_connection
 from genome.imputation.archive import ImputationArchive
+from genome.imputation.bgzf import is_truncated_bgzf
 from genome.imputation.runs import (
     ImputationRun,
     fetch_run,
@@ -63,6 +65,7 @@ from genome.imputation.runs import (
     update_status,
 )
 from genome.ingest.writer import insert_ingestion_run
+from genome.par_regions import is_nonpar
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -78,6 +81,25 @@ IMPUTATION_PIPELINE_VERSION: Final[str] = "imputation_import_v0.1.0"
 DEFAULT_BATCH_SIZE: Final[int] = 50_000
 DEFAULT_R2_THRESHOLD: Final[float] = 0.3
 _R2_THRESHOLDS: Final[tuple[float, float]] = (0.3, 0.8)
+
+# Male hemizygous non-PAR chrX has no cross-sample dosage variance for a single
+# sample, so Beagle's INFO/DR2 is structurally 0.00 there (finding-031) — a dead
+# metric, not a quality signal. For that regime we gate on dosage-confidence
+# instead: ``max(DS, 1 - DS)`` over the haploid FORMAT/DS, which equals Beagle's
+# max genotype-posterior for a hemizygous call. Typed anchors carry an integer DS
+# (dconf = 1.0) and so always survive — this is what fixes the acute regression
+# where the DR2 gate dropped even the user's own non-PAR genotypes.
+DEFAULT_DCONF_THRESHOLD: Final[float] = 0.9
+# Provenance marker appended to ``genotype_calls.quality_flags`` for rows whose
+# ``imputation_r2`` carries a dosage-confidence value rather than a DR2 (the
+# documented overload, finding-031). Keeps the DR2 run-counters uncontaminated
+# and the overloaded rows queryable.
+DCONF_QUALITY_FLAG: Final[str] = "nonpar_dosage_conf"
+# Re-diploidized male non-PAR DS is on the 0..1 haploid scale (the re-diploidizer
+# copies the haploid DS verbatim onto the 1|1 GT — chrx_panel.py:69-82). A value
+# above 1 means the seam changed and DS is now diploid-scaled (0..2); that must
+# fail loudly rather than silently mis-gate, so we assert DS <= 1 + this epsilon.
+_DS_SCALE_EPS: Final[float] = 1e-4
 # Empirical: ~30M variants stream in ~30 min on a dev machine
 # (the benchmark test confirms 1M rows clear in well under 60s).
 # Rate used for the dry-run time estimate.
@@ -105,23 +127,6 @@ def _dbsnp_rsid_or_none(vcf_id: str | None) -> str | None:
     return vcf_id if _DBSNP_RSID_RE.match(vcf_id) else None
 
 
-# A cleanly-closed BGZF file (Beagle's .vcf.gz output) ends with this 28-byte
-# empty-block EOF marker (htslib's BGZF_EOF). Its absence on a BGZF file means
-# the writer died mid-stream — the truncated result/chrX.vcf.gz of
-# finding-008 #2, which cyvcf2 reads as zero variants with only a
-# "[W::bgzf_read_block] EOF marker is absent" warning rather than an error.
-_BGZF_EOF_MARKER: Final[bytes] = bytes.fromhex(
-    "1f8b08040000000000ff0600424302001b0003000000000000000000",
-)
-# A BGZF block starts with the gzip+deflate magic (1f 8b 08) and sets the
-# FEXTRA flag (0x04) for its per-block size subfield. Plain gzip — our synthetic
-# fixtures and the prepare-step upload VCFs — leaves FEXTRA unset, so this
-# distinguishes real Beagle BGZF output from plain gzip and limits the
-# EOF-marker check to the former.
-_GZIP_DEFLATE_MAGIC: Final[bytes] = b"\x1f\x8b\x08"
-_GZIP_FLG_FEXTRA: Final[int] = 0x04
-
-
 @dataclass(slots=True)
 class _ImportCounters:
     """Mutable accumulators threaded through the streaming ingest."""
@@ -132,6 +137,10 @@ class _ImportCounters:
     variants_above_r2_0_3: int = 0
     variants_above_r2_0_8: int = 0
     variants_below_threshold: int = 0
+    # Male non-PAR chrX rows kept on the dosage-confidence gate (finding-031).
+    # Reported separately so the DR2 run-stats stay pure; this is the positive
+    # yield signal for the chrX gate (expected order 10^4-10^5).
+    nonpar_confident: int = 0
     r2_sum: float = 0.0
     r2_count: int = 0
     autosomal_called: int = 0
@@ -140,6 +149,11 @@ class _ImportCounters:
     x_het: int = 0
     y_called: int = 0
     per_chrom: dict[str, int] = field(default_factory=dict)
+    # Records actually read from each chromosome's VCF *before* any biallelic /
+    # R²-threshold filter. The empty-output guard (finding-008 #2) keys on this:
+    # a chromosome whose file streamed zero raw records despite a non-trivial
+    # prepare-manifest upload count is a silent Beagle failure.
+    raw_per_chrom: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -155,6 +169,9 @@ class _Batch:
     allele_2: list[str | None] = field(default_factory=list)
     is_no_call: list[bool] = field(default_factory=list)
     imputation_r2: list[float | None] = field(default_factory=list)
+    # Per-row ``quality_flags`` (``VARCHAR[]``): ``[DCONF_QUALITY_FLAG]`` for a
+    # dosage-confidence-gated male non-PAR row, ``None`` otherwise (finding-031).
+    quality_flags: list[list[str] | None] = field(default_factory=list)
 
     def __len__(self) -> int:
         return len(self.pos)
@@ -169,6 +186,7 @@ class _Batch:
         self.allele_2.clear()
         self.is_no_call.clear()
         self.imputation_r2.clear()
+        self.quality_flags.clear()
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +206,9 @@ class ImportResult:
     variants_above_r2_0_3: int
     variants_above_r2_0_8: int
     r2_threshold: float
+    dconf_threshold: float
+    nonpar_confident: int
+    profile_sex: str | None
     chromosomes_imported: tuple[str, ...]
 
 
@@ -206,6 +227,8 @@ class DryRunResult:
     variants_below_threshold: int
     per_chrom: dict[str, int]
     r2_threshold: float
+    dconf_threshold: float
+    profile_sex: str | None
     estimated_seconds: float
 
 
@@ -269,36 +292,119 @@ def _extract_r2(info: _cyvcf2_typing.INFO) -> float | None:
     return None
 
 
-def _is_bgzf(path: Path) -> bool:
-    """Return True if ``path`` is a BGZF file (vs. plain gzip / uncompressed).
+def _extract_ds(variant: _cyvcf2_typing.Variant) -> float | None:
+    """Return ``FORMAT/DS`` (alt dosage) for the single sample, or ``None``.
 
-    Beagle writes BGZF; our synthetic test fixtures and the prepare-step upload
-    VCFs use plain ``gzip.open``. Only BGZF carries the EOF marker checked by
-    :func:`_has_bgzf_eof`, so plain gzip is exempt from the truncation guard.
+    cyvcf2 returns the per-sample DS as a ``(n_samples, 1)`` float32 array. It
+    *raises ``KeyError``* when the DS tag is not declared in the file header (the
+    chip / DR2-only fixtures), and returns ``None`` (or NaN at ``[0][0]``) when
+    the tag is declared but absent for this record/sample. All three map to
+    ``None`` here. We read sample 0 only — the imputation pipeline is
+    single-sample throughout. ``None`` lets the male non-PAR branch of
+    :func:`_variant_quality` fail closed rather than mis-gate.
     """
     try:
-        with path.open("rb") as fh:
-            head = fh.read(4)
-    except OSError:
-        return False
-    return (
-        head.startswith(_GZIP_DEFLATE_MAGIC)
-        and len(head) > len(_GZIP_DEFLATE_MAGIC)
-        and bool(head[3] & _GZIP_FLG_FEXTRA)
-    )
+        arr = variant.format("DS")
+    except KeyError:
+        return None
+    if arr is None or arr.size == 0:
+        return None
+    value = float(arr[0][0])
+    if math.isnan(value):
+        return None
+    return value
 
 
-def _has_bgzf_eof(path: Path) -> bool:
-    """Return True if BGZF ``path`` ends with the canonical 28-byte EOF marker."""
-    marker_len = len(_BGZF_EOF_MARKER)
+def _extract_imp(variant: _cyvcf2_typing.Variant) -> bool:
+    """Return True iff the variant carries Beagle's ``INFO/IMP`` flag (imputed site).
+
+    Beagle stamps ``IMP`` on sites it **imputed** and omits it on **typed**
+    (genotyped) sites carried over from the target. The male non-PAR gate uses
+    this to keep every typed anchor (observed → always retained) while gating
+    imputed sites on confident-ALT dosage (finding-031). A VCF that declares no
+    ``IMP`` (non-Beagle output / fixtures) yields ``False`` everywhere, so its
+    male non-PAR rows are treated as observed and kept — the conservative
+    anchor-retaining default.
+    """
     try:
-        if path.stat().st_size < marker_len:
-            return False
-        with path.open("rb") as fh:
-            fh.seek(-marker_len, os.SEEK_END)
-            return fh.read(marker_len) == _BGZF_EOF_MARKER
-    except OSError:
+        return variant.INFO.get("IMP") is not None
+    except KeyError:
         return False
+
+
+@dataclass(frozen=True, slots=True)
+class _QualityVerdict:
+    """Outcome of the per-variant import gate (:func:`_variant_quality`)."""
+
+    keep: bool
+    quality: float | None
+    """The value to store in ``genotype_calls.imputation_r2``: the DR2 on the
+    DR2 path (may be ``None``), or the dosage-confidence on the dconf path."""
+    is_dconf: bool
+    """True when ``quality`` is a dosage-confidence (male non-PAR), so the caller
+    appends :data:`DCONF_QUALITY_FLAG` and keeps it out of the DR2 counters."""
+
+
+def _variant_quality(  # noqa: PLR0913 — the shared gate needs full variant context + both thresholds
+    *,
+    chrom: str,
+    pos: int,
+    profile_sex: str | None,
+    r2: float | None,
+    ds: float | None,
+    is_imputed: bool,
+    r2_threshold: float,
+    dconf_threshold: float,
+) -> _QualityVerdict:
+    """The single keep/drop + quality decision shared by import and dry-run.
+
+    Both :func:`_stream_chromosome` (the writing path) and
+    :func:`_count_chromosome_variants` (the dry-run count) route through here so
+    the two cannot diverge.
+
+    For a **male, non-PAR chrX** variant (``chrom == 'X'`` ∧ ``profile_sex == 'M'``
+    ∧ :func:`genome.par_regions.is_nonpar`) the DR2 is structurally 0.00
+    (finding-031), so the gate uses the live dosage signal instead, keeping the
+    **informative** subset:
+
+    * a **typed** site (``is_imputed`` False — no ``INFO/IMP``) is the user's own
+      observed genotype and is **always kept** (anchor retention);
+    * an **imputed** site is kept iff it is a **confident ALT-bearing** call,
+      ``DS >= dconf_threshold``. Confident hom-ref imputed (``DS`` near 0) and the
+      uncertain middle are dropped — the user is ref-by-default there and keeping
+      ~2.2M confident hom-ref imputed rows would balloon the corpus for little
+      insight (the decision recorded in finding-031).
+
+    Either way the stored ``quality`` is the dosage-confidence ``max(DS, 1 - DS)``
+    (= ``DS`` for a kept confident-ALT call, ``1.0`` for a typed anchor). A missing
+    DS fails closed (raises); a DS above the 0..1 haploid scale trips the scale
+    guard (raises) rather than silently mis-gating. Every other variant —
+    autosomes, male PAR, and the genuinely-diploid female X — keeps the existing
+    DR2 gate (keep iff ``r2 is None or r2 >= r2_threshold``).
+    """
+    if chrom == "X" and profile_sex == "M" and is_nonpar(pos):
+        if ds is None:
+            msg = (
+                f"male non-PAR chrX variant at chrX:{pos} has no FORMAT/DS; the "
+                "dosage-confidence gate cannot evaluate it. Refusing to fall back "
+                "to the (structurally dead) DR2 gate, which would drop it "
+                "(finding-031)."
+            )
+            raise RuntimeError(msg)
+        if ds > 1.0 + _DS_SCALE_EPS:
+            msg = (
+                f"male non-PAR chrX DS={ds} at chrX:{pos} exceeds the 0..1 haploid "
+                "scale; the re-diploidize seam must have changed (DS now diploid-"
+                "scaled). Refusing to mis-gate (finding-031)."
+            )
+            raise RuntimeError(msg)
+        dconf = max(ds, 1.0 - ds)
+        # Typed anchor → always kept; imputed → only a confident ALT-bearing call.
+        keep = True if not is_imputed else ds >= dconf_threshold
+        return _QualityVerdict(keep=keep, quality=dconf, is_dconf=True)
+
+    keep = r2 is None or r2 >= r2_threshold
+    return _QualityVerdict(keep=keep, quality=r2, is_dconf=False)
 
 
 def _assert_result_vcf_intact(path: Path) -> None:
@@ -309,7 +415,7 @@ def _assert_result_vcf_intact(path: Path) -> None:
     file as zero (or partially-zero) variants with only a warning, so a broken
     run would otherwise import as a silent empty success. Raise instead.
     """
-    if _is_bgzf(path) and not _has_bgzf_eof(path):
+    if is_truncated_bgzf(path):
         msg = (
             f"result VCF {path} is a truncated BGZF file (missing its EOF "
             "marker); the imputation runner almost certainly failed mid-write "
@@ -382,9 +488,17 @@ def _accept_variant(  # noqa: PLR0913 — per-variant columns mirror the VCF row
     allele_1: str | None,
     allele_2: str | None,
     is_no_call: bool,
-    r2: float | None,
+    quality: float | None,
+    is_dconf: bool,
 ) -> None:
-    """Append one already-validated variant to the batch and update counters."""
+    """Append one already-validated variant to the batch and update counters.
+
+    ``quality`` is stored verbatim into ``imputation_r2``. When ``is_dconf`` it is
+    a dosage-confidence (male non-PAR, finding-031): it is kept out of the DR2
+    counters (so ``mean_r2`` / ``variants_above_r2_*`` stay pure DR2) and counted
+    in ``nonpar_confident`` instead, and the row is flagged
+    :data:`DCONF_QUALITY_FLAG`.
+    """
     counters.variants_total += 1
     if is_no_call:
         counters.variants_no_call += 1
@@ -396,7 +510,10 @@ def _accept_variant(  # noqa: PLR0913 — per-variant columns mirror the VCF row
             allele_1=allele_1,
             allele_2=allele_2,
         )
-    _update_r2_counters(counters, r2)
+    if is_dconf:
+        counters.nonpar_confident += 1
+    else:
+        _update_r2_counters(counters, quality)
     counters.per_chrom[chrom] = counters.per_chrom.get(chrom, 0) + 1
 
     batch.rsid.append(rsid)
@@ -407,25 +524,28 @@ def _accept_variant(  # noqa: PLR0913 — per-variant columns mirror the VCF row
     batch.allele_1.append(allele_1)
     batch.allele_2.append(allele_2)
     batch.is_no_call.append(is_no_call)
-    batch.imputation_r2.append(r2)
+    batch.imputation_r2.append(quality)
+    batch.quality_flags.append([DCONF_QUALITY_FLAG] if is_dconf else None)
 
 
-def _stream_chromosome(
+def _stream_chromosome(  # noqa: PLR0913 — streaming knobs mirror the import option surface
     path: Path,
     chrom: str,
     counters: _ImportCounters,
     *,
+    profile_sex: str | None,
     r2_threshold: float,
+    dconf_threshold: float,
     batch_size: int,
 ) -> Iterator[_Batch]:
     """Yield batches of normalized rows from one chromosome's imputed VCF.
 
-    Variants whose imputation R² (INFO/DR2 or fallback) falls below
-    ``r2_threshold`` are skipped before the batch grows — they don't reach
-    ``variants_master`` or ``genotype_calls`` and are accounted for in
-    ``counters.variants_below_threshold``. Variants missing an R² value pass
-    through (matching the pre-filter behavior; rare on Beagle output but
-    defensible for non-Beagle VCFs).
+    Each variant is gated by :func:`_variant_quality`: male non-PAR chrX uses the
+    dosage-confidence gate (``dconf_threshold``), everything else the DR2 gate
+    (``r2_threshold``). Dropped variants don't reach ``variants_master`` or
+    ``genotype_calls`` and are counted in ``counters.variants_below_threshold``.
+    DR2-path variants missing an R² value pass through (matching the pre-filter
+    behavior; rare on Beagle output but defensible for non-Beagle VCFs).
     """
     log = logger.bind(path=str(path), chrom=chrom)
     log.info("imputation.import.chrom.start")
@@ -439,12 +559,30 @@ def _stream_chromosome(
                 # silently. Beagle should never produce this, but a misnamed
                 # file would otherwise corrupt the per-chrom counters.
                 continue
+            # Count the raw record *before* the biallelic / quality filters so the
+            # empty-output guard can tell "Beagle produced nothing" (a silent
+            # failure) apart from "every variant fell below threshold"
+            # (legitimate — raw > 0).
+            counters.raw_per_chrom[chrom] = counters.raw_per_chrom.get(chrom, 0) + 1
             alts = tuple(str(a) for a in v.ALT or [])
             if not _is_biallelic_snv(str(v.REF), alts):
                 continue
 
+            pos = int(v.POS)
             r2 = _extract_r2(v.INFO)
-            if r2 is not None and r2 < r2_threshold:
+            ds = _extract_ds(v) if chrom == "X" else None
+            is_imputed = _extract_imp(v) if chrom == "X" else False
+            verdict = _variant_quality(
+                chrom=chrom,
+                pos=pos,
+                profile_sex=profile_sex,
+                r2=r2,
+                ds=ds,
+                is_imputed=is_imputed,
+                r2_threshold=r2_threshold,
+                dconf_threshold=dconf_threshold,
+            )
+            if not verdict.keep:
                 counters.variants_below_threshold += 1
                 continue
 
@@ -463,14 +601,15 @@ def _stream_chromosome(
                 counters,
                 batch,
                 chrom=chrom,
-                pos=int(v.POS),
+                pos=pos,
                 rsid=_dbsnp_rsid_or_none(v.ID),
                 ref=str(v.REF),
                 alt=alts[0],
                 allele_1=allele_1,
                 allele_2=allele_2,
                 is_no_call=is_no_call,
-                r2=r2,
+                quality=verdict.quality,
+                is_dconf=verdict.is_dconf,
             )
 
             if len(batch) >= batch_size:
@@ -501,7 +640,8 @@ def _create_stage_table(conn: DuckDBPyConnection) -> None:
             allele_1       VARCHAR,
             allele_2       VARCHAR,
             is_no_call     BOOLEAN,
-            imputation_r2  DOUBLE
+            imputation_r2  DOUBLE,
+            quality_flags  VARCHAR[]
         )
         """,
     )
@@ -524,6 +664,7 @@ def _stage_batch(conn: DuckDBPyConnection, batch: _Batch) -> None:
             "allele_2": pa.array(batch.allele_2, type=pa.string()),
             "is_no_call": pa.array(batch.is_no_call, type=pa.bool_()),
             "imputation_r2": pa.array(batch.imputation_r2, type=pa.float64()),
+            "quality_flags": pa.array(batch.quality_flags, type=pa.list_(pa.string())),
         },
     )
     try:
@@ -630,6 +771,77 @@ def _deactivate_prior_imputed_calls(
     return 0
 
 
+# ``discrepancies`` is the only table that FK-references ``genotype_calls(call_id)``
+# (``call_a_id`` / ``call_b_id``; ddl/group_1_genotype.sql). A discrepancy row that
+# references an *active* ``beagle_imputed`` call is exactly a row that can block the
+# supersession ``UPDATE genotype_calls SET is_active = FALSE`` in
+# :func:`_deactivate_prior_imputed_calls`: that UPDATE touches the indexed
+# ``is_active`` (``idx_gc_active``), so DuckDB runs it as delete+reinsert of the row,
+# which fires the parent-side FK. Every call this import supersedes is an active
+# imputed call when the gate runs (before the import transaction), so this count is
+# a superset of the blockers — non-zero means the pre-clear must fire (finding-032).
+_IMPUTED_REFERENCING_DISCREPANCIES_COUNT_SQL: Final[str] = """
+SELECT COUNT(*)
+  FROM discrepancies
+ WHERE call_a_id IN (
+        SELECT call_id FROM genotype_calls
+         WHERE source = 'beagle_imputed'::source_enum AND is_active)
+    OR call_b_id IN (
+        SELECT call_id FROM genotype_calls
+         WHERE source = 'beagle_imputed'::source_enum AND is_active)
+"""
+
+
+def _preclear_discrepancies_for_supersession(conn: DuckDBPyConnection) -> int:
+    """Clear ``discrepancies`` before the import TX so supersession is FK-safe.
+
+    :func:`_deactivate_prior_imputed_calls` flips ``genotype_calls.is_active`` to
+    FALSE on the prior imputed calls. ``is_active`` is indexed (``idx_gc_active``),
+    so DuckDB runs that UPDATE as delete+reinsert of each row, firing the
+    parent-side FK from ``discrepancies(call_a_id / call_b_id)`` ->
+    ``genotype_calls(call_id)`` — the only table that FK-references
+    ``genotype_calls``. DuckDB's FK enforcement reads *pre-transaction* state, so
+    any referencing ``discrepancies`` rows must be gone as of a prior **committed**
+    transaction; an in-transaction delete is invisible to the check. This is the
+    same TX0 split :mod:`genome.annotate.canonicalize` and
+    :mod:`genome.annotate.strand_collapse` use for the identical quirk
+    (finding-020, finding-032).
+
+    Gated on the presence of >= 1 discrepancy referencing an active
+    ``beagle_imputed`` call. When present we ``DELETE FROM discrepancies``
+    wholesale, matching both TX0 precedents and the ``collapse-duplicate-variants``
+    / ``merge`` steps that immediately follow in the reload runbook and rebuild it
+    from the active calls. A first import (or any state with no imputed-referencing
+    discrepancy) is a no-op, so additive ingests and the chip-only state are left
+    untouched. Returns the number of ``discrepancies`` rows deleted.
+
+    Runs in its **own committed transaction**, before the caller opens the import
+    transaction. A crash after this commit (but before / within the import) leaves
+    ``discrepancies`` empty with ``genotype_calls`` otherwise intact — a
+    re-mergeable state, since ``merge`` rebuilds ``discrepancies`` + consensus.
+    """
+    gate = conn.execute(_IMPUTED_REFERENCING_DISCREPANCIES_COUNT_SQL).fetchone()
+    referencing = int(gate[0]) if gate is not None and gate[0] is not None else 0
+    if referencing == 0:
+        return 0
+    total = conn.execute("SELECT COUNT(*) FROM discrepancies").fetchone()
+    total_n = int(total[0]) if total is not None and total[0] is not None else 0
+    # Committed transaction (TX0) BEFORE the caller's import transaction: the
+    # referencing discrepancies must be gone as of a prior commit for DuckDB's
+    # pre-transaction FK check to clear the per-batch ``is_active`` flip. The
+    # explicit BEGIN also fails loudly if this is ever mis-placed inside an open
+    # transaction (DuckDB forbids a nested BEGIN), instead of silently re-breaking.
+    conn.execute("BEGIN TRANSACTION")
+    conn.execute("DELETE FROM discrepancies")
+    conn.execute("COMMIT")
+    logger.info(
+        "imputation.import.discrepancies_precleared",
+        referencing_active_imputed=referencing,
+        total_cleared=total_n,
+    )
+    return total_n
+
+
 def _insert_imputed_calls(
     conn: DuckDBPyConnection,
     *,
@@ -643,7 +855,7 @@ def _insert_imputed_calls(
             call_id, variant_id, source, source_chip_version, ingestion_run_id,
             genotype_raw, allele_1, allele_2, is_no_call,
             is_imputed, imputation_r2, imputation_panel,
-            raw_strand, strand_status, is_active
+            raw_strand, strand_status, quality_flags, is_active
         )
         SELECT
             ? + s.ord                          AS call_id,
@@ -662,6 +874,7 @@ def _insert_imputed_calls(
             ?                                  AS imputation_panel,
             '+'                                AS raw_strand,
             'resolved_plus'::strand_status_enum AS strand_status,
+            s.quality_flags                    AS quality_flags,
             TRUE                               AS is_active
           FROM _impute_stage s
           JOIN variants_master vm
@@ -775,7 +988,9 @@ def _process_one_vcf(  # noqa: PLR0913 — per-VCF parameters mirror the writer'
     run_id: int,
     superseded_reason: str,
     imputation_panel: str,
+    profile_sex: str | None,
     r2_threshold: float,
+    dconf_threshold: float,
     batch_size: int,
 ) -> tuple[int, int]:
     """Stream one VCF into the DB. Returns ``(new_master_rows, deactivated_calls)``."""
@@ -785,7 +1000,9 @@ def _process_one_vcf(  # noqa: PLR0913 — per-VCF parameters mirror the writer'
         path,
         chrom,
         counters,
+        profile_sex=profile_sex,
         r2_threshold=r2_threshold,
+        dconf_threshold=dconf_threshold,
         batch_size=batch_size,
     ):
         _create_stage_table(conn)
@@ -869,12 +1086,16 @@ def _count_chromosome_variants(
     path: Path,
     chrom: str,
     *,
+    profile_sex: str | None,
     r2_threshold: float,
+    dconf_threshold: float,
 ) -> tuple[int, int]:
     """Count ``(kept, dropped)`` variants for one chromosome's VCF.
 
-    Used by the dry-run path. Mirrors ``_stream_chromosome``'s filter rules
-    (chromosome match, biallelic SNV, R²-threshold) but writes nothing.
+    Used by the dry-run path. Routes every variant through the same
+    :func:`_variant_quality` decision as the real import (chromosome match,
+    biallelic SNV, then the region/sex-aware quality gate) but writes nothing, so
+    the dry-run count can never diverge from what the import would keep.
     """
     kept = 0
     dropped = 0
@@ -887,11 +1108,20 @@ def _count_chromosome_variants(
             alts = tuple(str(a) for a in v.ALT or [])
             if not _is_biallelic_snv(str(v.REF), alts):
                 continue
-            r2 = _extract_r2(v.INFO)
-            if r2 is not None and r2 < r2_threshold:
+            verdict = _variant_quality(
+                chrom=chrom,
+                pos=int(v.POS),
+                profile_sex=profile_sex,
+                r2=_extract_r2(v.INFO),
+                ds=_extract_ds(v) if chrom == "X" else None,
+                is_imputed=_extract_imp(v) if chrom == "X" else False,
+                r2_threshold=r2_threshold,
+                dconf_threshold=dconf_threshold,
+            )
+            if verdict.keep:
+                kept += 1
+            else:
                 dropped += 1
-                continue
-            kept += 1
     finally:
         reader.close()
     return kept, dropped
@@ -901,16 +1131,29 @@ def _run_dry_run(
     imputation_id: int,
     vcf_inputs: list[tuple[str, Path]],
     *,
+    profile_sex: str | None,
     r2_threshold: float,
+    dconf_threshold: float,
 ) -> DryRunResult:
     """Parse each VCF without writing to the DB. Returns the planned summary."""
     log = logger.bind(imputation_id=imputation_id, n_vcfs=len(vcf_inputs))
-    log.info("imputation.import.dry_run.start", r2_threshold=r2_threshold)
+    log.info(
+        "imputation.import.dry_run.start",
+        r2_threshold=r2_threshold,
+        dconf_threshold=dconf_threshold,
+        profile_sex=profile_sex,
+    )
     per_chrom: dict[str, int] = {}
     total = 0
     dropped_total = 0
     for chrom, path in vcf_inputs:
-        kept, dropped = _count_chromosome_variants(path, chrom, r2_threshold=r2_threshold)
+        kept, dropped = _count_chromosome_variants(
+            path,
+            chrom,
+            profile_sex=profile_sex,
+            r2_threshold=r2_threshold,
+            dconf_threshold=dconf_threshold,
+        )
         per_chrom[chrom] = kept
         total += kept
         dropped_total += dropped
@@ -936,6 +1179,8 @@ def _run_dry_run(
         variants_below_threshold=dropped_total,
         per_chrom=per_chrom,
         r2_threshold=r2_threshold,
+        dconf_threshold=dconf_threshold,
+        profile_sex=profile_sex,
         estimated_seconds=estimated_seconds,
     )
 
@@ -969,9 +1214,14 @@ class _ImportPlan:
     vcf_inputs: list[tuple[str, Path]]
 
 
-def _validate_import_options(*, r2_threshold: float, batch_size: int) -> None:
+def _validate_import_options(
+    *, r2_threshold: float, dconf_threshold: float, batch_size: int
+) -> None:
     if not 0.0 <= r2_threshold <= 1.0:
         msg = f"r2_threshold must be between 0.0 and 1.0, got {r2_threshold!r}"
+        raise ValueError(msg)
+    if not 0.5 <= dconf_threshold <= 1.0:  # noqa: PLR2004 — dconf = max(DS,1-DS) ∈ [0.5, 1]
+        msg = f"dconf_threshold must be between 0.5 and 1.0, got {dconf_threshold!r}"
         raise ValueError(msg)
     if batch_size <= 0:
         msg = f"batch_size must be positive, got {batch_size!r}"
@@ -1024,26 +1274,209 @@ def _plan_import(  # noqa: PLR0913 — option set comes from the public API surf
     return _ImportPlan(run=run, archive=archive, vcf_inputs=vcf_inputs)
 
 
+def _load_manifest(archive: ImputationArchive) -> dict[str, object] | None:
+    """Parse the prepare ``upload/MANIFEST.json`` into a dict, or ``None``.
+
+    Returns ``None`` when the manifest is absent or unparseable — the
+    ``explicit_vcf_paths`` / non-standard-layout case (e.g. the test fixtures and
+    pre-PR-5a archives) where there is no prepare manifest to trust.
+    """
+    try:
+        raw = archive.upload_manifest.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        payload: object = json.loads(raw)
+    except ValueError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _load_manifest_variants_per_chrom(archive: ImputationArchive) -> dict[str, int] | None:
+    """Read ``variants_per_chrom`` from the prepare ``MANIFEST.json``, or ``None``.
+
+    Returns ``None`` (guard disabled) when the manifest is absent or unparseable.
+    A present, well-formed manifest yields the per-chromosome *upload* counts the
+    empty-output guard compares against. Keys are the unprefixed chromosome labels
+    the prepare step writes (``"X"``, ``"1"``), matching the import loop's
+    ``chrom``.
+    """
+    payload = _load_manifest(archive)
+    if payload is None:
+        return None
+    per_chrom = payload.get("variants_per_chrom")
+    if not isinstance(per_chrom, dict):
+        return None
+    out: dict[str, int] = {}
+    for key, value in per_chrom.items():
+        with contextlib.suppress(TypeError, ValueError):
+            out[str(key)] = int(value)
+    return out
+
+
+def _manifest_profile_sex(archive: ImputationArchive) -> str | None:
+    """Return the prepare-time ``profile_sex`` (``'M'`` / ``'F'``) or ``None``.
+
+    The manifest records the sex the prepare step used to render the chrX target
+    (PR 5a). ``'ambiguous'``, a missing key, or no manifest all map to ``None`` —
+    the importer then uses the DR2 gate everywhere, the pre-PR-5a behavior.
+    """
+    payload = _load_manifest(archive)
+    if payload is None:
+        return None
+    value = payload.get("profile_sex")
+    return value if value in {"M", "F"} else None
+
+
+def _manifest_chrx_ploidy(archive: ImputationArchive) -> str | None:
+    """Return the prepare-time ``chrx_ploidy`` decision, or ``None``.
+
+    ``'male_nonpar_haploid'`` means the prepare step rendered the male non-PAR
+    target haploid, so its Beagle output is dosage-confidence territory (DR2 is
+    dead there). That is the signal the importer's fail-closed sex guard keys on.
+    """
+    payload = _load_manifest(archive)
+    if payload is None:
+        return None
+    value = payload.get("chrx_ploidy")
+    return str(value) if isinstance(value, str) else None
+
+
+def _normalize_sex_override(explicit: str | None) -> str | None:
+    """Normalize a caller-supplied sex override to ``'M'`` / ``'F'`` / ``None``.
+
+    ``None`` (and the string ``'auto'``, case-insensitive) mean "resolve from the
+    manifest". Anything else must be ``'M'`` / ``'F'`` or this raises so a typo
+    can't silently disable the male non-PAR gate.
+    """
+    if explicit is None:
+        return None
+    value = explicit.strip()
+    if value.lower() == "auto":
+        return None
+    upper = value.upper()
+    if upper in {"M", "F"}:
+        return upper
+    msg = f"sex override must be 'M', 'F', or 'auto'; got {explicit!r}"
+    raise ValueError(msg)
+
+
+def _resolve_import_profile_sex(archive: ImputationArchive, explicit: str | None) -> str | None:
+    """Resolve the profile sex the import gate branches on (PR 5a).
+
+    An explicit ``'M'`` / ``'F'`` override wins; otherwise fall back to the
+    manifest's prepare-time ``profile_sex``. ``None`` means "no determinate male
+    profile" → the DR2 gate is used for every chromosome (the pre-PR-5a path).
+    """
+    override = _normalize_sex_override(explicit)
+    if override is not None:
+        return override
+    return _manifest_profile_sex(archive)
+
+
+def _guard_male_chrx_sex(
+    archive: ImputationArchive,
+    *,
+    profile_sex: str | None,
+    chrx_in_scope: bool,
+) -> None:
+    """Fail closed when male-scoped chrX output can't be gated as male (PR 5a).
+
+    When the prepare manifest says the chrX target was rendered
+    ``male_nonpar_haploid`` and chrX is in this import's scope, the non-PAR Beagle
+    output is on the dead-DR2 / live-dosage-confidence regime (finding-031). If
+    the resolved ``profile_sex`` is not ``'M'``, the importer would fall back to
+    the DR2 gate and silently drop **all** non-PAR — the acute regression this PR
+    exists to fix. Refuse instead, pointing the user at ``--sex M``.
+    """
+    if not chrx_in_scope:
+        return
+    if _manifest_chrx_ploidy(archive) != "male_nonpar_haploid":
+        return
+    if profile_sex == "M":
+        return
+    msg = (
+        "the prepare manifest rendered the chrX target as 'male_nonpar_haploid', "
+        "but the profile sex did not resolve to 'M' "
+        f"(resolved {profile_sex!r}). Importing male non-PAR chrX under the DR2 "
+        "gate would drop every non-PAR call (DR2 is structurally 0 there, "
+        "finding-031). Pass --sex M to import it, or --chromosomes to exclude chrX."
+    )
+    raise RuntimeError(msg)
+
+
+def _assert_chrom_not_silently_empty(
+    *,
+    chrom: str,
+    raw_records: int,
+    manifest_per_chrom: dict[str, int] | None,
+) -> None:
+    """Refuse a cleanly-closed-yet-empty imputed result for a non-trivial input.
+
+    finding-008 #2 can leave a result VCF that cyvcf2 reads as zero variants
+    without raising. :func:`_assert_result_vcf_intact` catches the *truncated*
+    (missing-BGZF-EOF) shape; this guard catches the *cleanly-closed-empty*
+    shape by cross-checking the prepare manifest: if Beagle was handed >0
+    variants for ``chrom`` but its output streamed none, the run failed
+    silently. Skipped when no manifest is available (no trusted input count).
+    An all-below-R²-threshold chromosome is unaffected — it still streamed
+    ``raw_records > 0`` before the threshold dropped them.
+
+    For chrX under M3-physical (PR 5a) this guard keeps the whole-chromosome
+    backstop, but the *primary* per-region empty check now lives in the runner
+    (:func:`genome.imputation.beagle_runner._impute_chrx_regions`): a region
+    handed >0 chip inputs that imputes zero records fails there, *before* the
+    three regions are concatenated into the single ``result/chrX.vcf.gz`` this
+    function sees. The manifest's ``variants_per_chrom["X"]`` here is the sum
+    across regions, so a fully-empty chrX concat is still caught.
+    """
+    if manifest_per_chrom is None:
+        return
+    expected = manifest_per_chrom.get(chrom, 0)
+    if raw_records == 0 and expected > 0:
+        msg = (
+            f"imputed result for chr{chrom} streamed zero variant records, but the "
+            f"prepare manifest recorded {expected} uploaded variant(s) for it — the "
+            f"Beagle run for this chromosome almost certainly failed (finding-008). "
+            f"Re-run `genome imputation run <id>`, or import the intact chromosomes "
+            f"with `--chromosomes` (excluding chr{chrom})."
+        )
+        raise RuntimeError(msg)
+
+
 def _execute_import(  # noqa: PLR0913 — options pass through directly to the writers
     imputation_id: int,
     plan: _ImportPlan,
     *,
     duckdb_path: Path,
     imputation_panel: str,
+    profile_sex: str | None,
     r2_threshold: float,
+    dconf_threshold: float,
     batch_size: int,
 ) -> ImportResult:
     """Run the per-chromosome ingest transaction. Caller owns plan creation."""
     log = logger.bind(
         imputation_id=imputation_id,
         n_vcfs=len(plan.vcf_inputs),
+        profile_sex=profile_sex,
         r2_threshold=r2_threshold,
+        dconf_threshold=dconf_threshold,
         batch_size=batch_size,
     )
     log.info("imputation.import.start")
     counters = _ImportCounters()
 
     with duckdb_connection(duckdb_path) as conn:
+        # Pre-clear discrepancies that FK-reference active imputed calls, in a
+        # committed transaction *before* the import transaction opens. The per-batch
+        # supersession (``genotype_calls.is_active = FALSE``) delete+reinserts those
+        # rows (``is_active`` is indexed), firing the parent-side ``discrepancies``
+        # FK; DuckDB's FK check reads pre-transaction state, so the referencing rows
+        # must already be committed-away (finding-032; the same TX0 split
+        # canonicalize / strand_collapse use). ``merge`` rebuilds ``discrepancies``,
+        # and the reload always re-merges after import, so this is safe.
+        discrepancies_precleared = _preclear_discrepancies_for_supersession(conn)
         conn.execute("BEGIN TRANSACTION")
         try:
             run_id = insert_ingestion_run(
@@ -1060,6 +1493,9 @@ def _execute_import(  # noqa: PLR0913 — options pass through directly to the w
                 variants_no_call=0,
                 variants_imputed=0,
             )
+            manifest_per_chrom = _load_manifest_variants_per_chrom(plan.archive)
+            if manifest_per_chrom is None:
+                log.info("imputation.import.empty_guard.skipped_no_manifest")
             new_master_total = 0
             deactivated_total = 0
             for chrom, path in plan.vcf_inputs:
@@ -1071,8 +1507,15 @@ def _execute_import(  # noqa: PLR0913 — options pass through directly to the w
                     run_id=run_id,
                     superseded_reason=f"superseded by imputation_id {imputation_id}",
                     imputation_panel=imputation_panel,
+                    profile_sex=profile_sex,
                     r2_threshold=r2_threshold,
+                    dconf_threshold=dconf_threshold,
                     batch_size=batch_size,
+                )
+                _assert_chrom_not_silently_empty(
+                    chrom=chrom,
+                    raw_records=counters.raw_per_chrom.get(chrom, 0),
+                    manifest_per_chrom=manifest_per_chrom,
                 )
                 new_master_total += new_master
                 deactivated_total += deactivated
@@ -1131,8 +1574,10 @@ def _execute_import(  # noqa: PLR0913 — options pass through directly to the w
         "imputation.import.complete",
         variants_total=counters.variants_total,
         variants_below_threshold=counters.variants_below_threshold,
+        nonpar_confident=counters.nonpar_confident,
         new_master_rows=new_master_total,
         deactivated_prior_calls=deactivated_total,
+        discrepancies_precleared=discrepancies_precleared,
         mean_r2=mean_r2,
     )
     return ImportResult(
@@ -1149,6 +1594,9 @@ def _execute_import(  # noqa: PLR0913 — options pass through directly to the w
         variants_above_r2_0_3=counters.variants_above_r2_0_3,
         variants_above_r2_0_8=counters.variants_above_r2_0_8,
         r2_threshold=r2_threshold,
+        dconf_threshold=dconf_threshold,
+        nonpar_confident=counters.nonpar_confident,
+        profile_sex=profile_sex,
         chromosomes_imported=tuple(c for c, _ in plan.vcf_inputs),
     )
 
@@ -1161,7 +1609,9 @@ def import_result(  # noqa: PLR0913 — operational flags map 1:1 to schema/CLI 
     explicit_vcf_paths: tuple[Path, ...] | None = None,
     imputation_panel: str = "1000g_phase3_grch38",
     r2_threshold: float = DEFAULT_R2_THRESHOLD,
+    dconf_threshold: float = DEFAULT_DCONF_THRESHOLD,
     chromosomes: frozenset[str] | None = None,
+    sex: str | None = None,
     batch_size: int = DEFAULT_BATCH_SIZE,
     dry_run: bool = False,
     force_reimport: bool = False,
@@ -1181,7 +1631,18 @@ def import_result(  # noqa: PLR0913 — operational flags map 1:1 to schema/CLI 
     * ``r2_threshold`` (default ``0.3``): variants whose imputation R²
       (``INFO/DR2``, falling back to ``R2``/``Rsq``) is below ``r2_threshold``
       are skipped and never written to ``genotype_calls``. The threshold is
-      recorded on ``imputation_runs.r2_threshold``.
+      recorded on ``imputation_runs.r2_threshold``. Applies everywhere except
+      the male non-PAR chrX dosage-confidence regime below.
+    * ``dconf_threshold`` (default ``0.9``): for **male non-PAR chrX** the DR2 is
+      structurally dead (finding-031), so the gate switches to dosage-confidence
+      ``max(DS, 1 - DS)`` and keeps variants ``>= dconf_threshold``. The kept
+      dosage-confidence is stored into ``imputation_r2`` with a
+      ``'nonpar_dosage_conf'`` ``quality_flags`` marker (the documented overload);
+      these rows stay out of the DR2 run-stats.
+    * ``sex``: ``'M'`` / ``'F'`` override (or ``None`` / ``'auto'`` to resolve from
+      the prepare manifest's ``profile_sex``). Selects whether male non-PAR chrX
+      uses the dosage-confidence gate. A manifest that rendered the chrX target
+      ``male_nonpar_haploid`` fails closed unless this resolves to ``'M'``.
     * ``chromosomes``: optional set of chromosome labels (e.g. ``{"1","X"}``);
       when set, only matching files are processed.
     * ``batch_size`` (default ``50_000``): rows per Arrow Table bulk-insert.
@@ -1197,7 +1658,11 @@ def import_result(  # noqa: PLR0913 — operational flags map 1:1 to schema/CLI 
     db_path = duckdb_path or settings.genome_duckdb_path
     archive_root = archive_root or settings.archive_path
 
-    _validate_import_options(r2_threshold=r2_threshold, batch_size=batch_size)
+    _validate_import_options(
+        r2_threshold=r2_threshold,
+        dconf_threshold=dconf_threshold,
+        batch_size=batch_size,
+    )
     plan = _plan_import(
         imputation_id,
         duckdb_path=db_path,
@@ -1207,15 +1672,31 @@ def import_result(  # noqa: PLR0913 — operational flags map 1:1 to schema/CLI 
         dry_run=dry_run,
         force_reimport=force_reimport,
     )
+    # Resolve the profile sex the chrX gate branches on, then fail closed if the
+    # chrX output was rendered male-haploid but the sex did not resolve to 'M'
+    # (importing it under the DR2 gate would zero non-PAR — finding-031). Both
+    # the dry-run and the real import share this so the dry-run count matches.
+    profile_sex = _resolve_import_profile_sex(plan.archive, sex)
+    chrx_in_scope = any(chrom == "X" for chrom, _ in plan.vcf_inputs)
+    _guard_male_chrx_sex(plan.archive, profile_sex=profile_sex, chrx_in_scope=chrx_in_scope)
+
     if dry_run:
-        return _run_dry_run(imputation_id, plan.vcf_inputs, r2_threshold=r2_threshold)
+        return _run_dry_run(
+            imputation_id,
+            plan.vcf_inputs,
+            profile_sex=profile_sex,
+            r2_threshold=r2_threshold,
+            dconf_threshold=dconf_threshold,
+        )
 
     return _execute_import(
         imputation_id,
         plan,
         duckdb_path=db_path,
         imputation_panel=imputation_panel,
+        profile_sex=profile_sex,
         r2_threshold=r2_threshold,
+        dconf_threshold=dconf_threshold,
         batch_size=batch_size,
     )
 
