@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Dev infrastructure (finding-034): complete the per-scope agent team (Stages
+  2–5) on top of the shipped Plan-phase slice. Adds 17 new `.claude/agents/`
+  members — Stage 2 Implement (`implementer`, plan-blind `test-author`,
+  `plan-adherence-sentinel`, `green-keeper`, `test-triage`, `deep-debugger`,
+  `schema-change-executor`, `fan-out-implementer`), Stage 3 Review (9 lenses +
+  `finding-verifier` + `review-synthesizer` + `completeness-critic`), Stage 4
+  `handoff-assembler`, Stage 5 `knowledge-curator` + `repo-sweep` — plus two
+  segmented orchestrators (`implement-review.js` for Stages 2–3 ending at the
+  merge gate, `close.js` for Stage 5) and three authoring skills (`/changelog`,
+  `/new-finding`, `/pr-ready`). Writers (`Edit`/`Write`) are confined to the
+  Stage-2 implementers + the lone Stage-5 durable-doc curator; every review
+  member is read-only. The two human gates (plan approval, merge verification)
+  are preserved — the team produces the pre-gate package, never an auto-merge.
+  (#79)
 - Dev infrastructure (finding-034): build the Plan-phase slice (Stages 0–1) of
   the per-scope agent team. Adds the six read-only members under `.claude/agents/`
   (scope-dispatcher, planner, plan-judges, plan-synthesizer, plan-premortem,
