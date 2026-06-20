@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Dev infrastructure (finding-034): build the Plan-phase slice (Stages 0–1) of
+  the per-scope agent team. Adds the six read-only members under `.claude/agents/`
+  (scope-dispatcher, planner, plan-judges, plan-synthesizer, plan-premortem,
+  plan-auditor), the `.claude/workflows/plan-phase.js` orchestrator that chains
+  them for one ROADMAP scope (tier-driven parallel fan-out → judges → synthesis →
+  pre-mortem → audit, with a bounded ×2 revise loop, never auto-approving), and
+  three enforcement hooks wired via `.claude/settings.json`: a hard block on
+  Edit/Write under `docs/schemas/`|`ddl/` (override `GENOME_ALLOW_SCHEMA_CHANGE=1`),
+  a hard block on `git add -A|--all|.`, and non-blocking GATE-FILL + CHANGELOG
+  commit nudges. `.gitignore` now tracks `.claude/{agents,hooks,workflows}/` and
+  `settings.json` as shared, reviewable infrastructure. The Stage 3/4 authoring
+  skills (`/changelog`, `/new-finding`, `/pr-ready`) remain designed-not-built.
 - PR 5a (pre-Phase-6): make the chrX non-PAR LOO harness allele-aware
   (`finding-033`). `read_imputed_calls` paired each masked anchor with the
   re-imputed output **by genomic position alone**, so at a position carrying a
