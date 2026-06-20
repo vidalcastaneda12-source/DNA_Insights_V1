@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Agent-team workflow: implement the per-scope team designed in `finding-034`
+  as 29 Claude Code subagents under `.claude/agents/` (Stages 0–5: intake, plan
+  panel, guarded implementation with a plan-blind test oracle, adversarially-
+  verified review fan-out, handoff assembly, post-merge anchor re-lock) plus a
+  `README.md` index (risk-tier formula + tier→member depth table) and an opt-in
+  `/scope-run` orchestration command that sequences the members with adaptive
+  depth and stops at the two human gates. Members are usable standalone today.
+  Tooling/process only — no `backend/` or schema change. Guardrail hooks and the
+  `/new-finding` · `/changelog` · `/pr-ready` authoring skills remain deferred
+  follow-ups per finding-034 "Out of scope".
 - PR 5a (pre-Phase-6): make the chrX non-PAR LOO harness allele-aware
   (`finding-033`). `read_imputed_calls` paired each masked anchor with the
   re-imputed output **by genomic position alone**, so at a position carrying a

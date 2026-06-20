@@ -59,6 +59,8 @@ Thumbs.db
 .claude/*
 # Slash commands are shared project infrastructure — track them in the repo.
 !.claude/commands/
+# Agent-team subagents are shared project infrastructure too (finding-034).
+!.claude/agents/
 hg19ToHg38.over.chain.gz:Zone.Identifier
 hg19ToHg38.over.chain.gz
 genome_Vidal_Castaneda_v5_Full_20260503061119.txt:Zone.Identifier

@@ -2,12 +2,22 @@
 
 ## Status
 
-**Design-only brainstorm. Not to be built until the pre-Phase-6 sequence closes**
-(see `ROADMAP.md` → "Pre-Phase-6 sequence"). This document is the implementation
-brief for a later session that will build the Plan-phase members as
-`.claude/agents/*.md` subagents plus an opt-in orchestration workflow. Captured
-2026-06-18 during a workflow-design session between VSC-User and
-ClaudeCodeVerification / ClaudeCodePlanning. No code was written.
+**Built 2026-06-20** (VSC-User directed the build ahead of the pre-Phase-6
+sequence closing). The full Stage 0–5 team now exists as 29
+`.claude/agents/*.md` subagents, with a `.claude/agents/README.md` index (risk-
+tier formula + tier→member depth table) and an opt-in `/scope-run`
+orchestration command (`.claude/commands/scope-run.md`) that sequences the
+members with adaptive depth and stops at the two human gates. The members are
+usable standalone (invoke one via the Task tool / `subagent_type`).
+**Still deferred** per "Out of scope" below: the guardrail hooks
+(schema-immutability, `git add -A` block, `GATE-FILL` stop check, CHANGELOG
+nudge) and the `/new-finding` · `/changelog` · `/pr-ready` authoring skills the
+`handoff-assembler` and `knowledge-curator` reference.
+
+Originally captured 2026-06-18 as a **design-only brainstorm** between VSC-User
+and ClaudeCodeVerification / ClaudeCodePlanning; this document was the
+implementation brief. The decisions below are the design as locked at brainstorm
+time and are preserved verbatim as the spec the built agents implement.
 
 Decisions locked this session:
 
