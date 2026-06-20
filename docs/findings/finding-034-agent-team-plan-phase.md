@@ -110,6 +110,65 @@ and 1 are subsets. **Per the locked decision, the pre-mortem fires at Tier 1 and
 Tier 2** — contained changes have been bitten by surprises too (e.g. an anchor count
 moving when the plan assumed it would not), and a single pre-mortem agent is cheap.
 
+### Risk-tier scoring
+
+The dispatcher turns those four inputs into `risk_tier` via a **conservative** rule —
+under-tiering (too little review on a risky change) is far costlier here than over-tiering
+(a missed schema bug forces `rm -rf data/` + re-ingest; a missed PHI leak is irreversible),
+so trip-wires floor the two irreversible risks, an additive score handles the rest, ties
+round up, and escalations only ever raise the tier. The score and its sub-scores are stored
+in `manifest.risk_breakdown` so the call is auditable and a human can override upward.
+
+**Sub-scores** (each estimated conservatively — when unsure, round up):
+
+- **C — change-class** (max over touched concerns; `+1` if ≥3 distinct code concerns):
+  `docs 0 · tests 1 · cli 1 · data-backfill 2 · annotation-loader 2 · analysis/insights 2 ·
+  pipeline 3 · schema|ddl 4`. (data-backfill = INSERT/UPDATE/DELETE on durable tables with
+  no DDL change; pipeline = ingest/merge/imputation, the anchor-producing core.)
+- **B — blast radius** (from `|imports_touched|`): `isolated ≤1 → 0 · small 2–5 → 1 ·
+  moderate 6–15 → 2 · large >15 → 3`.
+- **P — precedent-surprise** (from the nearest 2–3 precedents): `clean 0 · minor/noted 1 ·
+  correction-class 2` (probe-first, a recon, or a "the drop is correct" outcome).
+- **A — anchor exposure** (from `|applicable_anchors|`): `none 0 · 1–2 → 2 · 3+ → 3` — a
+  within-Tier-2 depth knob, not a T0/T1 factor.
+
+**Formula:**
+
+```
+S = C + B + P                          # A folds in only inside Tier 2 (depth)
+
+floor = 2  if  (schema|ddl touched)  OR  (|applicable_anchors| >= 1)   else 0
+        # the two irreversible risks — a structural change or any anchor exposure — are Tier 2, period
+
+tier_from_S = 0 if S==0 · 1 if 1<=S<=4 · 2 if S>=5
+tier  = max(floor, tier_from_S)                       # conservative: max, never min
+tier  = min(2, tier + 1)  if  pre-mortem=probe-first  OR  manifest.open_questions  OR  human-bump
+
+deep_T2 = (S >= 7) OR (A >= 3)         # 3 skeptics + completeness-critic + loop-until-dry; else standard T2 (2 skeptics)
+```
+
+**Back-test against the PR history** (also the formula's own regression test — re-run after
+any re-weighting; a flipped row means calibration broke):
+
+| Slot | C | B | P | S | trip-wire | → tier |
+|---|---|---|---|---|---|---|
+| PR 8 — cosmetic/docs | 0 | 0 | 0 | 0 | — | **0** |
+| PR 12 — CLI tests | 1 | 0 | 0 | 1 | — | **1** |
+| PR 6 — genes seed (data-backfill) | 2 | 1 | 0 | 3 | — | **1** |
+| PR 7 — gnomAD orphan DELETE | 2 | 1 | 1 | 4 | — | **1** (near T2) |
+| PR 5a — chrX imputation | 3 | 2 | 2 | 7 | anchors → 2 | **2 deep** |
+| PR 3 — canonicalize-variants | 3 | 3 | 2 | 8 | anchors → 2 | **2 deep** |
+
+**Lens-gates are by factor, not by tier.** The tier sets *depth*; *which* lenses run is
+gated directly, so a lens can fire below its expected tier — `phi-pii-guardian` on any
+data/external/config surface, `regression-hunter` whenever `anchors ≥ 1`, `test-integrity`
+whenever tests are touched, `/code-review` always.
+
+**Calibration.** The tunable knobs are the C-map, B-buckets, P-levels, and the two
+thresholds. After the first ~5–10 real scope items, check each for under-tiering
+(expensive) vs over-tiering (cheap) and adjust — **biased toward over-tiering** (lower
+`t2` before raising it). The back-test table keeps tuning honest.
+
 ## Plan-phase pipeline
 
 ```
@@ -987,7 +1046,9 @@ re-locked record — so the team's accuracy *compounds* across items instead of 
   `verification-scoper`, `knowledge-curator`) plus the guardrail hooks
   (schema-immutability, `git add -A` block, `GATE-FILL` stop check, CHANGELOG nudge)
   and authoring skills (`/new-finding`, `/changelog`, `/pr-ready`).
-- The exact **risk-tier scoring formula** — to be calibrated on real runs.
+- The **risk-tier scoring formula** is now defined (see "Risk-tier scoring" under
+  "Organizing principle — adaptive depth"); its C-map, B-buckets, P-levels, and thresholds
+  remain calibratable on real runs, with the back-test table as the regression guard.
 - **Candidate cross-examination** (each planner critiques the others' plans) — an
   escalation-only pattern reserved for the rare slot where even Tier 2 diverges hard;
   not baked in (it overlaps the pre-mortem and is expensive).
