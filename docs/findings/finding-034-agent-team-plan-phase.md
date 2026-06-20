@@ -38,10 +38,16 @@ Decisions locked this session:
   rather than reinventing them; `phi-pii-guardian` is the domain-specialized security
   lens. The review **never replaces** VSC-User's independent `verification.md` run — it
   produces the *pre-gate package* that makes that run cheaper and more exact.
+- **Handoff + Close (Stages 4–5, added 2026-06-19):** Stage 4 is assembly — it wraps
+  `/handoff` + `/changelog` + `/new-finding` and enriches them with the team's pre-gate
+  package (verdict, anchors-to-watch, residual risk). Stage 5 is the **only stage that
+  writes durable docs**: `knowledge-curator` re-locks the anchors VSC-User confirmed at
+  the gate — post-merge, human-confirmed numbers only, via a reviewable change, never a
+  silent mutation — closing the anchor loop (predict → flag → confirm → record).
 
-This finding covers the **Plan phase (Stage 0–1)**, the **Implementation phase
-(Stage 2)**, and the **Review fan-out (Stage 3)** — Stages 2–3 added 2026-06-19. The
-remaining stages (**handoff → close**) will get their own findings as they are designed.
+This finding covers the **full per-scope team (Stages 0–5)** — Plan (0–1),
+Implementation (2), Review fan-out (3), Handoff (4), Close (5); Stages 2–5 added
+2026-06-19. No stages remain to design.
 
 ## Context
 
@@ -80,11 +86,11 @@ For one scope item the full team is a pipeline **segmented by the two human gate
 | → | **HUMAN GATE: VSC-User approves the plan** | VSC-User |
 | 2 · Implement | **this document** — `implementer` + plan-blind `test-author` + guards (see "Implementation phase" below) | Development |
 | 3 · Review fan-out | **this document** — parallel lenses → adversarial verify → synthesize | Verification + TestingBugs |
-| 4 · Handoff | `/handoff` + `/changelog` (+ `/new-finding`) | Development |
+| 4 · Handoff | **this document** — `handoff-assembler` wraps `/handoff` + `/changelog` + the pre-gate package | Development |
 | → | **HUMAN GATE: VSC-User runs `verification.md`, then merges** | VSC-User |
-| 5 · Close | `knowledge-curator` re-locks anchors; `repo-sweep` triage | — |
+| 5 · Close | **this document** — `knowledge-curator` re-locks confirmed anchors; `repo-sweep` triage | — |
 
-This finding designs Stage 0–3 (Intake, Plan, Implementation, Review).
+This finding designs the complete team — Stage 0–5 (Intake, Plan, Implementation, Review, Handoff, Close).
 
 ## Organizing principle — adaptive depth
 
@@ -851,6 +857,95 @@ at the merge gate. Likewise the **test-author**'s `test → spec` provenance (St
 what lets **test-integrity** (Stage 3) prove no test was bent. Each stage hands the next
 exactly what it needs to be cheap and exact.
 
+## Handoff (Stage 4)
+
+Stage 4 is **assembly, not analysis**: it converges every structured artifact the team
+produced into the single document VSC-User reads before the merge gate. It largely
+**wraps existing skills** — `/handoff` (the contract skeleton: branch, SHAs, files
+changed, verification commands, PR URL, environment notes, pytest baseline/result),
+`/changelog` (the `[Unreleased]` entry when behavior / schema / deps / build changed), and
+`/new-finding` (when the session produced a finding) — and **enriches** them with the
+team's artifacts so the human's independent run starts informed, not cold.
+
+**What the team adds to a bare `/handoff`.** The skill already gathers the git/gh facts
+verbatim; Stage 4 grafts on the pre-gate package the human most needs:
+
+- the Stage-3 `review-synthesizer` verdict + its **anchors-to-watch list (with expected
+  values)**, so VSC-User's ~30-min real-data run knows exactly which numbers to confirm;
+- the **residual-risk** paragraph (what the team could not settle in-loop);
+- the Stage-1 **predicted surprises** that survived to merge, so a gate failure is
+  recognized, not mysterious;
+- the schema-rebuild / re-ingest steps named specifically when `change_class ⊇ schema`
+  (the `/handoff` contract already requires this; the manifest makes it automatic).
+
+### Member: `handoff-assembler`
+
+**Role.** Compose `/handoff` + `/changelog` + (`/new-finding`) with the Stage-1/3
+artifacts into the VSC-User handoff. Gathers facts from git/gh **verbatim** — never from
+session memory (the `/handoff` contract's rule) — then appends the pre-gate package.
+**Reads.** git/gh; the Stage-3 synthesizer output; the manifest; `predicted_surprises`.
+**Tools.** `Read, Grep, Glob, Bash` (read-only) + the skills. **Model** Sonnet / medium —
+it assembles, it does not judge.
+**Output.** The `/handoff` required fields + an **Agent-team appendix**: verdict,
+anchors-to-watch (with expected values), residual risk, surviving predicted surprises.
+**Adaptive depth.** Tier 0 → `/handoff` alone (the "None — no schema change" path); Tier 1
+→ `+ /changelog`; Tier 2 → `+` the anchors-to-watch block `+` the schema-rebuild /
+re-ingest steps.
+**Hands to.** the **human merge gate** — VSC-User runs `verification.md` independently,
+confirms the anchors-to-watch against real data, and merges (or bounces back to Stage 2).
+The handoff does not pre-judge the merge; it makes the independent run cheap and exact.
+
+## Close (Stage 5)
+
+Stage 5 runs **after** VSC-User merges. It is the team's last act and the **only stage
+that writes durable docs**, so it is the most carefully gated. Its job: update the record
+so the *next* scope item starts from accurate ground, and feed the backlog.
+
+1. **`knowledge-curator` — re-lock the record.** Writes back the numbers VSC-User
+   *confirmed at the gate* as the new locked anchors: the re-locked real-data identifiers
+   in `CLAUDE.md` "Real-data observations" / `verification.md` / the relevant finding's
+   bedrock anchor table; the ROADMAP `[ ] → [x]` flip for the completed slot; new
+   `[[finding]]` cross-links; the MEMORY index. This closes the **anchor loop**: the
+   pre-mortem *predicted* (Stage 1) → the regression-hunter *flagged with expected values*
+   (Stage 3) → VSC-User *confirmed on real data* (gate) → the curator *records* (Stage 5).
+2. **`repo-sweep` triage — detect residual staleness.** The same detector as the
+   dispatcher's freshness slice, run whole-repo post-merge: a `[[finding]]` the merge
+   dangled, a ROADMAP line not flipped, a `GATE-FILL` survivor, a deferred item whose
+   gating signal the merge just fired → a ranked backlog for the next item. Detect, never
+   fix.
+
+**The guardrail — the curator never silently mutates durable content.** The project
+forbids UPDATEing active content and treats schema/finding docs as deliberate-change-only
+(decision #7; "Things never to do"). So the curator's re-locks land as a **reviewable
+change** — a small fast-follow doc PR, or, when the numbers are known pre-merge, folded
+into the scope item's own PR — never a direct push to durable docs. It writes **only
+human-confirmed** numbers (the gate's, not the regression-hunter's prediction); it
+proposes, the normal gate disposes.
+
+### Member: `knowledge-curator`
+
+**Role.** The *fixer* half of the detector/fixer pair (`repo-sweep` detects). Re-locks
+confirmed anchors, flips ROADMAP status, cross-links findings, updates MEMORY — under
+supersession, post-merge, via reviewable change.
+**Reads.** The merged diff; VSC-User's confirmed gate numbers; `CLAUDE.md` /
+`verification.md` / `ROADMAP.md` / `docs/findings/**`; `repo-sweep` output.
+**Tools.** `Read, Grep, Glob, Bash` + `Edit`/`Write` (durable docs) — **the only Stage-5
+writer**, and only into a reviewable change. **Model** Opus / high — anchor re-locks are
+exacting and must match the confirmed numbers precisely.
+**Output.** A doc-update branch/PR: the re-lock diff + a one-line-per-anchor change log
+(old → confirmed-new, with each source line), plus the ROADMAP flip and cross-links.
+**Done when.** Every gate-confirmed anchor is re-locked in *every* place it appears
+(`CLAUDE.md`, `verification.md`, the finding) — a number re-locked in one place and not
+another is exactly the cross-doc drift `repo-sweep` exists to catch.
+
+### Continuity — closing every loop
+
+Stage 5 is where the team's threads terminate: the **anchor loop**
+(predict → flag → confirm → record) and the **provenance loop** (`test-author`'s
+`test → spec` → `test-integrity` verified it held → curator notes any test that became a
+newly-locked behavior). The next item's `scope-dispatcher` then reads this freshly
+re-locked record — so the team's accuracy *compounds* across items instead of decaying.
+
 ## Build notes (for the implementation session)
 
 - **Physical form.** One `.claude/agents/<name>.md` per member (frontmatter:
@@ -874,17 +969,19 @@ exactly what it needs to be cheap and exact.
   logic. The plan-blind `test-author` must additionally **not** be handed the
   implementation diff — confine its writes to `backend/tests/`. Every Stage-3 review
   member — the lenses, `finding-verifier`, `review-synthesizer`, `completeness-critic` —
-  is read-only; it reviews a diff, never edits it.
+  is read-only; it reviews a diff, never edits it. Stage 4's `handoff-assembler` is
+  read-only too (it assembles); Stage 5's `knowledge-curator` is the lone durable-doc
+  **writer** — post-merge, human-confirmed numbers only, into a reviewable change, never
+  `main` directly.
 - **Adaptive depth.** Tier 0/1/2 select which members spawn; the dispatcher's
   `risk_tier` is the switch. Calibrate the tier formula on the first few real runs.
 
 ## Out of scope for this doc / follow-ups
 
-- The remaining per-scope team stages (**handoff → close**) — each gets its own finding;
-  Stage 0–3 are now designed above. Stage 4 (handoff) largely wraps existing skills
-  (`/handoff`, `/changelog`, `/new-finding`); Stage 5 (close) is `knowledge-curator` +
-  `repo-sweep` triage re-locking anchors post-merge — fed by the `test-author`'s
-  **test → spec** provenance and the regression-hunter's anchors-to-watch list.
+- **All five team stages (0–5) are now designed in this document.** What remains is
+  *building*, not designing: the `.claude/agents/*.md` members, the opt-in orchestration
+  workflow (see Build notes), and the guardrail hooks — gated on the pre-Phase-6 sequence
+  closing.
 - The converged agent build-set discussed alongside this design
   (`regression-hunter` / drift-sentinel, `phi-pii-guardian`, `convention-compliance`,
   `verification-scoper`, `knowledge-curator`) plus the guardrail hooks
@@ -919,3 +1016,19 @@ human, then synthesized into a ranked pre-gate package + an anchors-to-watch lis
 VSC-User's real-data run. It optimizes for the fewest *true* findings at the highest
 confidence — precision over recall at the human boundary — and, like every stage, ends at
 the unchanged independent merge gate.
+
+**Conclusion — Handoff + Close (Stages 4–5).** Stage 4 *assembles*: `handoff-assembler`
+wraps `/handoff` + `/changelog` + `/new-finding` and enriches them with the pre-gate
+package (verdict, anchors-to-watch with expected values, residual risk) so VSC-User's
+independent run starts informed. Stage 5 *records*: post-merge, `knowledge-curator`
+re-locks the anchors the human confirmed and flips ROADMAP status — the only durable-doc
+writer, and only via reviewable change — while `repo-sweep` files residual staleness to
+the backlog. Together they close the anchor loop (predict → flag → confirm → record), so
+each scope item leaves the record more accurate than it found it.
+
+**The whole team, in one line.** A scope item flows intake → an adaptive-depth plan panel
+→ a guarded single-writer implementation with a plan-blind test oracle → a fan-out of
+adversarially-verified review lenses → an enriched handoff → the unchanged independent
+human gate → a post-merge re-lock — five stages of in-loop agents bracketed by two
+out-of-loop human gates, each stage handing the next exactly what it needs to be cheap and
+exact.
