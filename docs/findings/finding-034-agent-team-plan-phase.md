@@ -30,10 +30,18 @@ Decisions locked this session:
   §5/§6 plus a frozen interface contract, **without reading the implementation's
   bodies/logic**, making the suite an independent oracle against the
   "fixtures-shaped-to-the-implementation" failure mode `verification.md` guards.
+- **Review (Stage 3, added 2026-06-19):** review fans out — N independent lenses on a
+  *fixed* diff, the canonical multi-agent win. It optimizes for **precision over recall
+  at the human boundary**: a finding reaches VSC-User only if it **survives adversarial
+  refutation** (`finding-verifier`, refute-by-default); everything else is logged.
+- Stage 3 **composes existing skills as lenses** (`/code-review`, `/security-review`)
+  rather than reinventing them; `phi-pii-guardian` is the domain-specialized security
+  lens. The review **never replaces** VSC-User's independent `verification.md` run — it
+  produces the *pre-gate package* that makes that run cheaper and more exact.
 
-This finding covers the **Plan phase (Stage 0–1)** and the **Implementation phase
-(Stage 2)** — the latter added 2026-06-19. The remaining stages
-(review-fanout→handoff→close) will get their own findings as they are designed.
+This finding covers the **Plan phase (Stage 0–1)**, the **Implementation phase
+(Stage 2)**, and the **Review fan-out (Stage 3)** — Stages 2–3 added 2026-06-19. The
+remaining stages (**handoff → close**) will get their own findings as they are designed.
 
 ## Context
 
@@ -71,12 +79,12 @@ For one scope item the full team is a pipeline **segmented by the two human gate
 | 1 · Plan | this document (panel → judges → synth → pre-mortem → auditor) | Planning + Verification |
 | → | **HUMAN GATE: VSC-User approves the plan** | VSC-User |
 | 2 · Implement | **this document** — `implementer` + plan-blind `test-author` + guards (see "Implementation phase" below) | Development |
-| 3 · Review fan-out | parallel lenses on the diff → verify → synthesize | Verification + TestingBugs |
+| 3 · Review fan-out | **this document** — parallel lenses → adversarial verify → synthesize | Verification + TestingBugs |
 | 4 · Handoff | `/handoff` + `/changelog` (+ `/new-finding`) | Development |
 | → | **HUMAN GATE: VSC-User runs `verification.md`, then merges** | VSC-User |
 | 5 · Close | `knowledge-curator` re-locks anchors; `repo-sweep` triage | — |
 
-This finding designs Stage 0–2 (Intake, Plan, Implementation).
+This finding designs Stage 0–3 (Intake, Plan, Implementation, Review).
 
 ## Organizing principle — adaptive depth
 
@@ -646,6 +654,203 @@ unit runs in its own git worktree (`isolation: 'worktree'`) so parallel writers 
 collide; gated by `manifest.blast_radius`. This is the managed niche of the opt-in,
 ultra-prefixed mode — the same fan-out, orchestrated.
 
+## Review fan-out (Stage 3)
+
+Review is the inverse of implementation: where implementation must **converge** to one
+coherent change, review **wants divergent, independent perspectives** on a *fixed* diff.
+That makes Stage 3 the canonical multi-agent win — N lenses, each blind to the others,
+fully parallel, each adversarially verified. It runs after Stage 2's green diff and
+before the human merge gate, and it produces the **pre-gate review package**. Like every
+stage, it **does not replace** VSC-User's independent `verification.md` run — the team is
+in-loop; the gate is out-of-loop.
+
+**Governing principle — precision over recall at the human boundary.** VSC-User's
+scarcest resource is attention. A review that dumps 40 unverified nits is *worse* than no
+review: it trains the human to ignore the channel. So Stage 3 optimizes for the **fewest
+true findings at the highest confidence**, not the most — a finding reaches the human
+only if it **survives refutation** (the verifier, below); everything else is logged.
+
+**Inputs.** Stage 2's green diff; `manifest.review_lenses` (which lenses apply — chosen
+by the dispatcher at Stage 0); the Stage-2 **test → spec provenance** (consumed by
+`test-integrity`); and `plan-premortem.predicted_surprises` (consumed by
+`regression-hunter`). Reviewers see the **diff**, never the implementer's reasoning — the
+in-loop analogue of the gate's out-of-loop independence.
+
+### Stage-3 pipeline
+
+```
+[Stage 2: green diff] + manifest.review_lenses + test→spec provenance + predicted_surprises
+      │
+      ▼
+┌─ parallel lenses (blind to each other; gated by manifest.review_lenses) ───────────┐
+│  /code-review …… correctness · reuse · simplification · efficiency  (existing skill)│
+│  convention-compliance …… locked decisions · conventions · never-do list            │
+│  phi-pii-guardian …… genome leak · un-audited external call · payload-body · secret │
+│  test-integrity …… weakened asserts · fixtures-shaped-to-impl · skips  ◄ provenance │
+│  regression-hunter …… which locked anchor is at risk?              ◄ predicted_surpr.│
+└────────────────────────────┬──────────────────────────────────────────────────────┘
+      │ findings flow on as each lens completes (PIPELINE, not barrier)
+      ▼
+finding-verifier (adversarial · refute-by-default · severity-scaled):
+      blocker → 2–3 skeptics, distinct angles · warn → 1 · nit → no verify (logged)
+      │ survivors only
+      ▼
+review-synthesizer · dedup across lenses · rank by decision-relevance to VSC-User
+      │            · go / no-go · anchors-to-watch list · residual-risk summary
+      ├── blocker(s) → back to Stage 2 (implementer fixes; bounded loop ×2 → escalate)
+      └── clean → Stage 4 handoff → [HUMAN GATE: VSC-User runs verification.md, merges]
+
+Tier 2 / "be comprehensive": completeness-critic asks "what lens didn't run / what's
+unverified / which diff hunk got zero coverage" → another round (loop-until-dry).
+```
+
+### The lens set (manifest-gated)
+
+| Lens | Checks | Grounded in | Gated by |
+|---|---|---|---|
+| `/code-review` *(existing skill)* | correctness; reuse / simplification / efficiency | the skill | always (≥ Tier 0) |
+| `convention-compliance` | locked decisions, conventions, never-do (two DBs · supersession-over-update · no cross-DB FK · evidence-tier scale · PyArrow bulk-load · provenance · structlog/no-`print`) | `CLAUDE.md` | code touched |
+| `phi-pii-guardian` | leaked genome data · un-audited external call · storing a payload **body** not its hash · embedded secret · raw-export staging · `external_calls_enabled` bypass | decision #9; the audited `external_client` | data / external / config surface |
+| `test-integrity` | weakened assertions · fixtures shaped to the implementation · newly-skipped tests | `verification.md`'s stated fears; Stage-2 `test → spec` provenance | tests touched |
+| `regression-hunter` | which locked real-data anchor the diff puts at risk (static + fixture-proxy; the real check is the human's ~30-min run) | `CLAUDE.md` "Real-data observations"; `plan-premortem.predicted_surprises` | `change_class` ⊇ pipeline / schema / annotation |
+
+`/security-review` (existing skill) can run as a general-security lens alongside
+`phi-pii-guardian` (the domain-specialized version) when the diff warrants it. Stage 3
+**composes** existing skills as lenses; it does not reinvent them.
+
+### Adaptive depth (same tiers)
+
+| Tier | Stage-3 lens set + verify depth |
+|---|---|
+| **0 · cosmetic/docs** | `/code-review` (light) + `convention-compliance`; single-vote verify; nits batched |
+| **1 · contained code** | + `test-integrity` + `phi-pii-guardian` (if any data/external surface); 1 skeptic on warns, 2 on blockers |
+| **2 · schema/pipeline** | full set incl. `regression-hunter`; 2–3-skeptic adversarial verify; `completeness-critic` + loop-until-dry on "be comprehensive" |
+
+### Shared lens contract
+
+Every lens is **read-only on the diff**, blind to the other lenses and to the
+implementer's reasoning, and returns structured findings:
+
+```jsonc
+{
+  "lens": "convention-compliance",
+  "findings": [
+    { "id": "conv-1", "severity": "blocker" | "warn" | "nit",
+      "where": "backend/src/genome/…:120-134",
+      "claim": "UPDATEs an active insight row in place (violates decision #7 supersession)",
+      "evidence": "…diff excerpt / rule ref…",
+      "refutable_claim": "this row is active AND content-bearing AND mutated in place",
+      "suggested_fix": "INSERT new + deactivate old in one tx",
+      "confidence": 0.0 }
+  ]
+}
+```
+
+The `refutable_claim` — the single falsifiable statement the finding rests on — is what
+the verifier attacks. Stating it forces each finding to be *checkable* rather than vibes.
+
+### Member: `finding-verifier` (the deep dive)
+
+**Role.** Independently try to **refute** each surfaced finding before it can reach the
+human; kill it if it cannot survive. This is the quality core of Stage 3 — it converts a
+pile of lens *suspicions* into a short list of *confirmed* findings, protecting the human
+gate's attention.
+
+**Refute-by-default prior.** Each verifier is prompted to *disprove* the `refutable_claim`
+and **defaults to `refuted = true` when uncertain**. A finding must *earn* its place in
+front of VSC-User; an unprovable finding is noise. The asymmetry is deliberate: a false
+positive costs human trust in the whole channel, whereas a real issue a single round
+misses is still caught by the next round, the other lenses, or the out-of-loop human gate.
+
+**Severity-scaled, perspective-diverse.**
+- **blocker** → 2–3 skeptics, each a *distinct* refutation angle — *does it reproduce?* /
+  *is the code path actually reachable?* / *is it really a violation, or permitted by a
+  documented exception?* Killed unless a majority fail to refute.
+- **warn** → 1 skeptic.
+- **nit** → not verified; logged and batched (cheap; never blocks).
+
+**Independence.** Verifiers are *separate instances* from the lens that produced the
+finding — a finder never grades its own work (same reason `plan-auditor` ≠ `planner`).
+
+**Reads.** The finding + its `refutable_claim`; the diff region; the relevant code /
+schema / convention. **Tools** `Read, Grep, Glob, Bash` (read-only). **Model/effort**
+Opus / high on blockers; Sonnet / medium on warns.
+
+**Output (per finding):**
+
+```jsonc
+{
+  "id": "conv-1",
+  "survives": true | false,
+  "votes": [ { "angle": "is-it-really-a-violation", "refuted": false, "reason": "…" } ],
+  "verified_severity": "blocker",          // may be downgraded on verification
+  "confidence": 0.0
+}
+```
+
+**Done when.** Every blocker/warn has a verdict; survivors carry their refutation trail
+(so the synthesizer — and VSC-User — can see *why* a finding stands).
+**Hands to.** `review-synthesizer`.
+
+### Member: `review-synthesizer`
+
+**Role.** Turn the verified survivors into the **pre-gate package** VSC-User receives.
+**Reads.** All lens findings + verifier verdicts; the manifest; `predicted_surprises`.
+**Model/effort.** Opus / high. **Read-only.**
+
+It does four things:
+
+1. **Dedup across lenses** — one line flagged by two lenses for the same reason → one
+   finding, both lenses noted (a light merge, not a pre-verify barrier — see below).
+2. **Keep survivors only** — discard verifier-refuted findings; batch nits separately.
+3. **Rank by decision-relevance to VSC-User** — blockers the human must act on first,
+   then warns; nits collapsed into a count + appendix.
+4. **Emit the anchors-to-watch list** — from `regression-hunter`, tied to
+   `predicted_surprises`, *with expected values*, so the human's ~30-min real-data run
+   knows exactly which numbers to confirm and what they should be.
+
+```jsonc
+{
+  "verdict": "go" | "fix-first",
+  "blockers": [ /* ranked, each with its refutation trail */ ],
+  "warns": [ … ], "nits_count": 12, "nits_appendix": [ … ],
+  "anchors_to_watch": [ { "anchor": "gwas_matches", "expected": 66764, "why": "PR-4 tier-2 rsID" } ],
+  "residual_risk": "one-paragraph summary of what the team could NOT settle in-loop"
+}
+```
+
+`fix-first` routes blockers back to Stage 2 (bounded loop ×2 → escalate to VSC-User);
+`go` flows to Stage 4 handoff. Either way the package is the **pre-gate input** to
+VSC-User's independent run — never a replacement for it.
+
+### Member: `completeness-critic` (Tier 2 / "be comprehensive")
+
+Asks the meta-question — *which lens in `review_lenses` didn't run, which finding is
+unverified, which diff hunk got zero coverage?* — and spawns the missing work.
+**Loop-until-dry:** repeat until K consecutive rounds surface nothing new, so the tail of
+rare findings isn't lost to a fixed round count. Logs what it deliberately skipped (no
+silent truncation).
+
+### Pipeline, not barrier — and the one exception
+
+Default: each lens's findings flow to the verifier **as that lens completes** — lens A
+verifies while lens B still reviews. Because different lenses (convention vs privacy vs
+correctness) rarely flag the *same line for the same reason*, cross-lens overlap is low,
+so verify-as-you-go wins on latency and the synthesizer's dedup mops up the rare
+duplicate cheaply. **Exception:** for scope known to produce heavy cross-lens overlap
+(e.g. a sweep where every lens flags the same pattern N times), put a **dedup barrier
+before** the verifier so the same finding isn't verified twice — pay the barrier latency
+to save the redundant verification. `manifest.blast_radius` is the signal.
+
+### Continuity — the through-line Stages 1 → 3 → gate
+
+The anchor story now spans the whole team: the **pre-mortem** *predicts* a surprise at
+plan time (Stage 1) → the **regression-hunter** turns it into an anchors-to-watch entry
+*with expected values* at review time (Stage 3) → **VSC-User** *confirms* it on real data
+at the merge gate. Likewise the **test-author**'s `test → spec` provenance (Stage 2) is
+what lets **test-integrity** (Stage 3) prove no test was bent. Each stage hands the next
+exactly what it needs to be cheap and exact.
+
 ## Build notes (for the implementation session)
 
 - **Physical form.** One `.claude/agents/<name>.md` per member (frontmatter:
@@ -667,18 +872,19 @@ ultra-prefixed mode — the same fan-out, orchestrated.
   `Edit`/`Write`; the *monitors* (`plan-adherence sentinel`, `test-triage`) stay
   read-only, and the `green-keeper` may run formatters (`ruff format`) but not edit
   logic. The plan-blind `test-author` must additionally **not** be handed the
-  implementation diff — confine its writes to `backend/tests/`.
+  implementation diff — confine its writes to `backend/tests/`. Every Stage-3 review
+  member — the lenses, `finding-verifier`, `review-synthesizer`, `completeness-critic` —
+  is read-only; it reviews a diff, never edits it.
 - **Adaptive depth.** Tier 0/1/2 select which members spawn; the dispatcher's
   `risk_tier` is the switch. Calibrate the tier formula on the first few real runs.
 
 ## Out of scope for this doc / follow-ups
 
-- The remaining per-scope team stages (**review fan-out**→handoff→close) — each gets its
-  own finding; Stage 0–2 are now designed above. The Stage-3 review fan-out is the
-  next-highest-value brainstorm (parallel lenses on the diff: `convention-compliance`,
-  `phi-pii-guardian`, `test-integrity`, `regression-hunter`, existing `/code-review`) —
-  and the `test-author`'s **test → spec** provenance is what lets `test-integrity` there
-  verify no test was later bent to the implementation.
+- The remaining per-scope team stages (**handoff → close**) — each gets its own finding;
+  Stage 0–3 are now designed above. Stage 4 (handoff) largely wraps existing skills
+  (`/handoff`, `/changelog`, `/new-finding`); Stage 5 (close) is `knowledge-curator` +
+  `repo-sweep` triage re-locking anchors post-merge — fed by the `test-author`'s
+  **test → spec** provenance and the regression-hunter's anchors-to-watch list.
 - The converged agent build-set discussed alongside this design
   (`regression-hunter` / drift-sentinel, `phi-pii-guardian`, `convention-compliance`,
   `verification-scoper`, `knowledge-curator`) plus the guardrail hooks
@@ -704,3 +910,12 @@ drift from the plan in real time, and a `dev-loop green-keeper` holds pytest/ruf
 green — escalating rather than weakening a test or touching schema. Fan-out
 (worktree-isolated; the ultra-mode niche) is reserved for genuinely independent
 mechanical breadth. Same adaptive-depth tiers; same unchanged human gate at merge.
+
+**Conclusion — Review fan-out (Stage 3).** Review is the canonical multi-agent win:
+N independent lenses on a fixed diff (`/code-review`, `convention-compliance`,
+`phi-pii-guardian`, `test-integrity`, `regression-hunter`), each blind to the others and
+gated by the manifest, their findings adversarially **refuted** before any reach the
+human, then synthesized into a ranked pre-gate package + an anchors-to-watch list for
+VSC-User's real-data run. It optimizes for the fewest *true* findings at the highest
+confidence — precision over recall at the human boundary — and, like every stage, ends at
+the unchanged independent merge gate.
