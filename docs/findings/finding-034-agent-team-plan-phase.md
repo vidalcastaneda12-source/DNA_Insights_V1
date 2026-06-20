@@ -1,4 +1,4 @@
-# Agent-team workflow — per-scope team design (Plan + Implementation phases)
+# Agent-team workflow — per-scope team design (Stages 0–5, correctness-maximized)
 
 ## Status
 
@@ -44,10 +44,21 @@ Decisions locked this session:
   writes durable docs**: `knowledge-curator` re-locks the anchors VSC-User confirmed at
   the gate — post-merge, human-confirmed numbers only, via a reviewable change, never a
   silent mutation — closing the anchor loop (predict → flag → confirm → record).
+- **Correctness-maximized refinement (added 2026-06-20):** vetted marketplace agents
+  folded in (audit-approved seeds / adjuncts / methods) and every stage bolstered for
+  **correctness over speed/tokens** — pre-mortem at *all* tiers, `predicted_surprises`
+  become required guard tests, **+5 review lenses**, 3-skeptic verify + loop-until-dry by
+  default, verification-before-completion, a correctness attestation + post-merge anchor
+  re-verification, serena-LSP blast-radius, and an explicit *over-tier-when-unsure* bias.
+  Reconciling rule: **widen recall on the find side, restore precision at the
+  verify→synthesize funnel** — more coverage costs tokens, never human attention. See
+  "Correctness-maximized refinement" and the independently-verified "Workflow diagrams"
+  sections below.
 
 This finding covers the **full per-scope team (Stages 0–5)** — Plan (0–1),
 Implementation (2), Review fan-out (3), Handoff (4), Close (5); Stages 2–5 added
-2026-06-19. No stages remain to design.
+2026-06-19, the correctness-maximized refinement + independently-verified Mermaid diagrams
+added 2026-06-20. No stages remain to design.
 
 ## Context
 
@@ -1004,6 +1015,242 @@ Stage 5 is where the team's threads terminate: the **anchor loop**
 `test → spec` → `test-integrity` verified it held → curator notes any test that became a
 newly-locked behavior). The next item's `scope-dispatcher` then reads this freshly
 re-locked record — so the team's accuracy *compounds* across items instead of decaying.
+
+## Correctness-maximized refinement — marketplace agents folded in (2026-06-20)
+
+The stage designs above are the team's skeleton. This section folds in the vetted
+marketplace agents (per the plugin audit) and bolsters every stage for **correctness over
+speed/tokens** — the stated priority. The reconciling principle for "more checks without
+flooding the human": **widen recall on the find side, restore precision at the funnel.**
+More finders/lenses = more coverage; the adversarial `finding-verifier` (refute-by-default)
++ `review-synthesizer` compress that to a clean, verified signal before any human sees it,
+so bolstering coverage costs tokens/time, never human attention. Calibration bias is
+explicit: **when unsure, run the deeper tier**; pre-mortem fires at *every* tier;
+verifiers default to "refuted"; nothing auto-downgrades. The two human gates stay sacred.
+
+### Marketplace sourcing per stage
+
+| Stage | Bespoke role | Marketplace seed / adjunct / method |
+|---|---|---|
+| 0 · Intake | `scope-dispatcher` | seed `feature-dev:code-explorer`; **`serena` MCP** (LSP call-graph → accurate `blast_radius`); `greptile` (semantic search); `repo-sweep` freshness |
+| 1 · Plan | `planner ×N` · `plan-auditor` | seed `feature-dev:code-architect`; methods `superpowers:writing-plans` + `brainstorming`; **+ `architect-reviewer`** (independent design check) |
+| 2 · Implement | `test-author` · `implementer` · `deep-debugger` | methods `superpowers:test-driven-development` · `executing-plans` · `verification-before-completion` · `using-git-worktrees`; debugger seed `voltagent-qa-sec:debugger` + `systematic-debugging`; impl seed `python-pro` / phase agent; nav `serena`+`context7`; **in-loop `silent-failure-hunter`**; `code-simplifier` (clarity) |
+| 3 · Review | lenses · verifier | convention seed `pr-review-toolkit:code-reviewer`; phi-pii seed `voltagent-domains:hipaa-compliance`; correctness `feature-dev:code-reviewer`; **+5 lenses** `silent-failure-hunter` · `type-design-analyzer` · `pr-test-analyzer` · `comment-analyzer` · `architect-reviewer` |
+| 4 · Handoff | `handoff-assembler` | `commit-commands:commit-push-pr`; method `superpowers:finishing-a-development-branch` |
+| 5 · Close | `knowledge-curator` | skill `claude-md-management:revise-claude-md` |
+
+### Correctness bolsters (the deltas)
+
+1. **Pre-mortem at all tiers** (was 1–2) — cheap failure prediction everywhere.
+2. **`predicted_surprises` → required guard tests** — every anticipated failure mode gets
+   a test proving it didn't happen *(the strongest new link)*.
+3. **`plan-auditor` is a panel** + **`architect-reviewer`** — independent design-level review.
+4. **+5 review lenses** — `silent-failure-hunter` (★ fits the fail-closed culture),
+   `type-design-analyzer`, `pr-test-analyzer`, `comment-analyzer`, `architect-reviewer`.
+5. **3-skeptic adversarial verify by default**; **loop-until-dry by default at Tier 1+**.
+6. **Verification-before-completion** as a hard discipline (evidence, not "should pass") —
+   the project's own gate, run in-loop.
+7. **In-loop silent-failure check** during implementation, not just at review.
+8. **Correctness attestation** in the pre-gate package + **post-merge anchor
+   re-verification** (Stage-5 cross-check that re-locked numbers match the gate's).
+9. **serena LSP** for an accurate call-graph `blast_radius` → correct tiering.
+10. **Over-tier-when-unsure** calibration bias, stated explicitly.
+
+### Adaptive depth — recalibrated for correctness
+
+| Tier | Plan | Implement | Review |
+|---|---|---|---|
+| **0 · cosmetic** | 1 planner + **pre-mortem** + auditor | implementer + green-keeper | code-review + convention; single verify |
+| **1 · contained** | 2 planners + judge + pre-mortem + auditor **panel** | + test-author + sentinel + silent-failure | full lens set + **3-skeptic verify + loop-until-dry** |
+| **2 · schema/pipeline/anchor** | full panel + per-axis judges + multi-skeptic pre-mortem + auditor + **architect-reviewer** | + test-triage + debugger + schema-executor / fan-out | all lenses + 3-skeptic verify + completeness-critic + **cross-examination** |
+
+### Marketplace agents that also activate per ROADMAP phase
+
+The Stage 0–5 team runs on *every* scope item; these domain/tech agents additionally seed
+the `implementer` / lenses as each phase opens:
+
+| Roadmap phase | Agents online |
+|---|---|
+| **All phases** | `python-pro`, `cli-developer`, `sql-pro` (DuckDB perf); serena / context7 / greptile MCP |
+| **6 — Analysis** | `data-scientist` / `data-analyst` (PRS / QC / het / ROH stats), `scientific-literature-researcher` (ClinVar / GWAS evidence) |
+| **7 — Insights** | `technical-writer` (audience rendering), `prompt-engineer` (LLM render loop) |
+| **8 — Backend API** | `fastapi-developer`, `api-designer`, `backend-developer`, `api-documenter` |
+| **9 — Frontend** | `nextjs-developer`, `react-specialist`, `typescript-pro`, `ui-designer`, `accessibility-tester`, `ux-researcher` |
+| **10 — Privacy / polish** | `security-auditor`, `compliance-auditor` (HIPAA / GDPR), `hipaa-compliance` |
+
+## Workflow diagrams (2026-06-20 · independently verified)
+
+All diagrams below were cross-checked by an **independent verifier agent** (refute-by-default)
+against a canonical element checklist — stages, gates, decisions, loops, data flows, and
+Mermaid syntax — and returned **FAITHFUL, no fixes required**. One documented compression:
+in the Stage-3 zoom the single `code-review` lens node represents both `/code-review` and
+`feature-dev:code-reviewer` (10 lens nodes = 11 lens agents).
+
+### Simplified — one glance (6 stages · 2 gates · 3 loops)
+
+```mermaid
+flowchart TD
+    S0["STAGE 0 · INTAKE<br/>scope-dispatcher → manifest + risk-tier"]
+    S1["STAGE 1 · PLAN<br/>judge panel → pre-mortem → auditor"]
+    G1{{"HUMAN GATE 1<br/>approve plan"}}
+    S2["STAGE 2 · IMPLEMENT<br/>test-author ∥ implementer + guards"]
+    S3["STAGE 3 · REVIEW<br/>lenses → verify → synthesize"]
+    S4["STAGE 4 · HANDOFF<br/>handoff-assembler"]
+    G2{{"HUMAN GATE 2<br/>verification.md · merge"}}
+    S5["STAGE 5 · CLOSE<br/>knowledge-curator + repo-sweep"]
+    S0 --> S1
+    S1 -->|"revise ×2 ⟲"| S1
+    S1 --> G1
+    G1 --> S2
+    S2 --> S3
+    S3 -->|"fix-first ×2 ⟲"| S2
+    S3 -->|"loop-until-dry ⟲"| S3
+    S3 --> S4
+    S4 --> G2
+    G2 --> S5
+    classDef gate fill:#ffe0b2,stroke:#e65100,stroke-width:3px,color:#000;
+    class G1,G2 gate;
+```
+
+### Per-stage zooms
+
+**Stage 0 — Intake**
+
+```mermaid
+flowchart TD
+    subgraph S0["STAGE 0 · INTAKE"]
+        SD["scope-dispatcher<br/>seed: feature-dev:code-explorer"]
+        SD --> MAN["scope manifest<br/>change_class · blast_radius · anchors<br/>precedent · review_lenses · deep_T2"]
+        MAN --> D0{"risk-tier 0/1/2?<br/>round up when unsure"}
+        SER["serena MCP · LSP call-graph"] -.->|blast_radius| SD
+        GRE["greptile · semantic search"] -.->|precedent / importers| SD
+        RSW["repo-sweep · freshness slice"] -.->|stale anchors?| SD
+    end
+    D0 -->|"sets depth downstream"| NEXT(["→ STAGE 1"])
+    classDef decision fill:#fff9c4,stroke:#f57f17,color:#000;
+    class D0 decision;
+```
+
+**Stage 1 — Plan**
+
+```mermaid
+flowchart TD
+    subgraph S1["STAGE 1 · PLAN — judge panel"]
+        P1["planner ×N<br/>seed: code-architect · methods: writing-plans, brainstorming"]
+        P1 --> PJ["plan-judges<br/>per-axis scorecard"]
+        PJ --> PS["plan-synthesizer<br/>graft + divergence + assumptions"]
+        PS --> PM["plan-premortem (ALL tiers)<br/>predicts surprises"]
+        PM --> PA["plan-auditor PANEL<br/>+ architect-reviewer"]
+        PA --> D1{"ready / revise / escalate?"}
+        D1 -->|"revise ×2"| P1
+    end
+    D1 -->|escalate| HESC["escalate → VSC-User"]
+    D1 -->|ready| G1{{"HUMAN GATE 1 · approve plan"}}
+    PM -.->|predicted_surprises| TOUT(["→ test-author (Stage 2)"])
+    classDef decision fill:#fff9c4,stroke:#f57f17,color:#000;
+    classDef gate fill:#ffe0b2,stroke:#e65100,stroke-width:3px,color:#000;
+    classDef escalate fill:#ffcdd2,stroke:#b71c1c,color:#000;
+    class D1 decision;
+    class G1 gate;
+    class HESC escalate;
+```
+
+**Stage 2 — Implement**
+
+```mermaid
+flowchart TD
+    PIN(["predicted_surprises (Stage 1)"]) -.->|become guard tests| TA
+    subgraph S2["STAGE 2 · IMPLEMENT"]
+        IF["interface-freeze<br/>declare signatures / CLI / columns"]
+        IF --> TA["test-author<br/>PLAN-BLIND · TDD"]
+        IF --> IM["implementer<br/>seed: python-pro / phase agent<br/>nav: serena + context7"]
+        SENT["plan-adherence sentinel"] -.->|watches diff| IM
+        IF -.->|schema / wide| SC["side-channels<br/>schema-change executor • fan-out (worktrees)"]
+        TA -.->|tests start RED| GL
+        IM --> GL["green loop<br/>green-keeper verify-before-complete<br/>test-triage · deep-debugger · silent-failure-hunter<br/>+ code-simplifier (clarity)"]
+        SC -.-> GL
+        GL --> D2{"drift OR can't-green<br/>without weakening?"}
+        D2 -->|yes| ESC["escalate → VSC-User"]
+    end
+    D2 -->|clean| ROUT(["→ STAGE 3"])
+    classDef decision fill:#fff9c4,stroke:#f57f17,color:#000;
+    classDef escalate fill:#ffcdd2,stroke:#b71c1c,color:#000;
+    class D2 decision;
+    class ESC escalate;
+```
+
+**Stage 3 — Review**
+
+```mermaid
+flowchart TD
+    subgraph S3["STAGE 3 · REVIEW FAN-OUT"]
+        LENS["parallel lenses (recall-wide)<br/>code-review · convention-compliance · phi-pii-guardian<br/>test-integrity · regression-hunter · silent-failure-hunter<br/>type-design · pr-test · comment · architect-reviewer"]
+        LENS --> FV["finding-verifier<br/>refute-by-default · 3 skeptics"]
+        FV --> CC["completeness-critic"]
+        CC -.->|loop-until-dry| LENS
+        CC --> RS["review-synthesizer<br/>pre-gate package + correctness attestation"]
+        RS --> D3{"go / fix-first?"}
+    end
+    D3 -->|"fix-first ×2"| IOUT(["→ implementer (Stage 2)"])
+    D3 -->|go| HOUT(["→ STAGE 4"])
+    RS -.->|anchors-to-watch + expected| AOUT(["→ Human Gate 2"])
+    classDef decision fill:#fff9c4,stroke:#f57f17,color:#000;
+    class D3 decision;
+```
+
+**Stage 4 — Handoff**
+
+```mermaid
+flowchart TD
+    subgraph S4["STAGE 4 · HANDOFF"]
+        HA["handoff-assembler<br/>wraps /handoff · /changelog · /new-finding<br/>+ commit-push-pr · method: finishing-a-development-branch"]
+        HA --> PKG["pre-gate package<br/>verdict · anchors-to-watch(expected)<br/>predicted→test map · residual risk"]
+    end
+    PKG --> G2{{"HUMAN GATE 2<br/>run verification.md · confirm anchors on real data · merge"}}
+    G2 -->|merged| COUT(["→ STAGE 5"])
+    G2 -.->|bounce| BOUT(["→ implementer (Stage 2)"])
+    classDef gate fill:#ffe0b2,stroke:#e65100,stroke-width:3px,color:#000;
+    class G2 gate;
+```
+
+**Stage 5 — Close**
+
+```mermaid
+flowchart TD
+    CIN(["confirmed numbers (Human Gate 2)"]) -.-> KC
+    subgraph S5["STAGE 5 · CLOSE"]
+        KC["knowledge-curator<br/>skill: revise-claude-md<br/>re-lock confirmed anchors + cross-check match"]
+        RSW["repo-sweep<br/>staleness → backlog (non-blocking)"]
+        KC --- RSW
+    end
+    KC -.->|loop closed| DONE(["predict → test → flag → confirm → record → re-verify"])
+```
+
+### Swimlane — in-loop agents vs out-of-loop human gates
+
+```mermaid
+flowchart LR
+    subgraph TEAM["AGENT TEAM — in-loop (deterministic Workflow)"]
+        direction TB
+        s0["Stage 0 · Intake"] --> s1["Stage 1 · Plan<br/>(panel · pre-mortem · auditor)"]
+        s1 -.->|revise ×2| s1
+        s2["Stage 2 · Implement<br/>(test-author ∥ implementer · guards)"] --> s3["Stage 3 · Review<br/>(lenses · verify · synthesize)"]
+        s3 -.->|fix-first ×2| s2
+        s3 -.->|loop-until-dry| s3
+        s3 --> s4["Stage 4 · Handoff"]
+        s5["Stage 5 · Close<br/>(re-lock anchors)"]
+    end
+    subgraph HUMAN["VSC-USER — out-of-loop gates (sacred)"]
+        direction TB
+        g1{{"GATE 1<br/>approve plan"}}
+        g2{{"GATE 2<br/>verification.md<br/>confirm anchors · merge"}}
+    end
+    s1 ==> g1 ==> s2
+    s4 ==> g2 ==> s5
+    g2 -.->|bounce| s2
+    classDef gate fill:#ffe0b2,stroke:#e65100,stroke-width:3px,color:#000;
+    class g1,g2 gate;
+```
 
 ## Build notes (for the implementation session)
 
