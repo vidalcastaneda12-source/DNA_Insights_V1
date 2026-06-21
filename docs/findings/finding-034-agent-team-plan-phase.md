@@ -9,6 +9,16 @@ brief for a later session that will build the Plan-phase members as
 2026-06-18 during a workflow-design session between VSC-User and
 ClaudeCodeVerification / ClaudeCodePlanning. No code was written.
 
+> **Build status (2026-06-20, PR #79).** VSC-User directed the build ahead of the
+> pre-Phase-6 gate. **All five stages (0–5) are now built** under `.claude/`: the 23
+> members in `.claude/agents/*.md`, three segmented orchestrators
+> (`plan-phase.js`, `implement-review.js`, `close.js` — split by the two human gates),
+> the four authoring skills in `.claude/commands/`, and the four guardrail hooks. The
+> one runtime caveat: the dynamic-workflows subagent-invocation primitive is undocumented,
+> so each orchestrator isolates it behind a single `runAgent()` helper (`node --check`-
+> clean, not end-to-end executed). See `.claude/agents/README.md` and
+> `docs/plans/finding-034-stages-2-5-build.md`.
+
 Decisions locked this session:
 
 - The planner uses **Option B** — a judge-panel of *diverse* candidate plans, not a
@@ -1057,6 +1067,14 @@ verifiers default to "refuted"; nothing auto-downgrades. The two human gates sta
 10. **Over-tier-when-unsure** calibration bias, stated explicitly.
 
 ### Adaptive depth — recalibrated for correctness
+
+> **This table is authoritative and supersedes the earlier per-stage depth tables**
+> (under "Organizing principle — adaptive depth", "Implementation phase", and "Review
+> fan-out"), which predate the correctness-maximized refinement and conflict with it at
+> Tier 1 (single auditor → **auditor panel**; partial → **full lens set**; loop-until-dry
+> Tier-2-only → **Tier 1+**). Where they disagree, this one wins. The PR-#79 build
+> implements this table (resolved 2026-06-20). The earlier tables are kept for the
+> design rationale, not as the depth spec.
 
 | Tier | Plan | Implement | Review |
 |---|---|---|---|

@@ -6,6 +6,57 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Dev infrastructure (finding-034): make the guardrail hooks portable + fail-safe.
+  The four `.claude/hooks/*.sh` parsed the PreToolUse JSON envelope with `jq`, which
+  is not universally installed; where absent, `set -euo pipefail` made the hook exit
+  non-zero (a *non-blocking* error for PreToolUse), so the two hard-block guardrails
+  (`block-schema-edit`, `block-git-add-all`) silently **failed open**. Switched all
+  four to `python3` (guaranteed by the project's stack); the two block hooks now
+  **fail closed** (deny with a clear reason) if no parser is on PATH, while the two
+  advisory nudges fail open (stay silent). Caught by the merge-gate verification run.
+  (#79)
+- Dev infrastructure (finding-034): review-driven fixes to the agent-team
+  orchestrators. Fix a bug in `plan-phase.js` that injected `completeness-critic`
+  (a Stage-3 member) as a pre-mortem lens and ran 3 standard-Tier-2 skeptics
+  instead of 2 — now the standard Tier-2 pre-mortem runs 2 distinct-lens skeptics
+  and `deep_T2` adds the 3rd (`hidden-coupling`). Upgrade Tier 1 to the
+  finding's recalibrated adaptive-depth table: plan auditor becomes a panel,
+  review runs the full lens set, and loop-until-dry now fires at Tier 1+ (was
+  Tier 2). `implement-review.js` now verifies findings as each lens completes
+  (pipeline; barrier only for wide blast_radius), implements a real bounded
+  loop-until-dry gated by `completeness-critic`, factor-gates lenses
+  (`phi-pii-guardian`/`regression-hunter`) independent of tier, and composes
+  `/security-review` only when the diff warrants it. The data/privacy factor-gate
+  is keyed on the change classes the dispatcher actually emits (a `node`-validated
+  follow-up dropped a `cli` over-trigger that wrongly pulled `phi-pii-guardian` /
+  `/security-review` into Tier-0 cosmetic reviews). Annotates finding-034 that the
+  recalibrated depth table supersedes the earlier per-stage tables. (#79)
+- Dev infrastructure (finding-034): complete the per-scope agent team (Stages
+  2–5) on top of the shipped Plan-phase slice. Adds 17 new `.claude/agents/`
+  members — Stage 2 Implement (`implementer`, plan-blind `test-author`,
+  `plan-adherence-sentinel`, `green-keeper`, `test-triage`, `deep-debugger`,
+  `schema-change-executor`, `fan-out-implementer`), Stage 3 Review (9 lenses +
+  `finding-verifier` + `review-synthesizer` + `completeness-critic`), Stage 4
+  `handoff-assembler`, Stage 5 `knowledge-curator` + `repo-sweep` — plus two
+  segmented orchestrators (`implement-review.js` for Stages 2–3 ending at the
+  merge gate, `close.js` for Stage 5) and three authoring skills (`/changelog`,
+  `/new-finding`, `/pr-ready`). Writers (`Edit`/`Write`) are confined to the
+  Stage-2 implementers + the lone Stage-5 durable-doc curator; every review
+  member is read-only. The two human gates (plan approval, merge verification)
+  are preserved — the team produces the pre-gate package, never an auto-merge.
+  (#79)
+- Dev infrastructure (finding-034): build the Plan-phase slice (Stages 0–1) of
+  the per-scope agent team. Adds the six read-only members under `.claude/agents/`
+  (scope-dispatcher, planner, plan-judges, plan-synthesizer, plan-premortem,
+  plan-auditor), the `.claude/workflows/plan-phase.js` orchestrator that chains
+  them for one ROADMAP scope (tier-driven parallel fan-out → judges → synthesis →
+  pre-mortem → audit, with a bounded ×2 revise loop, never auto-approving), and
+  three enforcement hooks wired via `.claude/settings.json`: a hard block on
+  Edit/Write under `docs/schemas/`|`ddl/` (override `GENOME_ALLOW_SCHEMA_CHANGE=1`),
+  a hard block on `git add -A|--all|.`, and non-blocking GATE-FILL + CHANGELOG
+  commit nudges. `.gitignore` now tracks `.claude/{agents,hooks,workflows}/` and
+  `settings.json` as shared, reviewable infrastructure. The Stage 3/4 authoring
+  skills (`/changelog`, `/new-finding`, `/pr-ready`) remain designed-not-built.
 - PR 5a (pre-Phase-6): make the chrX non-PAR LOO harness allele-aware
   (`finding-033`). `read_imputed_calls` paired each masked anchor with the
   re-imputed output **by genomic position alone**, so at a position carrying a
