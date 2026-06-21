@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Dev infrastructure (finding-034): make the guardrail hooks portable + fail-safe.
+  The four `.claude/hooks/*.sh` parsed the PreToolUse JSON envelope with `jq`, which
+  is not universally installed; where absent, `set -euo pipefail` made the hook exit
+  non-zero (a *non-blocking* error for PreToolUse), so the two hard-block guardrails
+  (`block-schema-edit`, `block-git-add-all`) silently **failed open**. Switched all
+  four to `python3` (guaranteed by the project's stack); the two block hooks now
+  **fail closed** (deny with a clear reason) if no parser is on PATH, while the two
+  advisory nudges fail open (stay silent). Caught by the merge-gate verification run.
+  (#79)
 - Dev infrastructure (finding-034): review-driven fixes to the agent-team
   orchestrators. Fix a bug in `plan-phase.js` that injected `completeness-critic`
   (a Stage-3 member) as a pre-mortem lens and ran 3 standard-Tier-2 skeptics
