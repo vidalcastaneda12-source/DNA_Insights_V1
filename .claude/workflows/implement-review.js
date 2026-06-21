@@ -49,10 +49,12 @@ const DRY_STREAK_TO_CONVERGE = 2; // K consecutive rounds with nothing new ⇒ c
 // Skill-backed review lenses (composed, not subagents). The runtime/operator
 // dispatches these; the synthesizer is told to incorporate their findings.
 // /code-review runs always (≥ Tier 0); /security-review only "when the diff warrants
-// it" (finding-034 lens table) — i.e. a data / external / config surface.
+// it" (finding-034 lens table) — proxied by a data/privacy surface, the change classes
+// the dispatcher actually emits. (Finer external/config gating comes from the
+// dispatcher via manifest.review_lenses, which the stage3Lenses override path honors.)
 function skillLenses(manifest) {
   const skills = ['/code-review'];
-  if (touchesDataSurface(manifest) || touchesExternalOrConfig(manifest)) skills.push('/security-review');
+  if (touchesDataSurface(manifest)) skills.push('/security-review');
   return skills;
 }
 
@@ -83,8 +85,10 @@ function stage3Lenses(tier, manifest) {
       set.add(l);
     }
   }
-  // Factor-gated lenses fire by factor at ANY tier, not by tier threshold.
-  if (touchesDataSurface(manifest) || touchesExternalOrConfig(manifest)) set.add('phi-pii-guardian');
+  // Factor-gated lenses fire by factor at ANY tier, not by tier threshold. phi-pii on
+  // any data/privacy surface; regression-hunter whenever anchors are exposed. (A finer
+  // external/config signal, if the dispatcher has one, arrives via review_lenses above.)
+  if (touchesDataSurface(manifest)) set.add('phi-pii-guardian');
   if (anchorsExposed(manifest)) set.add('regression-hunter');
   return [...set];
 }
@@ -109,10 +113,6 @@ function wideAndIndependent(manifest) {
 function touchesDataSurface(manifest) {
   const cc = manifest.change_class || [];
   return ['pipeline', 'schema', 'annotation-loader', 'data-backfill'].some((c) => cc.includes(c));
-}
-function touchesExternalOrConfig(manifest) {
-  const cc = manifest.change_class || [];
-  return ['external', 'config', 'privacy', 'cli'].some((c) => cc.includes(c));
 }
 function anchorsExposed(manifest) {
   // regression-hunter fires whenever anchors ≥ 1 (finding-034: gated by factor, not tier).

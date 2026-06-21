@@ -26,8 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (pipeline; barrier only for wide blast_radius), implements a real bounded
   loop-until-dry gated by `completeness-critic`, factor-gates lenses
   (`phi-pii-guardian`/`regression-hunter`) independent of tier, and composes
-  `/security-review` only when the diff warrants it. Annotates finding-034 that
-  the recalibrated depth table supersedes the earlier per-stage tables. (#79)
+  `/security-review` only when the diff warrants it. The data/privacy factor-gate
+  is keyed on the change classes the dispatcher actually emits (a `node`-validated
+  follow-up dropped a `cli` over-trigger that wrongly pulled `phi-pii-guardian` /
+  `/security-review` into Tier-0 cosmetic reviews). Annotates finding-034 that the
+  recalibrated depth table supersedes the earlier per-stage tables. (#79)
 - Dev infrastructure (finding-034): complete the per-scope agent team (Stages
   2–5) on top of the shipped Plan-phase slice. Adds 17 new `.claude/agents/`
   members — Stage 2 Implement (`implementer`, plan-blind `test-author`,
