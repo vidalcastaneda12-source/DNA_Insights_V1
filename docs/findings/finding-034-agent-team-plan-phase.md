@@ -2,15 +2,17 @@
 
 ## Status
 
-**Design-only brainstorm. Not to be built until the pre-Phase-6 sequence closes**
-(see `ROADMAP.md` → "Pre-Phase-6 sequence"). This document is the implementation
-brief for a later session that will build the Plan-phase members as
-`.claude/agents/*.md` subagents plus an opt-in orchestration workflow. Captured
+**Design-only brainstorm at capture (2026-06-18) — since superseded: the team was
+built ahead of the pre-Phase-6 gate and merged in PR #79 (2026-06-21). See the "Build
+status" callout below; the design text that follows is preserved as the rationale.**
+The document was captured (see `ROADMAP.md` → "Pre-Phase-6 sequence") as the
+implementation brief that PR #79 then executed, building the members as
+`.claude/agents/*.md` subagents plus the opt-in orchestration workflows. Captured
 2026-06-18 during a workflow-design session between VSC-User and
-ClaudeCodeVerification / ClaudeCodePlanning. No code was written.
+ClaudeCodeVerification / ClaudeCodePlanning (no code was written that session).
 
-> **Build status (2026-06-20, PR #79).** VSC-User directed the build ahead of the
-> pre-Phase-6 gate. **All five stages (0–5) are now built** under `.claude/`: the 23
+> **Build status (built 2026-06-20; merged in PR #79, 2026-06-21).** VSC-User directed
+> the build ahead of the pre-Phase-6 gate. **All five stages (0–5) are now built** under `.claude/`: the 23
 > members in `.claude/agents/*.md`, three segmented orchestrators
 > (`plan-phase.js`, `implement-review.js`, `close.js` — split by the two human gates),
 > the four authoring skills in `.claude/commands/`, and the four guardrail hooks. The
@@ -1302,10 +1304,10 @@ flowchart LR
 
 ## Out of scope for this doc / follow-ups
 
-- **All five team stages (0–5) are now designed in this document.** What remains is
-  *building*, not designing: the `.claude/agents/*.md` members, the opt-in orchestration
-  workflow (see Build notes), and the guardrail hooks — gated on the pre-Phase-6 sequence
-  closing.
+- **All five team stages (0–5) are designed in this document and now built** — the
+  `.claude/agents/*.md` members, the three opt-in orchestration workflows (see Build
+  notes), the guardrail hooks, and the authoring skills all landed in PR #79 (merged
+  2026-06-21), ahead of the pre-Phase-6 gate at VSC-User's direction.
 - The converged agent build-set discussed alongside this design
   (`regression-hunter` / drift-sentinel, `phi-pii-guardian`, `convention-compliance`,
   `verification-scoper`, `knowledge-curator`) plus the guardrail hooks
@@ -1322,8 +1324,8 @@ flowchart LR
 dispatcher manifests the scope and its precedent, N diverse planners produce
 candidates that are judged per-axis and synthesized, a pre-mortem predicts the gate
 surprise (Tier 1 & 2), and an independent auditor gates a bounded revise loop — all
-read-only, all ending at VSC-User's unchanged human approval. Build after the
-pre-Phase-6 sequence closes.
+read-only, all ending at VSC-User's unchanged human approval. Built ahead of the
+pre-Phase-6 sequence (PR #79, merged 2026-06-21).
 
 **Conclusion — Implementation phase (Stage 2).** Implementation is the write phase, so it
 optimizes for *fidelity and containment*, not exploration: a single `implementer`
