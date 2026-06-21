@@ -97,7 +97,14 @@ exact tier formula lives in `scope-dispatcher.md` (copied verbatim from finding-
 inputs named in its body. Each returns the structured JSON in its "Output" section, so a
 member is useful on its own before the orchestrator runs.
 
-**Orchestrated** — three **segmented** dynamic-workflow scripts in `../workflows/`, split
+**Orchestrated — two paths, same members/depth/gates:**
+
+*(a) Model-driven — `/scope-run PR-6` (`../commands/scope-run.md`).* The runnable-today
+path: the lead session spawns members via the Task tool and routes by the command's rules,
+stopping at each gate (resume with `--from <stage>`). Flexible, non-deterministic, no
+dependency on the workflow runtime — use as the default and the fallback.
+
+*(b) Deterministic — three **segmented** dynamic-workflow scripts in `../workflows/`*, split
 **by the two human gates** (a single auto-run cannot cross a human decision):
 
 | Script | Stages | Runs | Ends at |
