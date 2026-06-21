@@ -1068,6 +1068,14 @@ verifiers default to "refuted"; nothing auto-downgrades. The two human gates sta
 
 ### Adaptive depth — recalibrated for correctness
 
+> **This table is authoritative and supersedes the earlier per-stage depth tables**
+> (under "Organizing principle — adaptive depth", "Implementation phase", and "Review
+> fan-out"), which predate the correctness-maximized refinement and conflict with it at
+> Tier 1 (single auditor → **auditor panel**; partial → **full lens set**; loop-until-dry
+> Tier-2-only → **Tier 1+**). Where they disagree, this one wins. The PR-#79 build
+> implements this table (resolved 2026-06-20). The earlier tables are kept for the
+> design rationale, not as the depth spec.
+
 | Tier | Plan | Implement | Review |
 |---|---|---|---|
 | **0 · cosmetic** | 1 planner + **pre-mortem** + auditor | implementer + green-keeper | code-review + convention; single verify |

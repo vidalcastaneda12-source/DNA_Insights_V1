@@ -60,7 +60,7 @@ as additional lenses)
 | `convention-compliance.md` · `phi-pii-guardian.md` · `test-integrity.md` · `regression-hunter.md` · `silent-failure-hunter.md` · `type-design-analyzer.md` · `pr-test-analyzer.md` · `comment-analyzer.md` · `architect-reviewer.md` | Parallel review lenses on the fixed diff; each returns falsifiable findings (`refutable_claim`) | opus / sonnet |
 | `finding-verifier.md` | **Refute-by-default** adversarial verifier; severity-scaled (blocker→2–3 skeptics) | opus |
 | `review-synthesizer.md` | Verified survivors → pre-gate package + anchors-to-watch(expected) + go/fix-first | opus |
-| `completeness-critic.md` | Tier-2 meta-reviewer; loop-until-dry on lens/verify/hunk gaps | opus |
+| `completeness-critic.md` | Tier 1+ meta-reviewer; gates loop-until-dry on lens/verify/hunk gaps | opus |
 
 **Stage 4–5 + cross-cutting**
 
@@ -75,13 +75,20 @@ Variant members are **one file run N times** with the variant (`angle` / `axis` 
 
 ## Adaptive depth (the dispatcher's `risk_tier` is the switch)
 
-| Tier | Trigger | Plan depth |
-|---|---|---|
-| **0 · cosmetic/docs** | docs-only; no anchors; no code | 1 planner → pre-mortem → auditor |
-| **1 · contained code** | bounded code/CLI; small blast radius; no schema; no anchors | 2 planners (minimal-diff + gate-backward) → light judge → synthesize → pre-mortem → auditor |
-| **2 · schema/pipeline/anchor** | `docs/schemas/`|`ddl/` touched, **or** anchors exposed, **or** large blast radius | full panel (3–4 angles) → per-axis judges → synthesize → 2–3-skeptic pre-mortem → auditor + architecture-fit → divergence escalation |
+Depths follow finding-034's **"Adaptive depth — recalibrated for correctness"** table
+(the governing version; the earlier per-stage tables are superseded — see the finding's
+note resolving that contradiction).
 
-The exact tier formula lives in `scope-dispatcher.md` (copied verbatim from finding-034
+| Tier | Trigger | Plan depth | Review depth |
+|---|---|---|---|
+| **0 · cosmetic/docs** | docs-only; no anchors; no code | 1 planner → pre-mortem → auditor | code-review + convention; single verify |
+| **1 · contained code** | bounded code/CLI; small blast radius; no schema; no anchors | 2 planners → light judge → synthesize → pre-mortem → **auditor panel** | **full lens set** + refute-by-default verify + **loop-until-dry** |
+| **2 · schema/pipeline/anchor** | `docs/schemas/`|`ddl/` touched, **or** anchors exposed, **or** large blast radius | full panel (3–4 angles) → per-axis judges → synthesize → 2–3-skeptic pre-mortem → auditor panel + architecture-fit → divergence escalation | all lenses + 3-skeptic verify + completeness-critic |
+
+Lens-gating is **by factor, not tier** — `phi-pii-guardian` on any data/external/config
+surface, `regression-hunter` whenever anchors ≥ 1, regardless of tier (the dispatcher
+factor-gates `manifest.review_lenses`, which the orchestrator honors when present). The
+exact tier formula lives in `scope-dispatcher.md` (copied verbatim from finding-034
 §"Risk-tier scoring") with the PR-history back-test as its own regression check.
 
 ## Usage

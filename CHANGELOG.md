@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Dev infrastructure (finding-034): review-driven fixes to the agent-team
+  orchestrators. Fix a bug in `plan-phase.js` that injected `completeness-critic`
+  (a Stage-3 member) as a pre-mortem lens and ran 3 standard-Tier-2 skeptics
+  instead of 2 — now the standard Tier-2 pre-mortem runs 2 distinct-lens skeptics
+  and `deep_T2` adds the 3rd (`hidden-coupling`). Upgrade Tier 1 to the
+  finding's recalibrated adaptive-depth table: plan auditor becomes a panel,
+  review runs the full lens set, and loop-until-dry now fires at Tier 1+ (was
+  Tier 2). `implement-review.js` now verifies findings as each lens completes
+  (pipeline; barrier only for wide blast_radius), implements a real bounded
+  loop-until-dry gated by `completeness-critic`, factor-gates lenses
+  (`phi-pii-guardian`/`regression-hunter`) independent of tier, and composes
+  `/security-review` only when the diff warrants it. Annotates finding-034 that
+  the recalibrated depth table supersedes the earlier per-stage tables. (#79)
 - Dev infrastructure (finding-034): complete the per-scope agent team (Stages
   2–5) on top of the shipped Plan-phase slice. Adds 17 new `.claude/agents/`
   members — Stage 2 Implement (`implementer`, plan-blind `test-author`,

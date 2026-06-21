@@ -47,18 +47,27 @@ const PANEL = {
     angles: ['minimal-diff', 'gate-backward'],
     judge: 'combined', // one light judge collapses all axes
     premortemLenses: ['general'],
-    auditorLenses: ['contract'],
+    // Tier-1 auditor PANEL (finding-034 "Adaptive depth — recalibrated for correctness":
+    // "auditor panel" at Tier 1). Two distinct-lens auditors → mergeAudits to the
+    // strictest verdict, the in-loop analogue of an independent gate.
+    auditorLenses: ['contract', 'architecture-fit'],
   },
   2: {
     angles: ['minimal-diff', 'gate-backward', 'risk-first', 'convention-purist'],
     judge: ['correctness', 'locked_decision_fit', 'verification', 'scope_discipline', 'risk'],
-    premortemLenses: ['anchor-drift', 'schema-assumption', 'hidden-coupling'],
+    // Standard Tier-2 pre-mortem = 2 skeptics (finding-034 deep_T2 def: "else standard
+    // T2 (2 skeptics)"); deep_T2 adds the 3rd distinct lens below.
+    premortemLenses: ['anchor-drift', 'schema-assumption'],
     auditorLenses: ['contract', 'architecture-fit'],
   },
 };
 
-// deep-T2 widens the pre-mortem skeptic panel; finding-034 §"Risk-tier scoring".
-const DEEP_T2_EXTRA_LENS = 'completeness-critic';
+// deep_T2 widens the Tier-2 pre-mortem from 2 → 3 distinct-lens skeptics (finding-034
+// deep_T2 def: "3 skeptics ... else standard T2 (2 skeptics)"). The 3rd lens is
+// hidden-coupling — NOT completeness-critic, which is a Stage-3 review member, not a
+// pre-mortem lens (finding-034 §"completeness-critic (Tier 2)"; the deep_T2 comment's
+// "completeness-critic + loop-until-dry" describes Stage 3, handled in implement-review.js).
+const DEEP_T2_EXTRA_PREMORTEM_LENS = 'hidden-coupling';
 const MAX_REVISE_CYCLES = 2; // bounded loop; then escalate to VSC-User.
 
 /**
@@ -211,8 +220,8 @@ async function planPhase(scopeId) {
     }
 
     // 4 · Pre-mortem (fires at every tier). Tier 2 runs distinct-lens skeptics
-    // in parallel and merges; deep-T2 adds the completeness critic.
-    const lenses = deepT2 ? [...panel.premortemLenses, DEEP_T2_EXTRA_LENS] : panel.premortemLenses;
+    // in parallel and merges; deep_T2 adds the 3rd distinct-lens skeptic (2 → 3).
+    const lenses = deepT2 ? [...panel.premortemLenses, DEEP_T2_EXTRA_PREMORTEM_LENS] : panel.premortemLenses;
     const premortems = await Promise.all(
       lenses.map((lens) =>
         runAgent(

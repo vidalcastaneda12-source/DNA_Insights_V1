@@ -20,18 +20,21 @@
  * change — the write phase does not fan out the act of writing.
  *
  * ── Stage 3 · Review ──────────────────────────────────────────────────────
- * parallel lenses (gated by manifest.review_lenses) → adversarial finding-verifier
- * (refute-by-default, severity-scaled) → completeness-critic loop-until-dry (Tier 2)
- * → review-synthesizer → the pre-gate package. Bounded fix-first loop ×2 → escalate.
+ * Tier-0 = code-review + convention only; Tier-1+ runs the FULL lens set (finding-034
+ * recalibrated). Lenses verify-as-they-complete (pipeline; barrier only for wide
+ * blast_radius) → refute-by-default finding-verifier → completeness-critic gates a
+ * loop-until-dry at Tier 1+ → review-synthesizer → the pre-gate package. Bounded
+ * fix-first loop ×2 → escalate.
  *
  * ── Runtime caveat (same as plan-phase.js) ────────────────────────────────
  * The dynamic-workflows JS authoring API (the subagent-invocation primitive) is not
  * public. Every subagent call funnels through the single runAgent() helper, which
  * probes the known primitives and throws loudly if none resolve — a one-line fix in
  * one place. /code-review and /security-review are SKILLS, not subagents; they are
- * composed as review lenses and surfaced in the package for the operator/runtime to
- * dispatch (see SKILL_LENSES). The orchestration logic is node --check-clean; it is
- * not end-to-end executed here because the primitive is environment-provided.
+ * composed as review lenses (see skillLenses(): /code-review always, /security-review
+ * when the diff warrants it) and surfaced in the package for the operator/runtime to
+ * dispatch. The orchestration logic is node --check-clean; it is not end-to-end
+ * executed here because the primitive is environment-provided.
  *
  * Args: `/implement-review PR-6` plus the approved plan + manifest + predicted
  * surprises delivered via the runtime global `args` (or args.scope_id / process.argv).
@@ -40,10 +43,18 @@
 'use strict';
 
 const MAX_FIX_FIRST_CYCLES = 2; // bounded Stage-3 → Stage-2 loop; then escalate.
+const MAX_REVIEW_ROUNDS = 3; // loop-until-dry cap (backstop against a stuck critic).
+const DRY_STREAK_TO_CONVERGE = 2; // K consecutive rounds with nothing new ⇒ converged.
 
 // Skill-backed review lenses (composed, not subagents). The runtime/operator
 // dispatches these; the synthesizer is told to incorporate their findings.
-const SKILL_LENSES = ['/code-review', '/security-review'];
+// /code-review runs always (≥ Tier 0); /security-review only "when the diff warrants
+// it" (finding-034 lens table) — i.e. a data / external / config surface.
+function skillLenses(manifest) {
+  const skills = ['/code-review'];
+  if (touchesDataSurface(manifest) || touchesExternalOrConfig(manifest)) skills.push('/security-review');
+  return skills;
+}
 
 // ── Tier → Stage-2 member set (finding-034 "Adaptive depth — recalibrated"). ─
 function stage2Members(tier, manifest) {
@@ -55,26 +66,27 @@ function stage2Members(tier, manifest) {
   return m;
 }
 
-// ── Tier → Stage-3 agent-backed lens set, overridable by manifest.review_lenses
-// (lens-gating is by factor, not tier — the manifest wins when present). ──────
+// ── Stage-3 agent-backed lens set. Two principles from finding-034:
+// (1) lens-gating is BY FACTOR, not tier — phi-pii on any data/external/config surface,
+//     regression-hunter whenever anchors ≥ 1, regardless of tier; the manifest wins when
+//     it lists review_lenses (the dispatcher already factor-gated them).
+// (2) "Adaptive depth — recalibrated for correctness": Tier 0 = code-review + convention
+//     only; Tier 1+ runs the FULL code-quality lens set (not the partial original set).
 function stage3Lenses(tier, manifest) {
   if (Array.isArray(manifest.review_lenses) && manifest.review_lenses.length) {
     return manifest.review_lenses.filter((l) => l in LENS_TO_AGENT).map((l) => LENS_TO_AGENT[l]);
   }
-  const lenses = ['convention-compliance'];
-  if (tier >= 1) lenses.push('test-integrity');
-  if (tier >= 1 && touchesDataSurface(manifest)) lenses.push('phi-pii-guardian');
-  if (tier >= 2) {
-    lenses.push(
-      'regression-hunter',
-      'silent-failure-hunter',
-      'type-design-analyzer',
-      'pr-test-analyzer',
-      'comment-analyzer',
-      'architect-reviewer',
-    );
+  const set = new Set(['convention-compliance']); // always (≥ Tier 0)
+  if (tier >= 1) {
+    // Recalibrated Tier 1 = the full code-quality lens set.
+    for (const l of ['test-integrity', 'silent-failure-hunter', 'type-design-analyzer', 'pr-test-analyzer', 'comment-analyzer', 'architect-reviewer']) {
+      set.add(l);
+    }
   }
-  return lenses;
+  // Factor-gated lenses fire by factor at ANY tier, not by tier threshold.
+  if (touchesDataSurface(manifest) || touchesExternalOrConfig(manifest)) set.add('phi-pii-guardian');
+  if (anchorsExposed(manifest)) set.add('regression-hunter');
+  return [...set];
 }
 
 // manifest.review_lenses uses friendly names; map the ones with an agent file.
@@ -97,6 +109,16 @@ function wideAndIndependent(manifest) {
 function touchesDataSurface(manifest) {
   const cc = manifest.change_class || [];
   return ['pipeline', 'schema', 'annotation-loader', 'data-backfill'].some((c) => cc.includes(c));
+}
+function touchesExternalOrConfig(manifest) {
+  const cc = manifest.change_class || [];
+  return ['external', 'config', 'privacy', 'cli'].some((c) => cc.includes(c));
+}
+function anchorsExposed(manifest) {
+  // regression-hunter fires whenever anchors ≥ 1 (finding-034: gated by factor, not tier).
+  if (Array.isArray(manifest.applicable_anchors) && manifest.applicable_anchors.length) return true;
+  const cc = manifest.change_class || [];
+  return ['pipeline', 'schema', 'annotation-loader'].some((c) => cc.includes(c));
 }
 
 /**
@@ -217,58 +239,117 @@ async function stageImplement(ctx, fixFindings) {
   return { freeze, impl, sentinel, green, blocked, members };
 }
 
+/**
+ * One review round. Verify-as-you-go (PIPELINE) is the default — each lens's findings
+ * flow to the verifier the moment that lens completes (finding-034 "Pipeline, not
+ * barrier"). The BARRIER (Promise.all all lenses → dedup across lenses → verify once) is
+ * the documented exception for scope with heavy cross-lens overlap, signalled by a wide
+ * blast_radius. `seenIds` dedups findings across rounds so a stable finder is verified
+ * once. nits are logged unverified; blocker/warn get a refute-by-default verifier.
+ */
+async function reviewRound(lenses, ctx, diffSummary, seenIds, useBarrier) {
+  const { manifest, predicted_surprises } = ctx;
+  const lensInput = { manifest, predicted_surprises, diff: diffSummary };
+
+  const verifyFresh = async (fromLens, findings) => {
+    const fresh = (findings || []).filter((f) => f.severity !== 'nit' && f.id && !seenIds.has(f.id));
+    fresh.forEach((f) => seenIds.add(f.id));
+    return Promise.all(
+      fresh.map((f) =>
+        runAgent('finding-verifier', { finding: f, from_lens: fromLens }, `verify:${f.id}`).then((v) => ({
+          ...v,
+          lens: fromLens,
+          finding: f,
+        })),
+      ),
+    );
+  };
+
+  if (useBarrier) {
+    // Barrier: collect every lens, dedup by id across lenses, then verify once.
+    const lensOut = await Promise.all(
+      lenses.map((l) =>
+        runAgent(l, lensInput, `lens:${l}`).then((o) => ({ lens: l, findings: o.findings || [], anchors_to_watch: o.anchors_to_watch || [] })),
+      ),
+    );
+    const byId = new Map();
+    for (const o of lensOut) {
+      for (const f of o.findings) {
+        if (!f.id) continue;
+        if (!byId.has(f.id)) byId.set(f.id, { ...f, lenses: [o.lens] });
+        else byId.get(f.id).lenses.push(o.lens);
+      }
+    }
+    const verdicts = await verifyFresh('(deduped)', [...byId.values()]);
+    return { lensOut, verdicts };
+  }
+
+  // Pipeline: each lens verifies its own findings as it lands.
+  const lensOut = [];
+  const verdictChunks = await Promise.all(
+    lenses.map((l) =>
+      runAgent(l, lensInput, `lens:${l}`).then((o) => {
+        lensOut.push({ lens: l, findings: o.findings || [], anchors_to_watch: o.anchors_to_watch || [] });
+        return verifyFresh(l, o.findings);
+      }),
+    ),
+  );
+  return { lensOut, verdicts: verdictChunks.flat() };
+}
+
 /** Stage 3 — fan out lenses, adversarially verify, synthesize the pre-gate package. */
 async function stageReview(ctx, diffSummary) {
   const { manifest, predicted_surprises } = ctx;
   const tier = Number(manifest.risk_tier);
   const lenses = stage3Lenses(tier, manifest);
-  progress(`Stage 3 · tier=${tier} · lenses=[${lenses.join(', ')}] · skills=[${SKILL_LENSES.join(', ')}]`);
-
-  // Recall-wide: every gated-in lens runs in parallel, blind to the others.
-  const lensOut = await Promise.all(
-    lenses.map((lens) =>
-      runAgent(lens, { manifest, predicted_surprises, diff: diffSummary }, `lens:${lens}`).then((o) => ({
-        lens,
-        findings: o.findings || [],
-        anchors_to_watch: o.anchors_to_watch || [],
-      })),
-    ),
+  const skills = skillLenses(manifest);
+  const useBarrier = wideAndIndependent(manifest); // heavy cross-lens overlap → dedup before verify
+  progress(
+    `Stage 3 · tier=${tier} · lenses=[${lenses.join(', ')}] · skills=[${skills.join(', ')}] · ${useBarrier ? 'barrier' : 'pipeline'}`,
   );
 
-  // Adversarial verify, severity-scaled. nits are logged unverified; blocker/warn
-  // each get a verifier (refute-by-default). A separate instance per finding.
-  const toVerify = [];
-  for (const l of lensOut) {
-    for (const f of l.findings) {
-      if (f.severity === 'nit') continue;
-      toVerify.push({ lens: l.lens, finding: f });
-    }
-  }
-  const verdicts = await Promise.all(
-    toVerify.map((v) =>
-      runAgent('finding-verifier', { finding: v.finding, from_lens: v.lens }, `verify:${v.finding.id}`),
-    ),
-  );
-  const survivors = verdicts.filter((v) => v.survives);
+  // Loop-until-dry at Tier 1+ (finding-034 recalibrated): the completeness-critic gates
+  // the loop — keep running rounds until it reports converged, with a dry-streak + round
+  // cap as backstops. Tier 0 is a single pass. `seenIds` keeps re-runs from re-verifying
+  // stable findings, so a clean diff converges on round 1. (Each round re-runs the gated
+  // lens set; the critic's targeted "spawn" is approximated by idempotent re-finders.)
+  const seenIds = new Set();
+  const allLensOut = [];
+  const allVerdicts = [];
+  let dryStreak = 0;
 
-  // Tier 2: completeness-critic loop-until-dry — surface uncovered hunks / unverified
-  // findings / unrun lenses, then converge. (One pass modeled; the critic self-loops.)
-  if (tier >= 2) {
+  for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
+    const before = allVerdicts.length;
+    const { lensOut, verdicts } = await reviewRound(lenses, ctx, diffSummary, seenIds, useBarrier);
+    allLensOut.push(...lensOut);
+    allVerdicts.push(...verdicts);
+
+    if (tier < 1) break; // Tier 0: single pass, no loop-until-dry.
+
     const critic = await runAgent(
       'completeness-critic',
-      { manifest, ran_lenses: lenses, verdicts, predicted_surprises },
-      'completeness-critic',
+      { manifest, ran_lenses: lenses, verdicts: allVerdicts, predicted_surprises, round },
+      `completeness-critic r${round}`,
     );
-    if (critic && critic.converged === false) {
-      progress(`completeness-critic: ${(critic.gaps || []).length} gap(s) — runtime loops until dry`);
+    if (critic && critic.converged === true) {
+      progress(`completeness-critic converged at round ${round}`);
+      break;
     }
+    dryStreak = allVerdicts.length - before === 0 ? dryStreak + 1 : 0;
+    if (dryStreak >= DRY_STREAK_TO_CONVERGE) {
+      progress(`loop-until-dry: ${DRY_STREAK_TO_CONVERGE} consecutive dry rounds — converged`);
+      break;
+    }
+    if (round === MAX_REVIEW_ROUNDS) progress(`loop-until-dry hit round cap ${MAX_REVIEW_ROUNDS}`);
   }
+
+  const survivors = allVerdicts.filter((v) => v.survives);
 
   // Synthesize the pre-gate package for VSC-User.
   const pkg = requireKeys(
     await runAgent(
       'review-synthesizer',
-      { manifest, lens_findings: lensOut, verdicts, predicted_surprises, composed_skills: SKILL_LENSES },
+      { manifest, lens_findings: allLensOut, verdicts: allVerdicts, predicted_surprises, composed_skills: skills },
       'review-synthesizer',
     ),
     ['verdict'],
