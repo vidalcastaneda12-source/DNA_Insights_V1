@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Docs (post-merge follow-up PR C — prepare): add the chrX gnomAD gap-close run sheet
+  to `docs/plans/post-merge-followups-chrx-m3-and-gnomad-jobs.md` — the exact
+  `genome annotate refresh --source gnomad --force --jobs 8` + `refresh-index` sequence
+  (VSC-User runs it; multi-hour, needs `external_calls_enabled`), the read-only
+  capture + negative-control SQL, the pass criteria, and the Phase-2 doc-lock map.
+  gnomAD was loaded before the chrX M3 import, so the 72,237 chrX imputed-only positions
+  lack gnomAD AFs (~135 covered); the reload closes that gap and produces the
+  authoritative `user_only` gnomAD/index numbers. Item 3 (three-way `--jobs` reproduction)
+  is moot — PR B kept `user_only`. The number-lock (CLAUDE.md obs #4 + #3, runbook
+  §5.5/§5.7, `verification.md`, findings 029/035) lands in the follow-up commit once the
+  reload runs — no number is locked before it. (PR C)
 - Narrow the gnomAD annotation filter from the three-way `(user ∪ ClinVar ∪ GWAS)`
   union to `user_only` (the user's own variants), per the finding-035 consumer audit:
   every `gnomad_frequencies` reader (the `variant_annotations_index` rollup and the
