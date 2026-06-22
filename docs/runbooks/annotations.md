@@ -124,9 +124,9 @@ database needs to be reloaded:
    genome annotate refresh-index
    ```
 
-The order is load-sensitive: `gnomad` builds its
-`(user ∪ ClinVar ∪ GWAS)` filter from the active ClinVar and GWAS
-releases, so both must already be loaded; `refresh-aliases` must run
+The order is load-sensitive: as of finding-035 `gnomad`'s filter is
+`user_only` (built from `variants_master` alone), so it no longer depends
+on ClinVar/GWAS being loaded first; `refresh-aliases` must run
 after `--source dbsnp` (it attaches the rsID-merge map to the current
 dbSNP `source_version_id` and must be re-run after any future dbSNP
 refresh that flips that pointer); `normalize-rsids` (the #66 imputation
@@ -1304,9 +1304,13 @@ path.
 ### gnomAD (sub-phase 5.5)
 
 **What's loaded.** gnomAD v4.1.1 per-chromosome sites-only VCFs
-(exomes + genomes, GRCh38, GCS-hosted), filtered to the three-way
-union of distinct `(chrom, pos_grch38)` across `variants_master` ∪
-the active ClinVar release ∪ the active GWAS Catalog release.
+(exomes + genomes, GRCh38, GCS-hosted), filtered to the user's own
+distinct `(chrom, pos_grch38)` positions in `variants_master` — the
+`user_only` filter, adopted per
+[finding-035](../findings/finding-035-gnomad-filter-set-consumer-audit.md)
+(VSC-User ruled 2026-06-21). The prior three-way
+`(user ∪ ClinVar ∪ GWAS)` union is retained as the documented upper
+bound + the one-argument revert path (see **Filter shape** below).
 Autosomes 1-22 + X. Y and MT are intentionally skipped — gnomAD v4
 does not ship high-confidence allele frequencies for those
 chromosomes in the public per-chromosome VCFs. The loader streams
@@ -1323,13 +1327,20 @@ the URL constants, the cyvcf2 streaming contract, the per-record
 projection, the htslib HTTP/2 retry mechanism, and the resume /
 partial-run semantics.
 
-**Filter shape.** CLAUDE.md "Things never to do" #3 mandates the
-broader `(user ∪ ClinVar ∪ GWAS ∪ PGS)` intersection, but PGS
-per-variant weights do not yet exist in the DB at PR-B time (they
-land in Phase 6 as `pgs_score_weights`). A Phase 6 follow-up gated on
-`pgs_score_weights` will extend the active gnomAD source-version's
-coverage to PGS-component variants without a version bump. See
-[finding-011](../findings/finding-011-gnomad-three-way-intersection.md).
+**Filter shape.** The active filter is `user_only` — the user's own
+distinct `variants_master` positions — per
+[finding-035](../findings/finding-035-gnomad-filter-set-consumer-audit.md)
+(adopted 2026-06-21): the consumer audit found every `gnomad_frequencies`
+reader inner-joins `variants_master`, so the ClinVar/GWAS-only legs
+(~76% of the three-way load) were loaded but never read. CLAUDE.md
+"Things never to do" #3's `(user ∪ ClinVar ∪ GWAS ∪ PGS)` union remains
+the documented **upper bound** and the one-argument revert path — flip
+`_build_filter_set` back to `strategy="three_way"` to restore it.
+`user_only` is a strict subset of that bound. The Phase 6 PGS four-way
+extension gated on `pgs_score_weights`
+([finding-011](../findings/finding-011-gnomad-three-way-intersection.md))
+is moot while the filter is narrowed; if `three_way` is ever restored,
+the PGS leg appends as finding-011 describes.
 
 **HTTP/2 retry behavior.** Remote-tabix iteration against gnomAD's
 GCS bucket trips libcurl `CURLE_HTTP2` (error 16) framing errors
@@ -1392,8 +1403,32 @@ Capture from the `gnomad.refresh.complete` structlog line:
 `distinct_variants_per_chrom`, `match_rate`,
 `af_buckets_user_overlap`, `mean_af_user_overlap`,
 `pop_af_presence`, plus `chromosomes_succeeded` /
-`chromosomes_failed` and wall-clock. Locked stable numbers
-(gnomAD v4.1.1, locked 2026-05-22):
+`chromosomes_failed` and wall-clock.
+
+#### Superseded three-way baseline (retained for revert + PGS comparison)
+
+The locked numbers below were captured under the **`three_way`**
+`(user ∪ ClinVar ∪ GWAS)` filter (gnomAD v4.1.1, locked 2026-05-22),
+before finding-035 narrowed the active filter to `user_only`. They are
+retained as the revert baseline and the PGS-extension comparison point,
+**not** as the current expected output: under `user_only` the filter
+narrows to the ~0.94 M user positions (≈18% of the 5.13 M three-way set) —
+a ~5.5× cut in *positions queried*, which is what drives the remote-streaming
+transfer/wall-clock. `rows_loaded`, the per-chromosome counts, the AF
+buckets, and the per-population presence shrink too, but by **less** than
+~5.5× (the user's positions are denser in gnomAD — multiple AF rows each —
+than the dropped ClinVar/GWAS-only positions), so the loaded-row magnitude is
+re-captured at the PR-C reload, not predicted here. **Do not treat these as
+the `user_only` expectation.** The authoritative `user_only` numbers are
+captured at the **PR-C post-chrX gnomAD reload** (plan Item 4,
+`docs/plans/post-merge-followups-chrx-m3-and-gnomad-jobs.md`) — that reload
+needs `external_calls_enabled` + a multi-hour run and is **not** performed
+in the finding-035 filter-swap PR. The filter-independent invariant that
+**does** carry forward is `match_rate` ≈ 0.988 against `variants_master`
+(user variants matched in gnomAD — `user_only` loads exactly that overlap).
+
+Locked stable numbers (three-way baseline, gnomAD v4.1.1, locked
+2026-05-22):
 
 | Metric | Locked value |
 |---|---|
@@ -1477,13 +1512,18 @@ construction — one row per `(chrom, pos, ref, alt)`):
 | `chr22` | 154,080 |
 | `chrX` | 209,250 |
 
-A drift in any of the locked counts on a re-run against the same
-gnomAD release is a regression signal; verify against this table
-before re-locking. The match-rate at 0.988 (~99% of user variants
-have a gnomAD AF row) is the headline value-add — a `variants_master`
-position without a gnomAD AF after a clean refresh is almost
-always a chip-only ancestry-informative marker that gnomAD has not
-yet observed.
+The counts above are the **superseded three-way baseline**: under the
+active `user_only` filter the queried positions drop ~5.5× (to the user's
+own ~0.94 M), and these row counts shrink too — by **less** than that, since
+user positions are denser in gnomAD than the dropped ClinVar/GWAS-only ones —
+so they are no longer the `user_only` regression signal; that re-locks at the
+PR-C reload. They remain the regression
+signal *if `three_way` is restored* against the same gnomAD release. The
+filter-independent invariant that carries forward to `user_only` is the
+match-rate at 0.988 (~99% of user variants have a gnomAD AF row) — the
+headline value-add: a `variants_master` position without a gnomAD AF after
+a clean refresh is almost always a chip-only ancestry-informative marker
+that gnomAD has not yet observed.
 
 **Troubleshooting.**
 
@@ -1513,12 +1553,13 @@ yet observed.
 * **`match_rate` drops below ~0.95** — either upstream gnomAD has
   retired positions the prior release carried (uncommon but
   documented at gnomAD release time) or the filter set is
-  contaminated with sentinel rows. The PR-B fix tightened the
-  `pos_grch38 > 0` guard on the user / ClinVar / GWAS subqueries
-  uniformly to defend against any future sentinel-emitting
-  upstream source (see [finding-013](../findings/finding-013-synthetic-fixture-realism.md));
+  contaminated with sentinel rows. The `pos_grch38 > 0` guard in
+  `build_filter_set` applies to whichever legs the active strategy
+  runs — for gnomAD's `user_only` filter that is the `variants_master`
+  (user) leg alone (the three_way ClinVar/GWAS legs are not built; see
+  [finding-013](../findings/finding-013-synthetic-fixture-realism.md));
   a drop on a new run warrants an inspection of `_build_filter_set`'s
-  composition counts in the structlog summary first.
+  composition counts (`{user, union_total}`) in the structlog summary first.
 * **Resume after a partial-failure run.** Re-invoke with
   `genome annotate refresh --source gnomad --resume`. The loader
   reads the in-flight `source_version_id` (an
@@ -1571,8 +1612,9 @@ tier-2 backfill.
   function-class flags, not a VEP-grade consequence; populated from VEP in
   Phase 6.
 
-**Filter shape.** `user_only` (distinct `variants_master` positions), not
-gnomAD's three-way `(user ∪ ClinVar ∪ GWAS)` intersection. dbSNP annotates
+**Filter shape.** `user_only` (distinct `variants_master` positions) — the
+same filter gnomAD adopted in finding-035 (the three-way `(user ∪ ClinVar ∪
+GWAS)` union is retained only as gnomAD's revert path). dbSNP annotates
 the user's variants (rsID canonicalisation, REF/ALT recovery, tier-2
 matching), all of which read `variants_master`; loading dbSNP at
 ClinVar/GWAS/PGS positions the user doesn't carry would add rows nothing

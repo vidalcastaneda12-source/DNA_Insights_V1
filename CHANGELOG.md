@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Narrow the gnomAD annotation filter from the three-way `(user ∪ ClinVar ∪ GWAS)`
+  union to `user_only` (the user's own variants), per the finding-035 consumer audit:
+  every `gnomad_frequencies` reader (the `variant_annotations_index` rollup and the
+  loader's own summary) inner-joins `variants_master`, so the ClinVar/GWAS-only legs
+  (~76% of the load) were loaded but never read. `genome.annotate.loaders.gnomad._build_filter_set`
+  swaps `strategy="three_way"` → `"user_only"`; the docs (finding-035 adopted, finding-011
+  superseded, CLAUDE.md "Things never to do" #3, the annotations runbook) record the
+  supersession honestly. The queried position set drops ~5.5× (5.13M → 0.94M user
+  positions) with no consumed-data loss, cutting remote-streaming transfer/wall-clock;
+  the loaded-row magnitude shrinks less and re-locks at PR C. The `three_way` strategy is
+  retained first-class in `filter_set.py` as the revert path
+  (and the future PGS extension). No reload or DB mutation in this PR; the authoritative
+  `user_only` `rows_loaded` / index match-count re-lock (CLAUDE.md obs #4) is deferred to
+  PR C. (PR B, #83)
 - Docs (post-merge follow-up PR A): lock the filter-independent chrX M3 + post-chrX
   consensus anchors (authoritative run_0002) into findings 029/031/033, CLAUDE.md
   observation #3, and the `verification.md` merge-gate runbook — non-PAR yield

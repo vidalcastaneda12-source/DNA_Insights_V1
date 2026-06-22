@@ -1,5 +1,15 @@
 # Finding 016 — dbSNP filters to user variants only (not gnomAD's three/four-way overlap)
 
+> **Status note (2026-06-21):** the gnomAD *contrast* in this finding — the
+> §2 rationale ("a ClinVar/GWAS variant the user does not carry still wants its
+> gnomAD AF"), §4's "gnomAD passes `three_way`", and the title's "(not gnomAD's
+> three/four-way overlap)" — is **superseded by
+> [finding-035](finding-035-gnomad-filter-set-consumer-audit.md)**: the consumer
+> audit found nothing reads those rows, so gnomAD adopted `user_only` too
+> (2026-06-21). gnomAD now uses the **same** filter as dbSNP; the three-way
+> strategy is retained only as gnomAD's revert path. **finding-016's own
+> conclusion — that dbSNP filters `user_only` — is unchanged and correct.**
+
 ## Context
 
 1. The schema coverage-strategy table (`schema_group_2_reference_annotations.md`)
@@ -38,7 +48,8 @@
 
 4. The filter-set builder extracted at finding-012 #11
    (`genome.annotate.filter_set.build_filter_set`) is parameterised on
-   `strategy`: gnomAD passes `"three_way"`, dbSNP passes `"user_only"`. The two
+   `strategy`: gnomAD passed `"three_way"` (now `"user_only"`, finding-035),
+   dbSNP passes `"user_only"`. The two
    strategies share the same `pos_grch38 > 0` sentinel guard and the same
    per-chrom bucketing; only the SQL legs differ. Switching dbSNP to a broader
    coverage later is a one-argument change, not a rewrite.
