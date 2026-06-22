@@ -1,5 +1,9 @@
 # Phase 4 rebuild workflow and chrX hemizygous-haploid Beagle failure
 
+> **Status: closed by PR #74** (chrX resolution via the M3-physical region split).
+> See [`finding-029`](finding-029-chrx-imputation-m1.md) for the resolution and the
+> locked post-chrX anchors. The historical diagnosis below is retained as-is.
+
 ## Context
 
 Real-data verification of the schema view fix in PR #31 required the

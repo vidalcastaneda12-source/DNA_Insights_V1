@@ -192,7 +192,7 @@ bulk-load pattern.
 - CLI: `genome analyze [pgs|pgx|carrier|acmg|hla|roh|haplogroup|ancestry|qc|all]`
 
 Follow-ups (gated on `pgs_score_weights` landing):
-- gnomAD PGS coverage extension — append PGS-component variants to the active gnomAD source-version (append, not refresh; no version bump). See [`finding-011`](docs/findings/finding-011-gnomad-three-way-intersection.md).
+- gnomAD PGS coverage extension — append PGS-component variants to the active gnomAD source-version (append, not refresh; no version bump). See [`finding-011`](docs/findings/finding-011-gnomad-three-way-intersection.md). **Moot while the gnomAD filter is `user_only`** (adopted [`finding-035`](docs/findings/finding-035-gnomad-filter-set-consumer-audit.md), 2026-06-21): the extension would load gnomAD AF at PGS-component positions the user doesn't carry, which — like the ClinVar/GWAS legs finding-035 audited — nothing reads. Revival requires restoring `three_way`.
 - dbSNP PGS leg — extend the `user_only` dbSNP filter to PGS-component positions, mirroring the gnomAD extension. See [`finding-016`](docs/findings/finding-016-dbsnp-user-only-filter.md).
 
 **Verification:** each pipeline produces non-zero output on the merged+imputed dataset; supersession works on re-run.

@@ -1,5 +1,13 @@
 # Post-merge follow-ups — PR #74 (chrX M3) + PR #75 (gnomAD `--jobs`)
 
+> **Status update (2026-06-22):** PR A merged (#82 — Item 1 SAFE locks + Item 5
+> notes) and PR B merged (#83 — **Item 2 RESOLVED: VSC-User ruled `user_only`;
+> the `_build_filter_set` strategy swap + doc reconciliation shipped**). **Item 3
+> (three-way `--jobs` exact-count check) is now MOOT** — three-way was not kept.
+> **Remaining live work: Item 4** (the post-chrX gnomAD reload = "PR C", which
+> produces the authoritative `user_only` gnomAD/index numbers and closes CLAUDE.md
+> obs #4). The gating decision below is answered — do not re-ask it.
+
 **Purpose:** the five remaining follow-up items after PR #74 (chrX imputation via
 M3-physical region split + dosage-confidence QC) and PR #75 (gnomAD parallel import
 via `--jobs`) were squash-merged to `main` on 2026-06-19.
