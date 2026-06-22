@@ -5,9 +5,10 @@
 Fixed in PR 5a (a measurement-layer correction to the chrX non-PAR LOO harness
 built in [`finding-031`](finding-031-chrx-nonpar-dosage-confidence-qc.md)). The
 import dosage-confidence gate and the chrX M3 reload are **unchanged** — they
-were independently verified correct (the gate kept 93,606 chrX calls; non-PAR
-91,085). This finding corrects only how the LOO *report* pairs re-imputed
-dosages with held-out truth.
+were independently verified correct (on the authoritative gate run **run_0002**
+the gate kept **92,832** chrX calls; non-PAR **90,999**; the earlier 93,606 /
+91,085 were the run_0003 verification run). This finding corrects only how the
+LOO *report* pairs re-imputed dosages with held-out truth.
 
 ## Context
 
@@ -96,15 +97,21 @@ criterion becomes evaluable on real data.
 ## Consequence for the finding-031 gate verdict
 
 The chrX reload **substantively passes** the finding-031 bar; this artifact was
-the one blemish on an otherwise clean report. The gate's true precision is
-**≥ 97.82%** (the artifact only depressed it). After this fix, re-running
-`genome imputation chrx-loo 3` on the reloaded corpus is expected to show: the
-non-rare-MAF cells populated with correctly-matched variants (non-zero
-concordance) or legitimately sparse, the "no high-confidence cell collapsing"
-criterion passing, headline concordance **≥ 97.82%** (the artifact only
-depressed it), and a non-zero `n_anchors_not_in_panel` accounting for the
-typed-SNV-absent positions. Lock those numbers into CLAUDE.md observation #3's
-chrX bullet once captured.
+the one blemish on an otherwise clean report. On the **first** run #0003 (pre-fix,
+position-only matching) the artifact-corrected lower bound was **≥ 97.82%** — the
+position-only artifact only ever *depressed* the reported number. After this
+allele-aware fix, re-running `genome imputation chrx-loo` shows the non-rare-MAF
+cells populated with correctly-matched variants (non-zero concordance) or
+legitimately sparse, and the "no high-confidence cell collapsing" criterion
+passing.
+
+On the authoritative gate run (**run_0002**, post-fix) the LOO headline
+concordance is **0.985550** (6957/7059 @ dconf 0.9; `n_anchors_not_in_panel`
+**5,276** — the typed-SNV-absent accounting is populated as predicted; n_anchors
+20,472), locked into CLAUDE.md observation #3's chrX bullet and finding-031's PASS
+bar. (The post-fix run_0003 re-run measured 0.985971; run_0002 is 0.985550 —
+Beagle is non-deterministic, band ≈0.985–0.986. The pre-fix 0.9782 is a separate,
+artifact-depressed measurement and is **not** part of that band.)
 
 ## Tests
 
@@ -127,7 +134,8 @@ chrX bullet once captured.
 ## Out of scope (unchanged, verified correct)
 
 - The import dosage-confidence gate (`ingest.py`, `_variant_quality`) — verified
-  correct (93,606 chrX kept); not touched.
+  correct (run_0002: 92,832 chrX kept; the run_0003 verification had 93,606); not
+  touched.
 - The chrX M3-physical imputation and the FK-safe reload
   ([`finding-029`](finding-029-chrx-imputation-m1.md),
   [`finding-032`](finding-032-imputed-supersession-discrepancies-fk.md)).

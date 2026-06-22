@@ -107,8 +107,10 @@ identifiers documented in CLAUDE.md "Real-data observations":
   correction-not-regression framing.**
 * Phase 4 imputation: input 204,153 polymorphic SNVs (chr1–chr22 + X),
   imputed output at DR² > 0.3 = 2,369,171, mean DR² 0.8242,
-  high-quality (DR² > 0.8) = 1,592,735, chrX imputed = 0 for males,
-  full-genome runtime ~30 min on 16 threads / 8 GB heap.
+  high-quality (DR² > 0.8) = 1,592,735, chrX imputed = 0 for males
+  (**Phase-4 boundary value; superseded by PR #74 / 5a — see the
+  post-chrX re-lock below**), full-genome runtime ~30 min on 16
+  threads / 8 GB heap.
 * PR-3 canonicalize step (`genome annotate canonicalize-variants` →
   `genome merge` → `genome annotate align-tier3-consensus` →
   `genome annotate refresh-index`): the bedrock anchor table in
@@ -124,6 +126,22 @@ identifiers documented in CLAUDE.md "Real-data observations":
   tier-3 strand-flip pairs survive to merge,
   but canonicalize subsumes them upstream, so 104 of the 106 post-merge
   rows reclassify to `single_source`. See finding-020 recon B.)
+* Post-chrX re-lock (PR #74 / 5a — M3-physical chrX; gate-measured,
+  run_0002): chrX imputed is now **92,832** (non-PAR **90,999** + PAR
+  **1,833**), not 0; `consensus_total` = `variants_master` **3,160,364**;
+  `imputed_only` **2,218,539**; `single_source` **821,285**;
+  `both_concordant` **120,513**; `disagreement_resolved` **0**;
+  `unresolvable` **27**; shared-call concordance **0.9997760079641613**
+  (UNCHANGED by chrX). Autosomal negative control byte-identical to
+  pre-chrX: both **115,509** / single **793,917** / imputed_only
+  **2,146,302** / unresolvable **26**. Male non-PAR quality is
+  dosage-confidence + 5-fold LOO (concordance **0.985550**, run_0002 —
+  Beagle is non-deterministic, band ≈0.985–0.986; PASS bar ≥95%), not
+  DR² (structurally dead for single-sample male non-PAR). The
+  imputation-derived counts (chrX yield, dconf split, LOO) are
+  tolerance-banded; the consensus counts are exact. See CLAUDE.md obs #3
+  and findings 029/031/033. gnomAD/index match counts re-lock later at
+  PR C — the live gate DB is a `user_only` gnomAD build.
 
 Drift in any of these numbers against the same input corpus is a
 regression signal, not noise. The numbers are recorded as stable

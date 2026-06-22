@@ -1,5 +1,11 @@
 # chrX imputation via M1 panel diploidization
 
+> **Note:** the title names M1 (the option first explored). The **shipped**
+> mechanic is **M3-physical region split** (PR #74) — M1 was built, failed its
+> falsifiability gate, and was deleted; the M1 narrative below is kept as the
+> audit trail. See "M3-physical built (PR 5a)" below and finding-031. The filename
+> is retained to preserve inbound links.
+
 ## Context
 
 chrX imputation yielded **zero** variants for the male user. `finding-008`
@@ -170,7 +176,7 @@ CTE. (The chrX *run* additionally hard-gates on a determinate sex via
 `resolve_sex`, so an ambiguous profile is told to pass `--sex` before a chrX run
 rather than silently mis-correcting.)
 
-## Verification (first-authoritative-run anchors — capture at the gate)
+## Verification (first-authoritative-run anchors — LOCKED, run_0002)
 
 The gated chrX reload is VSC-User's independent verification, run with the
 **5b collapse chain** folded in:
@@ -181,33 +187,56 @@ panel prepare-chrx → prepare --sex auto(→M) → run --chromosomes X
   → align-tier3-consensus → refresh-index
 ```
 
-Anchors to **measure and then lock** on the first authoritative run (drift on a
-later re-run against the same corpus is then a regression signal):
+Anchors **measured and locked** on the first authoritative run (**run_0002**;
+drift on a re-run against the same corpus + run_0002 build is a regression signal;
+re-derive read-only against `data/genome.duckdb`):
 
-- **chrX imputed variants > 0** — the original failure was exactly 0. ~25,751
-  non-PAR targets seed the input.
-- **chrX duplicates collapsed > 0** — 5b's `collapse-duplicate-variants` ran when
-  chrX had ~0 imputed variants, so the chip+imputed duplicate classes (REF/ALT
-  swap, strand-flip) and the chip-no-call-meets-imputed surfacing (`finding-028`)
-  collapse on chrX for the **first time** here. Zero ⇒ investigate.
-- **`variants_master` / `consensus_total` / `imputed_only`** rise from baseline by
-  the chrX contribution (order ~10⁵).
-- **Index anchors re-locked**: `row_count`, `gnomad_matches`, `clinvar_matches`,
-  `gwas_matches`, `pharmgkb_matches`, `is_rare`, `is_ultrarare` to their new
-  post-chrX values. Confirm the current post-5b baselines (CLAUDE.md obs #4)
-  before re-locking so chrX rows are not later flagged as drift.
-- **Negative control (must stay unchanged)**: the autosomal/consensus anchors —
-  `consensus_total` and shared-call concordance `~0.999776`. **Confirm the exact
-  baseline against the repo before trusting** (the plan and CLAUDE.md obs #3
-  differ on the `consensus_total` figure; reconcile the live value at the gate).
-- **M1 falsifiability**: mean **DR² for non-PAR vs PAR vs autosomes**, and the
-  **`male_nonpar_het_anomaly`** count from the view (expect small/near-zero). A
-  non-PAR DR² materially below PAR/autosomal, or a het-anomaly count more than a
-  handful, **triggers M3-physical** (above).
-- **Full-chromosome boundary**: `panel prepare-chrx` asserts zero haploid GTs
-  across all of chrX before any Beagle run; a residual failure on the full
-  diploidized run would implicate Beagle's boundary handling and gets an entry
-  here.
+- **chrX imputed variants > 0** (the original failure was exactly 0): **92,832**
+  total kept (non-PAR **90,999** + PAR **1,833**). *Tolerance-banded — Beagle is
+  multi-threaded / not bit-reproducible; run_0003 saw non-PAR ~91,085.* Re-derive:
+  `genotype_calls` source `'beagle_imputed'` (active) ⋈ `variants_master`, split by
+  the PAR predicate (`pos_grch38 BETWEEN 10001 AND 2781479 OR BETWEEN 155701383 AND
+  156030895`).
+- **non-PAR dosage-confidence (the live quality signal — `INFO/DR2` is dead, see
+  below):** **87,578** ≥0.99 + **3,421** in [0.9,0.99) = 90,999 (rows carrying
+  `quality_flags` `nonpar_dosage_conf`; the typed-anchor subset is 84,657 at
+  `imputation_r2`=1.0). *Tolerance-banded.*
+- **chrX duplicates collapsed > 0** — 5b's `collapse-duplicate-variants` surfaced
+  the chip+imputed duplicate classes (REF/ALT swap, strand-flip) and the
+  chip-no-call-meets-imputed surfacing (`finding-028`) on chrX for the **first
+  time** here (it had run when chrX was ~0). The result is folded into the
+  consensus deltas below.
+- **`variants_master` / `consensus_total` / `imputed_only` rose** (exact/
+  deterministic): `consensus_total` = `variants_master` total **3,160,364**;
+  `imputed_only` **2,218,539**; `single_source` **821,285**; `both_concordant`
+  **120,513**; `disagreement_resolved` **0**; `unresolvable` **27**. The chrX
+  `imputed_only` contribution is **72,237**.
+- **Index anchors — DEFERRED to PR C.** `row_count`, `gnomad_matches`,
+  `clinvar_matches`, `gwas_matches`, `pharmgkb_matches`, `is_rare`, `is_ultrarare`
+  are **not** locked here: the live gate DB is a `user_only` gnomAD build
+  (`finding-035`) and gnomAD was loaded before the chrX import, so the new chrX
+  positions mostly lack gnomAD annotations. They re-lock at the post-chrX gnomAD
+  reload + `refresh-index` (plan Items 2/4 / PR C); CLAUDE.md obs #4 is unchanged
+  until then.
+- **Negative control (must stay unchanged — exact):** autosomal `both_concordant`
+  **115,509** / `single_source` **793,917** / `imputed_only` **2,146,302** /
+  `unresolvable` **26**; shared-call concordance **0.9997760079641613**
+  (= 120,513/120,540, **UNCHANGED by chrX** — `genotype_mismatch`=0, 27
+  `strand_ambiguous`). The pre-chrX `consensus_total` baseline is 3,088,916
+  (CLAUDE.md obs #3 / obs #6); the post-chrX 3,160,364 above is the chrX-inclusive
+  boundary (the two are distinct boundaries, both correct).
+- **Quality (M1 falsifiability), reframed per `## Correction` / finding-031:** on
+  single-sample male non-PAR the Beagle `INFO/DR2` is **structurally 0** for every
+  marker (a dead metric, not lost information), so quality is **not** gated on a
+  non-PAR-vs-PAR DR² comparison. It is established by the dosage-confidence split
+  (above) and the 5-fold LOO: concordance **0.985550** (6957/7059 @ dconf 0.9;
+  n_anchors 20,472; not-in-panel 5,276; run_0002 `REPORT.json`), comfortably above
+  the finding-031 ≥95% bar; run-to-run band ≈0.985–0.986. `male_nonpar_het_anomaly`
+  = **1** (one residual chip miscall; ≈0 by construction under R1) — far below the
+  "more than a handful" M3-physical re-trigger.
+- **Full-chromosome boundary**: `panel prepare-chrx` asserts the region subsets are
+  haploid-correct (PAR haploid-free, non-PAR retains male haplotypes) before any
+  Beagle run; no residual full-run boundary failure was observed.
 
 ## Side-effect surfaced: the canonicalize variant_id_seq off-by-one
 
@@ -284,14 +313,17 @@ The Task 0 probe passed, so M3-physical was built and the M1 *code* deleted
 
 ## Follow-up
 
-- **Capture the first-authoritative-run M3 anchors at the gate and lock them
-  here** (these replace the M1 failure numbers as the regression signal):
-  non-PAR mean DR² ≈ PAR/autosomal (no longer ~0); non-PAR usable yield ≫ 31
-  (order ~10⁴–10⁵); `male_nonpar_het_anomaly` ≈ 0; chrX duplicates collapsed > 0;
-  re-locked index match counts; negative controls (autosomal anchors, PAR,
-  shared-call concordance ~0.999776) unchanged. **Also update CLAUDE.md real-data
-  observation #3** ("chrX imputed: 0") to the measured M3 numbers, and flip
-  ROADMAP PR 5a to `[x]`, only after the gate passes.
+- **First-authoritative-run M3 anchors captured (run_0002) and locked** in the
+  Verification section above and CLAUDE.md obs #3 (these replace the M1 failure
+  numbers as the regression signal): non-PAR usable yield **90,999** (≫ M1's net
+  ~1; tolerance-banded); chrX total kept **92,832**; quality via dosage-confidence
+  + LOO (concordance **0.985550**) — **not** DR², which is structurally 0 for
+  single-sample male non-PAR (see `## Correction` / finding-031);
+  `male_nonpar_het_anomaly` = **1**; `consensus_total` **3,160,364**; negative
+  controls (autosomal anchors, PAR, shared-call concordance **0.9997760079641613**)
+  unchanged. Re-locked **index** match counts are **DEFERRED to PR C** (gnomAD-
+  gated). Done in PR A: CLAUDE.md obs #3 updated and ROADMAP PR 5 / 5a flipped to
+  `[x]`.
 - Persist `--sex` to `sample_qc.sex_expected` (the sex-edge remedy) when an
   all-ambiguous profile actually needs it — not required for this user.
 - chrY stays skipped (the panel has no Y); `pos_grch37` recoalesce

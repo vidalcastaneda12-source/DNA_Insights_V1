@@ -19,9 +19,10 @@ crashed.
 
 The QC layer that motivated the re-import
 ([`finding-031`](finding-031-chrx-nonpar-dosage-confidence-qc.md), the
-dosage-confidence gate) is verified-correct (93,606 chrX kept). This is a
-**separate, pre-existing** bug in the supersession path, *exposed* — not caused —
-by the re-import. It is also **general**: any future autosomal imputed re-import
+dosage-confidence gate) is verified-correct (run_0003: 93,606 chrX kept; the
+authoritative run_0002 lock is 92,832 — see [`finding-033`](finding-033-chrx-loo-allele-aware-matching.md)).
+This is a **separate, pre-existing** bug in the supersession path, *exposed* — not
+caused — by the re-import. It is also **general**: any future autosomal imputed re-import
 over a merged corpus hits it.
 
 ## Problem: an indexed-column UPDATE delete+reinserts the parent row

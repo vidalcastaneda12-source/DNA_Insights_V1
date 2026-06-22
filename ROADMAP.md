@@ -2,7 +2,7 @@
 
 Phases are sequential. Do not start phase N+1 until phase N's verification passes.
 
-**Current phase:** Phase 5 closed; executing the pre-Phase-6 cleanup sequence (PRs 1–4 landed, PR 5 next) before Phase 6 begins.
+**Current phase:** Phase 5 closed; executing the pre-Phase-6 cleanup sequence (PRs 1–5 landed; PR 6 next) before Phase 6 begins.
 
 ## Phase 1 — Foundation (this is the bootstrap)
 
@@ -86,7 +86,7 @@ Deferred to later phases:
 
 ## Pre-Phase-6 sequence
 
-**Status:** in progress — PRs 1–4 landed (#63, #64, #65, #70); PR 5 is next.
+**Status:** in progress — PRs 1–5 landed (#63, #64, #65, #70, #74); PR 6 is next.
 
 A 13-PR run that clears every dbSNP-dependent backfill, deferred-cleanup item,
 and FK blocker before the Phase 6 analyses begin, so Phase 6 starts with no open
@@ -114,7 +114,8 @@ finding-016 #8):
   `genome annotate align-tier3-consensus` runs after `merge`. Closes finding-005 #1
   (ordering aspect) and #6. Deliberate concordance re-lock to 0.999776 (finding-018
   anticipated this; not a regression). The strand-flip `variants_master` collapse is
-  deferred to PR 5. (#65)
+  deferred as its own separately-tracked item (finding-005 #1 / finding-020 "Out of
+  scope"), distinct from PR 5's two halves. (#65)
 - [x] **PR 4** — Tier-2 rsID matching in `refresh-index`, consuming the `variant_aliases`
   map from PR 2 (finding-005 #4). Both user-side and source-side rsIDs canonicalize
   through the dbSNP alias map; real-data lift `gwas_matches` 66,701→66,764 /
@@ -122,11 +123,13 @@ finding-016 #8):
 
 **Remaining cleanup** — clears the deferred backlog so Phase 6 opens clean:
 
-- [ ] **PR 5** — chrX resolution + same-SNP duplicate collapse (two independent halves)
+- [x] **PR 5** — chrX resolution + same-SNP duplicate collapse (two independent halves)
     - [x] **5b-pre** + **5b** — `consensus_v1` chip-no-call fix + `collapse-duplicate-variants`
       (≈684 duplicates across five mechanisms reconciled; finding-005 #1 closed;
       findings 026/027/028). Merged; new anchor variants_master/consensus 3,088,233.
-    - [ ] **5a** — chrX resolution, Option B (sex-aware non-PAR/PAR regions; finding-008)
+    - [x] **5a** — chrX resolution via M3-physical region split (PR #74; sex-aware
+      PAR1/non-PAR/PAR2 physical panel subsets; findings 029/031/033; closes
+      finding-008). Supersedes the original Option-B framing.
 - [ ] **PR 6** — Minimal `genes` seed, Option A: the gene-symbol union of the
   ACMG SF v3.x, PGx, and carrier gene lists. Enough rows to satisfy the
   `NOT NULL REFERENCES genes(gene_symbol)` FKs on `derived_pgx_phenotypes`,
@@ -169,8 +172,8 @@ hasn't arrived, tracked in findings for when it does:
 - Hash-as-canonical-identity refactor
 - `annotate inspect --source URL` schema-inspection helper
 
-**Phase 6 entry is gated on:** PRs 4–6 in particular (tier-2 rsID matching, chrX
-Option B, minimal `genes` seed), plus the locked conventions — supersession-over-update,
+**Phase 6 entry is gated on:** PR 6 in particular (minimal `genes` seed) — PRs 4
+(tier-2 rsID matching, #70) and 5 (chrX M3-physical, #74) have landed; plus the locked conventions — supersession-over-update,
 operation-level provenance without schema changes, and the PyArrow / INSERT-SELECT
 bulk-load pattern.
 
