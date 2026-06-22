@@ -1,8 +1,10 @@
 """Tests for :mod:`genome.annotate.loaders.gnomad`.
 
 Covers the pure helpers (``_coalesce_positions``, ``_record_to_row``),
-the three-way intersection SQL (``_build_filter_set``), the
-per-chromosome iteration with dedup across exomes/genomes, the
+the ``user_only`` filter set (``_build_filter_set`` — distinct
+``(chrom, pos_grch38)`` positions from ``variants_master`` alone,
+restricted to ``SUPPORTED_CHROMS``; ClinVar/GWAS do not contribute),
+the per-chromosome iteration with dedup across exomes/genomes, the
 pre-flight libcurl check, the audited refusal path, the version
 short-circuit, ``--force`` re-allocation, ``--resume`` continuation,
 partial-failure isolation, the partial-chromosomes-no-flip semantic,
@@ -336,27 +338,34 @@ def test_preflight_libcurl_fail_raises_clear_error(
 # ---------------------------------------------------------------------------
 
 
-def test_build_filter_set_three_way_intersection() -> None:
-    """Union across user + ClinVar + GWAS produces sorted unique positions."""
+def test_build_filter_set_user_only() -> None:
+    """user_only: the filter set is variants_master's distinct positions alone.
+
+    from: plan §6 expected — under ``strategy="user_only"`` only
+    ``variants_master`` contributes to the gnomAD filter set, restricted
+    to ``SUPPORTED_CHROMS`` (1-22, X). ClinVar and GWAS positions are
+    intentionally excluded, and ``composition`` carries only the
+    ``{user, union_total}`` keys (no ``clinvar``/``gwas``).
+    """
     init_databases()
     with duckdb_connection() as conn:
         _seed_user_variants(conn, [("1", 100), ("1", 200), ("2", 300)])
+        # ClinVar-only (1, 400) and GWAS-only (X, 500) are seeded but
+        # intentionally excluded from the filter set under user_only —
+        # only variants_master positions contribute.
         _seed_clinvar_active(conn, rows=[("1", 200), ("1", 400)])
         _seed_gwas_active(conn, rows=[("2", 300), ("X", 500)])
         result = _build_filter_set(conn)
-    assert result.positions["1"] == [100, 200, 400]
+    # chr1 / chr2 carry only the user's own positions.
+    assert result.positions["1"] == [100, 200]
     assert result.positions["2"] == [300]
-    assert result.positions["X"] == [500]
+    # X is a SUPPORTED_CHROM so it is a present-but-empty key: the user
+    # has no X variant, and the GWAS (X, 500) position does not count.
+    assert result.positions["X"] == []
     # Y / MT not in SUPPORTED_CHROMS — keys absent (chrom not in dict).
     assert "Y" not in result.positions
     assert "MT" not in result.positions
-    expected_total = 5
-    assert result.composition == {
-        "user": 3,
-        "clinvar": 2,
-        "gwas": 2,
-        "union_total": expected_total,
-    }
+    assert result.composition == {"user": 3, "union_total": 3}
 
 
 def test_build_filter_set_excludes_inactive_variants_master() -> None:
@@ -368,67 +377,6 @@ def test_build_filter_set_excludes_inactive_variants_master() -> None:
     # No-active flag on variants_master — every row contributes.
     assert result.positions["1"] == [1000]
     assert result.composition["user"] == 1
-
-
-def test_build_filter_set_excludes_non_active_clinvar_version() -> None:
-    """ClinVar rows under a non-current source_version_id do not contribute."""
-    init_databases()
-    with duckdb_connection() as conn:
-        old_id = insert_source_version(
-            conn,
-            source_db="clinvar",
-            version="2026_04_01",
-            source_url=None,
-            source_file_hash="x" * 64,
-            source_file_size=1,
-            record_count=1,
-        )
-        conn.execute(
-            """
-            INSERT INTO clinvar_annotations (
-                clinvar_id, variation_id, chrom, pos_grch38,
-                source_version_id, retrieval_date
-            )
-            VALUES (1, 'CV1', '1'::chromosome_enum, 999, ?, CURRENT_TIMESTAMP)
-            """,
-            [old_id],
-        )
-        # Flip pointer to a DIFFERENT version with no rows under it.
-        new_id = _seed_clinvar_active(conn, rows=[("1", 111)])
-        assert new_id != old_id
-        result = _build_filter_set(conn)
-    assert result.positions["1"] == [111]
-    assert 999 not in result.positions["1"]
-
-
-def test_build_filter_set_excludes_non_active_gwas_version() -> None:
-    """GWAS rows under a non-current source_version_id do not contribute."""
-    init_databases()
-    with duckdb_connection() as conn:
-        old_id = insert_source_version(
-            conn,
-            source_db="gwas_catalog",
-            version="2026_04_01",
-            source_url=None,
-            source_file_hash="y" * 64,
-            source_file_size=1,
-            record_count=1,
-        )
-        conn.execute(
-            """
-            INSERT INTO gwas_catalog_associations (
-                association_id, study_accession, rsid, chrom, pos_grch38,
-                source_version_id, retrieval_date
-            )
-            VALUES (1, 'GCST0', 'rs0', '1'::chromosome_enum, 888, ?, CURRENT_TIMESTAMP)
-            """,
-            [old_id],
-        )
-        new_id = _seed_gwas_active(conn, rows=[("1", 222)])
-        assert new_id != old_id
-        result = _build_filter_set(conn)
-    assert result.positions["1"] == [222]
-    assert 888 not in result.positions["1"]
 
 
 def test_build_filter_set_restricts_to_supported_chroms() -> None:
@@ -2146,66 +2094,51 @@ def test_record_to_row_af_oth_reads_from_af_remaining_only() -> None:
 
 
 def test_build_filter_set_excludes_sentinel_negative_positions() -> None:
-    """ClinVar emits ``pos_grch38 = -1`` for unresolved coordinates.
+    """The user leg emits ``pos_grch38 = -1`` for unresolved coordinates.
 
-    Real-data observation: the active ClinVar release in the
-    project DB contains 20,173 rows with ``pos_grch38 = -1`` under
-    the current source-version pointer. The original
-    ``IS NOT NULL`` guard in ``_build_filter_set`` admitted these,
-    which then flowed through ``_coalesce_positions`` and produced
-    ``chr<N>:-1--1`` tabix regions — the htslib "Coordinates must
-    be > 0" error in the first PR-B verification run. The
-    tightened guard (``pos_grch38 > 0``) must drop every negative
-    sentinel from each source-side subquery and from the union.
+    from: plan §6 expected — under user_only the only contributing leg is
+    ``variants_master``, so the ``pos_grch38 > 0`` guard must drop every
+    negative sentinel carried on the user leg itself. Real-data context:
+    a non-positive ``pos_grch38`` admitted by an ``IS NOT NULL`` guard
+    flows through ``_coalesce_positions`` and produces ``chr<N>:-1--1``
+    tabix regions — the htslib "Coordinates must be > 0" error in the
+    first PR-B verification run. The tightened guard must drop the
+    sentinel from the user-side subquery and from the resulting set.
     """
     init_databases()
     with duckdb_connection() as conn:
-        # ClinVar: real positions on chr22 plus the -1 sentinel.
-        _seed_clinvar_active(
+        # variants_master forbids NULL but accepts any BIGINT, including the
+        # -1 sentinel; seed real positions on chr22/chr1 alongside the -1s.
+        # No ClinVar/GWAS rows: user_only sources its positions here alone.
+        _seed_user_variants(
             conn,
-            rows=[("22", 17007792), ("22", -1), ("1", -1), ("1", 500)],
+            [("22", 17007792), ("22", -1), ("1", -1), ("1", 500)],
         )
-        # GWAS: also seed a -1 row to verify the same guard fires
-        # against the GWAS subquery.
-        _seed_gwas_active(conn, rows=[("22", 17007800), ("22", -1)])
-        # variants_master forbids NULL but accepts any BIGINT; insert
-        # a positive position so the user-side subquery has content.
-        _seed_user_variants(conn, [("22", 17007792), ("1", 500)])
         result = _build_filter_set(conn)
-    # No chromosome's position list may contain a negative value.
+    # No chromosome's position list may contain a non-positive value.
     for chrom, positions in result.positions.items():
         assert all(p > 0 for p in positions), (
             f"chrom {chrom} retains non-positive positions: {[p for p in positions if p <= 0]}"
         )
-    # Specifically chr22 keeps the real positions, drops the -1.
-    assert -1 not in result.positions["22"]
-    assert 17007792 in result.positions["22"]
-    assert 17007800 in result.positions["22"]
-    # And chr1 keeps 500 but not -1.
-    assert -1 not in result.positions["1"]
-    assert 500 in result.positions["1"]
-    # Composition counters reflect only positive rows: ClinVar 2 (22, 17007792) + (1, 500),
-    # GWAS 1 (22, 17007800), user 2 (22, 17007792) + (1, 500), union_total 3 distinct positions.
-    expected_clinvar = 2
-    expected_gwas = 1
-    expected_user = 2
-    expected_union = 3
-    assert result.composition["clinvar"] == expected_clinvar
-    assert result.composition["gwas"] == expected_gwas
-    assert result.composition["user"] == expected_user
-    assert result.composition["union_total"] == expected_union
+    # chr22 keeps the real position, drops the -1.
+    assert result.positions["22"] == [17007792]
+    # chr1 keeps 500 but not -1.
+    assert result.positions["1"] == [500]
+    # Composition counts only the 2 positive distinct user positions.
+    assert result.composition == {"user": 2, "union_total": 2}
 
 
 def test_load_does_not_query_negative_region_when_sources_have_sentinels(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """End-to-end: a -1 sentinel in ClinVar must never reach cyvcf2 as a region.
+    """End-to-end: a -1 sentinel in variants_master must never reach cyvcf2 as a region.
 
     Wires up a custom factory that captures every region string the
     loader passes to ``cyvcf2.VCF(...)`` and asserts the loader never
-    builds a negative or non-positive range — even when the upstream
-    annotation sources carry the sentinel rows that caused the PR-B
-    "Coordinates must be > 0" failure.
+    builds a negative or non-positive range — even when the user leg
+    (``variants_master``, the only leg gnomAD's ``user_only`` filter reads)
+    carries the sentinel rows that caused the PR-B "Coordinates must be > 0"
+    failure.
     """
     init_databases()
     _enable_external_calls()
@@ -2255,9 +2188,11 @@ def test_load_does_not_query_negative_region_when_sources_have_sentinels(
     monkeypatch.setattr(cyvcf2, "VCF", _factory)
 
     with duckdb_connection() as conn:
-        # Mix real positions on chr22 with a -1 ClinVar sentinel.
-        _seed_clinvar_active(conn, rows=[("22", 17007792), ("22", -1)])
-        _seed_user_variants(conn, [("22", 17007792)])
+        # A -1 sentinel IN THE USER LEG (variants_master): under user_only
+        # that is the only leg feeding the filter set, so the pos_grch38 > 0
+        # guard must drop the sentinel here. (Seeding it in ClinVar would be
+        # vacuous post-finding-035 — gnomAD no longer reads ClinVar.)
+        _seed_user_variants(conn, [("22", 17007792), ("22", -1)])
         audited, http = _mock_audited_client()
         try:
             result = load(conn, audited, force=True, chromosomes=["22"])

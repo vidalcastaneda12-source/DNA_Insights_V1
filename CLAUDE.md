@@ -171,7 +171,7 @@ runbook is the canonical gate.
 
 - Never modify the schema markdown files in `docs/schemas/` or the DDL files extracted from them, except via a deliberate, documented schema change followed by a re-extraction.
 - Never UPDATE an active insight or evidence row to change its content. Use the supersession workflow.
-- Never bulk-load gnomAD without filtering to the (user ∪ ClinVar ∪ GWAS ∪ PGS) intersection — full gnomAD is too large.
+- Never bulk-load gnomAD without filtering to the (user ∪ ClinVar ∪ GWAS ∪ PGS) intersection — full gnomAD is too large. As of finding-035 (adopted 2026-06-21), the active gnomAD filter is narrowed further to `user_only` (the user's own variants — the consumed subset, since every `gnomad_frequencies` reader inner-joins `variants_master`); `user_only` is a strict subset of this upper bound, which remains the documented ceiling and the one-argument revert path (`strategy="three_way"`).
 - Never call an external API outside the audited client.
 - Never store the body of an external request — only the hash.
 - Never embed an API key, passphrase, or other secret in code or tests.

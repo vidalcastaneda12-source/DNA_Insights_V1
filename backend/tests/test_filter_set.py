@@ -2,9 +2,11 @@
 
 Covers both filter strategies of ``build_filter_set``:
 
-* ``three_way`` — gnomAD's ``(user U ClinVar U GWAS)`` union, joined through the
+* ``three_way`` — the ``(user U ClinVar U GWAS)`` union joined through the
   ``annotation_sources`` version pointer; composition
-  ``{user, clinvar, gwas, union_total}``.
+  ``{user, clinvar, gwas, union_total}``. gnomAD's *former* filter, retained
+  as the revert / PGS-extension path after finding-035 narrowed gnomAD to
+  ``user_only``; reachable only via an explicit ``strategy="three_way"`` call.
 * ``user_only`` — dbSNP's filter; ``variants_master`` positions alone (ClinVar /
   GWAS rows present in the DB must NOT contribute); composition
   ``{user, union_total}``.
@@ -126,6 +128,75 @@ def test_three_way_union_and_composition() -> None:
     assert result.positions["2"] == [300]
     assert result.positions["X"] == [500]
     assert result.composition == {"user": 3, "clinvar": 2, "gwas": 2, "union_total": 5}
+
+
+def test_three_way_excludes_non_active_source_versions() -> None:
+    """three_way drops ClinVar/GWAS rows under a superseded ``source_version_id``.
+
+    Restores the active-version-pointer coverage the gnomAD wrapper carried
+    before the finding-035 ``user_only`` swap (the two deleted
+    ``_excludes_non_active_*_version`` wrapper tests in test_loaders_gnomad.py).
+    ``flip_to_new_version`` only UPSERTs the pointer — prior-version rows
+    physically remain in the table, so without the
+    ``s.current_source_version_id = <table>.source_version_id`` half of the JOIN
+    they would leak into the three_way filter set. A mutant weakening that
+    predicate to a tautology survives every other test in this module but is
+    killed here.
+    """
+    init_databases()
+    with duckdb_connection() as conn:
+        _seed_user_variants(conn, [("1", 100)])
+        # ClinVar row under an OLD version, then flip the pointer to a NEW one.
+        old_cv = insert_source_version(
+            conn,
+            source_db="clinvar",
+            version="2026_04_01",
+            source_url=None,
+            source_file_hash="c" * 64,
+            source_file_size=1,
+            record_count=1,
+        )
+        conn.execute(
+            """
+            INSERT INTO clinvar_annotations (
+                clinvar_id, variation_id, chrom, pos_grch38, source_version_id, retrieval_date
+            )
+            VALUES (?, ?, '1'::chromosome_enum, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            [9001, "CV9001", 999, old_cv],
+        )
+        new_cv = _seed_clinvar_active(conn, [("1", 111)])
+        # GWAS row under an OLD version, then flip its pointer to a NEW one.
+        old_gw = insert_source_version(
+            conn,
+            source_db="gwas_catalog",
+            version="2026_04_01",
+            source_url=None,
+            source_file_hash="g" * 64,
+            source_file_size=1,
+            record_count=1,
+        )
+        conn.execute(
+            """
+            INSERT INTO gwas_catalog_associations (
+                association_id, study_accession, rsid, chrom, pos_grch38,
+                source_version_id, retrieval_date
+            )
+            VALUES (?, ?, ?, '2'::chromosome_enum, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            [9001, "GCST9001", "rs9001", 888, old_gw],
+        )
+        new_gw = _seed_gwas_active(conn, [("2", 222)])
+        assert new_cv != old_cv
+        assert new_gw != old_gw
+        result = build_filter_set(conn, strategy="three_way", supported_chroms=_GNOMAD_CHROMS)
+    # Active-version positions present; superseded-version positions excluded.
+    assert result.positions["1"] == [100, 111]
+    assert 999 not in result.positions["1"]
+    assert result.positions["2"] == [222]
+    assert 888 not in result.positions["2"]
+    # Counts also respect the pointer: one active row per source.
+    assert result.composition == {"user": 1, "clinvar": 1, "gwas": 1, "union_total": 3}
 
 
 def test_user_only_ignores_clinvar_and_gwas() -> None:

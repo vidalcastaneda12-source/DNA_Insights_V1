@@ -3,16 +3,21 @@
 Extracted from :mod:`genome.annotate.loaders.gnomad` at sub-phase 5.6 and
 parameterised on a ``strategy`` so two remote-tabix loaders can share it:
 
-* ``"three_way"`` — gnomAD's ``(user U ClinVar U GWAS)`` intersection. The
-  upstream gnomAD VCFs are filtered to positions present in the user's
+* ``"three_way"`` — the ``(user U ClinVar U GWAS)`` intersection. The
+  upstream VCFs are filtered to positions present in the user's
   variants OR the active ClinVar release OR the active GWAS Catalog release.
   CLAUDE.md "Things never to do" #3 mandates the broader
   ``(user U ClinVar U GWAS U PGS)`` intersection but PGS per-variant weights
-  do not yet exist at PR-B time; see finding-011.
-* ``"user_only"`` — dbSNP's filter. dbSNP annotates **the user's own
-  variants** (canonical rsID, REF/ALT, gene, variant class); its consumers all
-  operate on ``variants_master``, so the filter is the distinct user positions
-  alone. ClinVar/GWAS/PGS legs are deferred — see finding-016.
+  do not yet exist at PR-B time; see finding-011. This was gnomAD's original
+  filter; it is retained as gnomAD's revert path + the future PGS extension.
+* ``"user_only"`` — the filter used by **both gnomAD and dbSNP**. Both
+  annotate **the user's own variants**, and every consumer of their tables
+  (``gnomad_frequencies``, ``dbsnp_annotations``) inner-joins
+  ``variants_master``, so the filter is the distinct user positions alone.
+  dbSNP shipped on this filter from sub-phase 5.6 (the ClinVar/GWAS/PGS legs
+  deferred — see finding-016); gnomAD adopted it per finding-035 (VSC-User
+  ruled ``user_only`` 2026-06-21) after the consumer audit confirmed the
+  ClinVar/GWAS-only legs were loaded but never read.
 
 The active-version joins go through ``annotation_sources`` (the version-pointer
 pattern, finding-010): only rows under the currently-active ClinVar / GWAS

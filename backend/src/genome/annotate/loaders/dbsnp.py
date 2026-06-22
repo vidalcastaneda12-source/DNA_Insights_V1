@@ -19,7 +19,9 @@ per-chromosome iteration, and the version-pointer supersession lifecycle.
 dbSNP's value here is annotating the user's variants: canonical rsIDs,
 canonical REF/ALT, gene symbols, and variant class. Those consumers all
 operate on ``variants_master``, so the filter is ``user_only`` (distinct user
-positions), not gnomAD's three-way ``(user U ClinVar U GWAS)`` intersection.
+positions) — the same filter gnomAD adopted in finding-035; the three-way
+``(user U ClinVar U GWAS)`` strategy is retained in
+:mod:`genome.annotate.filter_set` only as gnomAD's revert path. dbSNP's
 ClinVar/GWAS/PGS legs are deferred — see finding-016.
 
 Three dbSNP-specific contracts, all ratified against the real source before

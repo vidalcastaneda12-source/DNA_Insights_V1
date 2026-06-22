@@ -1,5 +1,7 @@
 # Finding 035 — gnomAD filter-set consumer audit: ClinVar/GWAS-only rows are loaded but never read
 
+**Status: adopted — VSC-User ruled `user_only` on 2026-06-21; implemented in PR B (gnomAD filter strategy swap). The gnomAD reload + authoritative number re-lock is deferred to PR C.**
+
 ## Context
 
 1. The gnomAD loader filters the upstream sites-only VCFs to the three-way
@@ -78,24 +80,31 @@
    re-lock of the runbook's filter-set composition and `rows_loaded` drift
    numbers.
 
-## Decision (deferred to VSC-User)
+## Decision (made: `user_only` adopted 2026-06-21)
 
-9. Narrowing is **recommended on the evidence** but **not taken here**, because
-   it reverses finding-011's deliberate three-way design and intersects
-   CLAUDE.md "Things never to do" #3 (which mandates filtering *down to at most*
-   `(user ∪ ClinVar ∪ GWAS ∪ PGS)` — user-only is a strict subset, so it does
-   not violate the letter, but it does discard a deliberate data-availability
-   hedge). The hedge's only plausible future use is annotating ClinVar/GWAS
-   positions the user does not yet carry; nothing consumes it today and no
-   roadmap item requires it.
+9. Narrowing was **recommended on the evidence** and **VSC-User ruled to adopt
+   `user_only` on 2026-06-21.** This reverses finding-011's deliberate
+   three-way design — [finding-011](finding-011-gnomad-three-way-intersection.md)
+   is now **superseded** by this finding and retained only as the revert /
+   PGS-extension baseline. It stays inside CLAUDE.md "Things never to do" #3
+   (which mandates filtering *down to at most* `(user ∪ ClinVar ∪ GWAS ∪ PGS)`):
+   `user_only` is a strict subset of that bound, so it does not violate the
+   letter, and the union remains the documented **upper bound** and the
+   one-argument revert path. The decision consciously discards the
+   data-availability hedge (annotating ClinVar/GWAS positions the user does not
+   yet carry) — nothing consumes it today and no roadmap item requires it.
 
-10. If VSC-User approves narrowing, it is a small, self-contained follow-up PR:
-    swap `_build_filter_set` to `strategy="user_only"`, re-run the load (now
-    ~4–5× less data, compounding with `--jobs`), and re-lock the runbook drift
-    identifiers. If declined, the three-way set stays and parallelization is the
-    speed mechanism. Either way the parallelization PR stands on its own.
+10. The adoption is a small, self-contained change, split across two PRs.
+    **PR B (this implementation)** swaps `_build_filter_set` to
+    `strategy="user_only"`, updates the durable docs (this finding, finding-011,
+    CLAUDE.md #3, the annotations runbook), and rewrites the wrapper tests to
+    assert `user_only` semantics — **no reload, no DB mutation.** **PR C** (plan
+    Item 4, `docs/plans/post-merge-followups-chrx-m3-and-gnomad-jobs.md`) re-runs
+    the load against the post-chrX corpus (now ~4–5× less data, compounding with
+    `--jobs`) and re-locks the runbook drift identifiers + CLAUDE.md observation
+    #4 from the real-data `user_only` run. The `three_way` strategy stays
+    first-class in `genome.annotate.filter_set` as the revert path.
 
 11. Related: when PGS per-variant weights land (finding-011 Phase-6 follow-up),
-    the four-way extension is moot if the set has been narrowed to user-only;
-    if not narrowed, the PGS leg appends as finding-011 describes. The two
-    decisions should be made together.
+    the four-way extension is moot now that the set is narrowed to user-only; if
+    `three_way` is ever restored, the PGS leg appends as finding-011 describes.

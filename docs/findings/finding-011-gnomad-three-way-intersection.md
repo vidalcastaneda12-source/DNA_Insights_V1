@@ -1,5 +1,7 @@
 # Finding 011 — gnomAD filter is three-way at PR B; PGS extension is a Phase 6 follow-up
 
+**Status: superseded by [finding-035](finding-035-gnomad-filter-set-consumer-audit.md) — `user_only` adopted 2026-06-21.** The three-way design below is retained as the revert / PGS-extension baseline; the active gnomAD filter is now `user_only`.
+
 ## Context
 
 1. CLAUDE.md "Things never to do" #3 mandates that gnomAD bulk loads

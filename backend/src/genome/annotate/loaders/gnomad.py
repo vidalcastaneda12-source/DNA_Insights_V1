@@ -2,11 +2,10 @@
 
 Streams the gnomAD v4.1.1 per-chromosome sites-only VCFs (exomes + genomes,
 GRCh38, GCS-hosted, bgzipped + tabix-indexed) via cyvcf2 remote tabix
-queries, filters every site against the three-way intersection of
-distinct ``(chrom, pos)`` positions present in the user's variants
-plus the active ClinVar release plus the active GWAS Catalog release,
-and chunk-loads the resulting per-variant population-AF rows into
-``gnomad_frequencies`` via PyArrow Table registration +
+queries, filters every site against the user's own distinct
+``(chrom, pos)`` positions in ``variants_master`` (the ``user_only`` filter,
+adopted per finding-035), and chunk-loads the resulting per-variant
+population-AF rows into ``gnomad_frequencies`` via PyArrow Table registration +
 ``INSERT ... SELECT`` (the project's locked bulk-load convention).
 
 Sub-phase 5.5 — sixth loader after PharmGKB (5.1a), CPIC (5.1b),
@@ -33,14 +32,16 @@ ways the upstream distribution forces:
   chromosome succeeds. A ``--resume`` invocation picks up the
   in-flight new source_version_id and runs the remaining chromosomes.
 
-The filter set is the three-way union ``(user U ClinVar U GWAS)``;
-CLAUDE.md "Things never to do" #3 mandates the broader
-``(user U ClinVar U GWAS U PGS)`` intersection but PGS per-variant
-weights do not yet exist in the database at PR-B time (they land in
-Phase 6 as ``pgs_score_weights``). A Phase 6 follow-up gated on
-``pgs_score_weights`` will extend the active gnomAD source-version's
-coverage to PGS-component variants without a version bump; see
-finding-011.
+The filter set is the user's own distinct ``variants_master`` positions
+(the ``user_only`` strategy, adopted per finding-035: VSC-User ruled
+2026-06-21 after the consumer audit found every ``gnomad_frequencies``
+reader inner-joins ``variants_master``, so the ClinVar/GWAS-only legs were
+loaded but never read). CLAUDE.md "Things never to do" #3's
+``(user U ClinVar U GWAS U PGS)`` union remains the documented upper bound
+and the one-argument revert path — ``user_only`` is a strict subset of it.
+The three-way ``(user U ClinVar U GWAS)`` strategy stays first-class in
+:mod:`genome.annotate.filter_set`; the Phase 6 PGS extension gated on
+``pgs_score_weights`` (finding-011) is moot while the filter is narrowed.
 
 Supersession is via the ``annotation_sources`` pointer table
 (finding-010 version-pointer pattern): the loader inserts new content
@@ -327,24 +328,36 @@ def _check_libcurl_available() -> None:
 
 
 # finding-012 #11 moved the filter-set builder to genome.annotate.filter_set
-# and parameterised it on ``strategy``. gnomAD's three-way
-# ``(user U ClinVar U GWAS)`` intersection is the ``"three_way"`` strategy;
-# the alias + wrapper preserve the names the tests import (``_FilterSet``,
-# ``_build_filter_set``) and that ``load`` calls.
+# and parameterised it on ``strategy``. gnomAD's active filter is the
+# ``"user_only"`` strategy — the user's own distinct ``variants_master``
+# ``(chrom, pos_grch38)`` positions — adopted per finding-035 (VSC-User ruled
+# 2026-06-21) because every ``gnomad_frequencies`` consumer inner-joins
+# ``variants_master``, so the ClinVar/GWAS-only legs were loaded but never read.
+# The ``"three_way"`` ``(user U ClinVar U GWAS)`` strategy remains first-class in
+# ``genome.annotate.filter_set`` as the one-argument revert path + the future PGS
+# extension (finding-011). The alias + wrapper preserve the names the tests
+# import (``_FilterSet``, ``_build_filter_set``) and that ``load`` calls.
 _FilterSet = FilterSet
 
 
 def _build_filter_set(conn: DuckDBPyConnection) -> FilterSet:
-    """Compute gnomAD's three-way ``(user U ClinVar U GWAS)`` filter set.
+    """Compute gnomAD's ``user_only`` filter set.
 
     Thin wrapper over :func:`genome.annotate.filter_set.build_filter_set`
-    pinned to the ``"three_way"`` strategy and gnomAD's
-    :data:`SUPPORTED_CHROMS` (1-22, X). The PGS leg is intentionally
-    excluded at PR B; a Phase 6 follow-up gated on ``pgs_score_weights``
-    will extend coverage without a version bump.
-    See finding-011 for the three-way-vs-four-way design discussion.
+    pinned to the ``"user_only"`` strategy and gnomAD's
+    :data:`SUPPORTED_CHROMS` (1-22, X). The filter is the user's own distinct
+    ``variants_master`` ``(chrom, pos_grch38)`` positions — adopted per
+    finding-035 (VSC-User ruled 2026-06-21) after the consumer audit found that
+    every ``gnomad_frequencies`` reader inner-joins ``variants_master``, so the
+    ClinVar/GWAS-only positions were loaded but never read.
+
+    The ``"three_way"`` ``(user U ClinVar U GWAS)`` strategy stays first-class in
+    :mod:`genome.annotate.filter_set` as the revert path and the eventual PGS
+    extension (a Phase 6 follow-up gated on ``pgs_score_weights`` would extend
+    coverage without a version bump). See finding-035 for the consumer audit and
+    finding-011 for the three-way-vs-four-way design discussion.
     """
-    return build_filter_set(conn, strategy="three_way", supported_chroms=SUPPORTED_CHROMS)
+    return build_filter_set(conn, strategy="user_only", supported_chroms=SUPPORTED_CHROMS)
 
 
 # ---------------------------------------------------------------------------
@@ -1333,7 +1346,9 @@ def load(  # noqa: C901, PLR0912, PLR0913, PLR0915 — single entry point; the p
        ``force`` nor ``resume`` is set, short-circuit.
     3. Decide the working ``source_version_id``: re-use an in-flight
        one when ``resume`` is set; otherwise allocate a fresh row.
-    4. Build the three-way filter set and record composition counts.
+    4. Build the ``user_only`` filter set (the user's own distinct
+       ``variants_master`` positions, finding-035) and record composition
+       counts.
     5. Restrict the chromosome list to the intersection with
        :data:`SUPPORTED_CHROMS`; skip chroms already populated when
        resuming.
@@ -1353,8 +1368,9 @@ def load(  # noqa: C901, PLR0912, PLR0913, PLR0915 — single entry point; the p
 
     ``jobs`` defaults to ``1`` (sequential) so direct callers and the
     registry bare-form are unchanged; the CLI resolves a higher default
-    (:data:`DEFAULT_PARALLEL_JOBS`). See finding-011 for the
-    three-way-vs-four-way design discussion.
+    (:data:`DEFAULT_PARALLEL_JOBS`). See finding-035 for the ``user_only``
+    filter adoption and finding-011 for the three-way-vs-four-way design
+    discussion (retained as the revert / PGS path).
     """
     started = time.monotonic()
     log = logger.bind(source=SOURCE_DB, version=version)
