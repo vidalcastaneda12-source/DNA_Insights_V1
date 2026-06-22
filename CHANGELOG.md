@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Docs (post-merge follow-up PR A): lock the filter-independent chrX M3 + post-chrX
+  consensus anchors (authoritative run_0002) into findings 029/031/033, CLAUDE.md
+  observation #3, and the `verification.md` merge-gate runbook — non-PAR yield
+  90,999 / PAR 1,833 / total 92,832 kept; non-PAR
+  dosage-confidence 87,578 ≥0.99 / 3,421 in [0.9,0.99); `male_nonpar_het_anomaly` 1;
+  5-fold LOO concordance 0.985550; `consensus_total` 3,160,364; shared-call
+  concordance 0.9997760079641613 (unchanged by chrX). Correct finding-029's stale
+  "non-PAR DR² ≈ PAR" follow-up (DR² is structurally dead for single-sample male
+  non-PAR — quality is dosage-confidence + LOO), flip ROADMAP PR 5 / 5a to complete
+  (PR #74, M3-physical, closes finding-008), and add `prepare-chrx` ~80-min cost
+  (finding-030) + gnomAD `--jobs` `TMPDIR`-on-big-disk (gnomad.py staging) runbook
+  notes. gnomAD/index match counts + CLAUDE.md obs #4 deferred to PR C (the live DB
+  is an uncommitted `user_only` gnomAD build). (PR follows)
 - Dev infrastructure (finding-034): add `/scope-run`, a model-driven orchestrator for
   the per-scope agent team (`.claude/commands/scope-run.md`, ported from the superseded
   PR #78). It drives the same 29 members / adaptive depth / two human gates as the JS

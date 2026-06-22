@@ -282,6 +282,19 @@ What this does:
 - Idempotent — existing subsets are reused; pass `--force` to rebuild. This is a
   gated operation (it scans the whole chromosome).
 
+**Wall-clock expectation (prep-time only).** On the real 1000 Genomes chrX panel,
+`prepare-chrx` takes **~80 minutes** — the non-PAR composition assertion
+(`count_haploid_gts`, O(variants × samples)) streams the whole ~3,202-sample
+non-PAR subset (≈55 CPU-min pegged at 100% CPU) and emits **no progress output**,
+so expect a long silent wait on the first run (it is not a hang). The cost is
+**prep-time only and idempotent** (the three subsets cache beside the panel; a
+re-run hits `skip_existing`), runs on the **panel** rather than your data, and
+**does not affect `genome imputation run`** (the runner's only `count_haploid_gts`
+use is the single-sample `rediploidize_vcf` post-assertion, O(variants × 1)). See
+[`finding-030`](../findings/finding-030-prepare-chrx-haploid-count-perf.md) for the
+short-circuit existence-check fix (recommended there; not yet applied — no code
+change in this docs-only PR).
+
 `genome imputation run` with chrX in scope points each region's `ref=` at its
 matching native subset and refuses to start (with an actionable message) if the
 subsets are missing.
@@ -430,14 +443,16 @@ Historically chrX imputation failed in Beagle 5.5 with:
 
 The 1000G panel represents male non-PAR chrX as haploid, and Beagle's reference
 loader requires uniform ploidy per sample across the whole chromosome. PR 5a
-resolves this with the **M1** mechanic — see "chrX imputation (M1 diploidized
-panel)" above and `docs/findings/finding-029-chrx-imputation-m1.md`. Run
-`genome imputation panel prepare-chrx` once before any chrX run.
+resolves this with the **M3-physical region-split** mechanic — see "chrX imputation
+(M3-physical region split)" above and `docs/findings/finding-029-chrx-imputation-m1.md`.
+Run `genome imputation panel prepare-chrx` once before any chrX run.
 
-If you see the error above, the diploidized panel is missing or stale: run
+If you see the error above, the chrX region subsets
+(`chrX.{par1,nonpar,par2}.vcf.gz`) are missing or stale: run
 `genome imputation panel prepare-chrx` (or `--force` to rebuild). The runner now
-fails chrX with a clear `no_diploidized_panel` message rather than crashing
-mid-write, and refuses to import a truncated or silently-empty chromosome.
+fails chrX cleanly (a `no_region_panel` event with a "run `genome imputation panel
+prepare-chrx` first" hint) rather than crashing mid-write, and refuses to import a
+truncated or silently-empty chromosome.
 
 ### Audit log review
 

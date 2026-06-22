@@ -5,9 +5,12 @@
 Built in PR 5a (the QC layer on top of the M3-physical chrX imputation,
 [`finding-029`](finding-029-chrx-imputation-m1.md)). The dosage-confidence import
 gate and the 5-fold LOO harness are implemented and unit-tested; the
-first-authoritative real-data numbers are captured at the merge-gate
-verification (see "Verification / PASS bar" below) and locked into CLAUDE.md
-real-data observation #3 there.
+first-authoritative real-data numbers were captured on the authoritative gate run
+(**run_0002**) and are locked in "Verification / PASS bar" below and CLAUDE.md
+real-data observation #3: non-PAR kept **90,999** (87,578 ≥0.99 / 3,421 in
+[0.9,0.99)), 5-fold LOO precision **0.985550**, `male_nonpar_het_anomaly` **1**.
+The imputation-derived values are tolerance-banded (Beagle is non-deterministic;
+run-to-run band ≈0.985–0.986).
 
 ## Context
 
@@ -26,7 +29,7 @@ one allele — there is no within-sample heterozygosity and no across-sample dos
 variance. With no variance to correlate against, the estimator collapses to
 `0.00` for **every** non-PAR marker — imputed *and* genotyped alike.
 
-Measured on run #0003: **2,710,620 / 2,710,620** imputed non-PAR sites and
+Measured on run #0003 (a mechanism-illustration run; the locked production values are in Status / the PASS bar below, captured on run_0002): **2,710,620 / 2,710,620** imputed non-PAR sites and
 **20,501 / 20,501** typed non-PAR anchors all at `DR2=0.00`. The diploid PAR1 leg
 of the *same run* emits a normal DR² distribution (11,505 nonzero, max 1.00), so
 this is not a run-wide failure — it is intrinsic to single-sample male non-PAR.
@@ -176,28 +179,34 @@ The pure scoring core (`partition_folds`, `compute_loo_report`, the binning, the
 mask/read VCF helpers) is unit-tested on synthetic fixtures; the Beagle
 orchestration is the named long-op the gate runs.
 
-## Verification / PASS bar (replaces "non-PAR mean DR² > 0")
+## Verification / PASS bar (replaces "non-PAR mean DR² > 0") — LOCKED, run_0002
 
-Run against the user's corpus after resuming run #0003 import + the LOO harness.
-All must hold; capture and lock the first-authoritative numbers here and in
-CLAUDE.md obs #3:
+Measured on the authoritative gate run (**run_0002**); all criteria hold and the
+numbers are locked here and in CLAUDE.md obs #3 (imputation-derived values are
+tolerance-banded — Beagle is non-deterministic; re-derive read-only against
+`data/genome.duckdb` + `archive/imputation/run_0002/loo/REPORT.json`):
 
-1. **Anchor retention:** all ~25,781 typed non-PAR anchors imported (vs current 0).
-   They are the `IMP`-absent rows; kept regardless of DS.
-2. **Yield order:** total non-PAR kept lands at order **10⁵** — ~25.8K typed
-   anchors + the confident-ALT imputed (`IMP` ∧ `DS >= 0.9`, ~77.8K on the
-   run #0003 gate-eval). `< 10⁴` ⇒ gate eating signal; ≈ 2.3M ⇒ confident hom-ref
-   imputed not being dropped (the `IMP`-aware restriction regressed to the keep-all
-   `max(DS,1−DS)` form). The confident hom-ref imputed (~2.18M) are dropped *by
-   design*.
-3. **LOO precision:** 5-fold precision of the gate-kept set (re-imputed anchors
-   with `DS >= 0.9`) is **>= 95%** overall, with **no** high-confidence MAF×conf
-   cell collapsing. Below ⇒ FAIL → escalate.
-4. **`male_nonpar_het_anomaly` ≈ 0** (existing `apply_chrx_het_guard`; ~0 by
-   construction under R1).
-5. **Negative controls unchanged:** autosomal/PAR DR² anchors, `consensus_total`,
-   shared-call concordance, and the diploid legs are byte-identical to the
-   pre-chrX baseline.
+1. **Anchor retention — PASS.** Typed non-PAR anchors imported (vs the prior 0):
+   the typed-anchor subset is **84,657** rows at `imputation_r2`=1.0 (the
+   `IMP`-absent rows, kept regardless of DS).
+2. **Yield order — PASS.** Total non-PAR kept **90,999** (order 10⁵) = **87,578**
+   dconf ≥0.99 + **3,421** in [0.9,0.99). Not `< 10⁴` (gate-eating signal), not
+   ≈ 2.3M (confident hom-ref not dropped — the `IMP`-aware restriction regressing
+   to keep-all). The ~2.18M confident hom-ref imputed are dropped *by design*.
+   *Tolerance-banded (run-to-run ±~100).*
+3. **LOO precision — PASS.** 5-fold precision of the gate-kept set (re-imputed
+   anchors with `DS >= 0.9`) is **0.985550** (6957/7059 @ dconf 0.9; n_anchors
+   20,472; not-in-panel 5,276; run_0002 `REPORT.json`) — above the **≥ 95%** bar,
+   with **no** high-confidence MAF×conf cell collapsing (the finding-033
+   allele-aware fix is in effect). Run-to-run band ≈0.985–0.986 (post-fix run_0003
+   was 0.985971).
+4. **`male_nonpar_het_anomaly` ≈ 0 — PASS:** **1** (one residual chip miscall; ≈0
+   by construction under R1; `apply_chrx_het_guard`).
+5. **Negative controls unchanged — PASS.** Autosomal `both_concordant` **115,509**
+   / `single_source` **793,917** / `imputed_only` **2,146,302** / `unresolvable`
+   **26**; `consensus_total` **3,160,364**; shared-call concordance
+   **0.9997760079641613**; the autosomal/PAR DR² anchors, the diploid legs, and the
+   DR² run-counters byte-identical to the pre-chrX baseline.
 
 ## Out of scope (tracked elsewhere)
 

@@ -1365,6 +1365,21 @@ aggregate `gnomad.chrom.htslib_recover` reopen count (concurrency may
 raise reopens). The achieved wall-clock at `--jobs 8` is captured at
 this verification, not pre-stated. dbsnp does not yet parallelize.
 
+**`TMPDIR` on a big disk.** Each `--jobs` worker stages its filtered rows to a
+per-chromosome Parquet file under a scratch directory created via
+`tempfile.mkdtemp(prefix="gnomad_stage_")`
+(`backend/src/genome/annotate/loaders/gnomad.py`; the parent merges them with
+`_merge_chromosome_parquet`, then removes the directory). `mkdtemp` honors
+`$TMPDIR` and defaults to `/tmp`, which is frequently small or a size-capped
+tmpfs — at `--jobs 8` the concurrent staged Parquet can overflow it. Export
+`TMPDIR` to a big-disk path before a parallel gnomAD load (the same
+TMPDIR-on-big-disk discipline as PR 1's `verify.sh` prelude):
+
+```
+export TMPDIR=/path/on/big/disk
+genome annotate refresh --source gnomad --jobs 8
+```
+
 **Real-data verification commands.**
 
 ```
