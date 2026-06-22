@@ -183,4 +183,4 @@ predicted delta; lock the captured numbers as the post-collapse regression ancho
 - The chip+imputed duplication mechanism (the source-strand gap that created the 15
   swap/strandflip dups + the no-call-meets-imputed duplication) is **finding-027**.
 - The `pos_grch37` re-coalesce (finding-005 #9) is **not** folded in — still deferred.
-- PR 5a (chrX resolution, Option B) lands separately.
+- PR 5a (chrX resolution via the M3-physical region split, PR #74) has landed; see finding-029.

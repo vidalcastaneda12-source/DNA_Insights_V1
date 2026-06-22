@@ -32,14 +32,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (PR #74, M3-physical, closes finding-008), and add `prepare-chrx` ~80-min cost
   (finding-030) + gnomAD `--jobs` `TMPDIR`-on-big-disk (gnomad.py staging) runbook
   notes. gnomAD/index match counts + CLAUDE.md obs #4 deferred to PR C (the live DB
-  is an uncommitted `user_only` gnomAD build). (PR follows)
+  is an uncommitted `user_only` gnomAD build). (PR A, #82)
 - Dev infrastructure (finding-034): add `/scope-run`, a model-driven orchestrator for
   the per-scope agent team (`.claude/commands/scope-run.md`, ported from the superseded
   PR #78). It drives the same 29 members / adaptive depth / two human gates as the JS
   workflows, but via the Task tool — so it runs today without the dynamic-workflows
   subagent primitive the `.js` orchestrators depend on. The two paths are complementary
   (model-driven = runnable now + flexible; JS = deterministic + resumable); README
-  documents both. (PR follows)
+  documents both. (PR #81)
 - Dev infrastructure (finding-034): make the guardrail hooks portable + fail-safe.
   The four `.claude/hooks/*.sh` parsed the PreToolUse JSON envelope with `jq`, which
   is not universally installed; where absent, `set -euo pipefail` made the hook exit

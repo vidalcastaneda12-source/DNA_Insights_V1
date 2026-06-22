@@ -18,7 +18,7 @@ review time → VSC-User *confirms* it on real data at the gate.
 
 - **The locked anchors** — the merge/consensus counts (finding-020 bedrock anchor table,
   e.g. shared-call concordance `0.999776`, chip-derived consensus `942,592`,
-  `consensus_total` `3,088,916`), the index match counts (`gnomad_matches` `2,796,952`,
+  `consensus_total` `3,160,364`), the index match counts (`gnomad_matches` `2,796,952`,
   `clinvar_matches` `61,458`, `gwas_matches` `66,764`, `pharmgkb_matches` `1,738`,
   `is_rare`/`is_ultrarare`), the alias counts (finding-019), the chrX imputation numbers
   (finding-029), the Phase-3/4 preserved numbers.
