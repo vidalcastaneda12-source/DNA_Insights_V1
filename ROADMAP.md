@@ -2,7 +2,7 @@
 
 Phases are sequential. Do not start phase N+1 until phase N's verification passes.
 
-**Current phase:** Phase 5 closed; executing the pre-Phase-6 cleanup sequence (PRs 1–5 landed; PR 6 next) before Phase 6 begins.
+**Current phase:** Phase 5 closed; executing the pre-Phase-6 cleanup sequence (PRs 1–6 landed; PR 7 next) before Phase 6 begins. PR 6 (minimal `genes` seed, #88) cleared the Phase-6 FK gate.
 
 ## Phase 1 — Foundation (this is the bootstrap)
 
@@ -86,7 +86,8 @@ Deferred to later phases:
 
 ## Pre-Phase-6 sequence
 
-**Status:** in progress — PRs 1–5 landed (#63, #64, #65, #70, #74); PR 6 is next.
+**Status:** in progress — PRs 1–6 landed (#63, #64, #65, #70, #74, #88); PR 7 is next
+(but re-scope first — see its ⚠️ note; it may be moot against the live DB).
 
 A 13-PR run that clears every dbSNP-dependent backfill, deferred-cleanup item,
 and FK blocker before the Phase 6 analyses begin, so Phase 6 starts with no open
@@ -130,13 +131,21 @@ finding-016 #8):
     - [x] **5a** — chrX resolution via M3-physical region split (PR #74; sex-aware
       PAR1/non-PAR/PAR2 physical panel subsets; findings 029/031/033; closes
       finding-008). Supersedes the original Option-B framing.
-- [ ] **PR 6** — Minimal `genes` seed, Option A: the gene-symbol union of the
-  ACMG SF v3.x, PGx, and carrier gene lists. Enough rows to satisfy the
+- [x] **PR 6** — Minimal `genes` seed, Option A: the gene-symbol union of the
+  ACMG SF v3.3 panel and the in-DB CPIC/PharmGKB symbols. Enough rows to satisfy the
   `NOT NULL REFERENCES genes(gene_symbol)` FKs on `derived_pgx_phenotypes`,
-  `derived_carrier_findings`, `derived_acmg_sf_findings`, and `derived_compound_het`,
+  `derived_carrier_findings`, `derived_acmg_sf_findings`, `derived_compound_het`,
+  and `pathway_genes` (five dependents, not four — `genes` was never a leaf),
   which otherwise block every Phase 6 insert into those tables. This is the
   FK-satisfying subset only — the full `genes` / `traits` / `pathways` dictionaries
-  (descriptions, rendering metadata) remain deferred to Phase 7.
+  (descriptions, rendering metadata) + HGNC bulk loader remain deferred to Phase 7.
+  `genome annotate seed-genes`; one-time static backfill under a fresh `hgnc`
+  `annotation_source_versions` row (no `annotation_sources` pointer flip). Gate-confirmed
+  on the live corpus (Human Gate 2, 2026-06-23): `genes`=1153 (|84 ACMG ∪ 1086 PGx|,
+  overlap 17), `is_acmg_sf`=84 / `is_pgx_relevant`=1086, `source_version_id`=11,
+  `cpic_covered`/`pharmgkb_covered`=True; negative control byte-unchanged. See
+  CLAUDE.md "Real-data observations" #7, [`finding-020`](docs/findings/finding-020-canonical-refalt-backfill.md)
+  "Out of scope" amendment, and verification.md "PR 6 genes seed gate". (#88)
 - [ ] **PR 7** — finding-015 orphan gnomAD cleanup, **Option C**: one-off
   `DELETE` of the pre-existing orphan `annotation_source_versions` rows (gnomAD
   v6/v7/v8/v10, zero `gnomad_frequencies` references each). Distinct from PR #53, which
@@ -179,10 +188,14 @@ hasn't arrived, tracked in findings for when it does:
 - Hash-as-canonical-identity refactor
 - `annotate inspect --source URL` schema-inspection helper
 
-**Phase 6 entry is gated on:** PR 6 in particular (minimal `genes` seed) — PRs 4
-(tier-2 rsID matching, #70) and 5 (chrX M3-physical, #74) have landed; plus the locked conventions — supersession-over-update,
+**Phase 6 entry is gated on:** the minimal `genes` seed (PR 6) — **now landed (#88)**,
+gate-confirmed `genes`=1153 unblocking the five `derived_*` / `pathway_genes` FKs (see
+CLAUDE.md "Real-data observations" #7); PRs 4 (tier-2 rsID matching, #70) and 5 (chrX
+M3-physical, #74) had already landed. The FK gate is therefore **cleared** — Phase 6's
+remaining entry conditions are the locked conventions: supersession-over-update,
 operation-level provenance without schema changes, and the PyArrow / INSERT-SELECT
-bulk-load pattern.
+bulk-load pattern. (The remaining open pre-Phase-6 slots — PRs 7–13 — are cleanup that
+does not block Phase-6 entry.)
 
 ## Phase 6 — Analysis pipelines
 - Load `pgs_score_weights` (per-variant PGS weights, overlapping-only per locked decision #5) → PRS computation against PGS Catalog

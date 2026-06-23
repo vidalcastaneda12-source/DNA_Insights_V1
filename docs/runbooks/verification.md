@@ -278,6 +278,79 @@ git grep -nE 'GATE[-]FILL'
 #   a durable doc — STOP and fill or remove it before squashing.
 ```
 
+### PR 6 genes seed gate (minimal `genes` seed / finding-020 amendment)
+
+PR 6 seeds the previously-empty `genes` table via `genome annotate seed-genes`
+(set-union of the ACMG SF v3.3 panel + active CPIC/PharmGKB symbols, under a fresh
+`hgnc` `annotation_source_versions` row, **no `annotation_sources` pointer flip**).
+It is a static backfill, so every number is **exact / deterministic** — any drift
+against the same active CPIC/PharmGKB versions is a regression, not run-to-run noise.
+Run against the live corpus and compare against the locked answer (CLAUDE.md
+"Real-data observations" #7). The gate-confirmed boundary (Human Gate 2, 2026-06-23,
+active versions `clinvar 2026_06_15, gwas_catalog 2026_06_01, gnomad 4.1.1,
+pharmgkb 2025_07_05, dbsnp 157`):
+
+**1. Run + summary line (first run).**
+
+```
+genome annotate seed-genes
+# → genes seeded: source_version_id=11 already_populated=False genes_rows=1153 \
+#     acmg_sf_genes=84 pgx_genes=1086 cpic_covered=True pharmgkb_covered=True
+```
+
+`source_version_id` = **11** (the live `MAX(source_version_id)` was 10 pre-seed → 11);
+version label `acmg_sf_v3.3+pgx_derived`; `record_count` = 1153.
+
+**2. Composition + provenance + coverage** (`genome.duckdb`):
+
+```sql
+SELECT
+  COUNT(*)                                          AS genes_rows,       -- 1153
+  COUNT(*) FILTER (WHERE is_acmg_sf)                AS is_acmg_sf,       -- 84
+  COUNT(*) FILTER (WHERE is_pgx_relevant)           AS is_pgx_relevant,  -- 1086
+  COUNT(*) FILTER (WHERE source_version_id IS NULL) AS null_svid,        -- 0
+  COUNT(*) FILTER (WHERE retrieval_date IS NULL)    AS null_retrieval,   -- 0
+  COUNT(DISTINCT source_version_id)                 AS distinct_svid     -- 1 (={11})
+FROM genes;
+```
+
+`genes`=1153 = |84 ACMG ∪ 1086 PGx| (ACMG ∩ pgx overlap = **17**; pgx-union 1086 =
+cpic-distinct-current 19 ∪ pharmgkb-distinct-NOT-NULL-current 1086). Coverage gate:
+the cpic and pharmgkb EXCEPT-probes (active-source symbols NOT IN `genes`) must each
+return **0** → `cpic_covered=True`, `pharmgkb_covered=True`.
+
+**3. Idempotence** — a second `genome annotate seed-genes` returns
+`already_populated=True` with identical counts, and `annotation_source_versions` still
+holds **exactly one** `hgnc` row (no second version row, no re-insert).
+
+**4. Keystone FK probe** — a `derived_acmg_sf_findings` insert with a **seeded**
+`gene_symbol` SUCCEEDS; the same insert with an **unseeded** `gene_symbol` RAISES the
+`genes` FK; roll back clean. (Proves the FK gate the seed exists to clear is actually
+satisfied.)
+
+**5. Negative control — byte-unchanged** (the seed touches only `genes` + the one new
+`annotation_source_versions` row; it does **not** run `refresh-index`):
+
+```sql
+SELECT COUNT(*) FROM variants_master;                                   -- 3,160,364
+SELECT COUNT(*) FROM annotation_sources;                               -- 7 (NO hgnc pointer)
+-- gnomad pointer still source_version_id = 10; obs #4 index counts UNCHANGED:
+SELECT
+  COUNT(*)                                       AS row_count,          -- 3,077,001
+  COUNT(*) FILTER (WHERE af_global IS NOT NULL)  AS gnomad_matches,     -- 3,054,426
+  COUNT(*) FILTER (WHERE clinvar_count > 0)      AS clinvar_matches,    -- 61,926
+  COUNT(*) FILTER (WHERE gwas_trait_count > 0)   AS gwas_matches,       -- 66,742
+  COUNT(*) FILTER (WHERE has_pgx)                AS pharmgkb_matches,    -- 1,737
+  COUNT(*) FILTER (WHERE is_rare)                AS is_rare,            -- 173,689
+  COUNT(*) FILTER (WHERE is_ultrarare)           AS is_ultrarare       -- 109,013
+FROM variant_annotations_index;
+```
+
+Any movement in block 5 means the seed did more than seed `genes` — STOP. See
+CLAUDE.md obs #7, ROADMAP "Pre-Phase-6 sequence" PR 6, and
+[`finding-020`](../findings/finding-020-canonical-refalt-backfill.md) "Out of scope"
+amendment.
+
 ## When the protocol fails
 
 If any step fails, do not attempt to fix the failure locally before

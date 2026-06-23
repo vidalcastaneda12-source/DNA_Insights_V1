@@ -557,6 +557,18 @@ must not be read by Phase-6 consumers during the sequence.
   `pathway_genes` carry `REFERENCES genes(gene_symbol)`). The full
   `genes`/`traits`/`pathways` dictionaries + HGNC bulk loader remain Phase 7.
   NB `genes` has **five** FK dependents, not zero — it was never a leaf.
+  **Landed (#88), gate-confirmed on the live corpus (Human Gate 2, 2026-06-23):**
+  `genome annotate seed-genes` populated `genes` with **1153** rows
+  (= |84 ACMG ∪ 1086 PGx|, overlap 17; `is_acmg_sf`=84, `is_pgx_relevant`=1086)
+  under a fresh `hgnc` `annotation_source_versions` row at `source_version_id`=**11**
+  (live `MAX(source_version_id)` 10 → 11), version label `acmg_sf_v3.3+pgx_derived`,
+  `record_count`=1153 — a one-time static backfill with **no `annotation_sources`
+  pointer flip** (`annotation_sources` total stayed **7**). Negative control
+  byte-unchanged: `variants_master`=3,160,364, gnomad pointer `source_version_id`=10,
+  obs #4 index counts unchanged (`refresh-index` not run). These are exact /
+  deterministic (a static seed), not tolerance-banded. See CLAUDE.md "Real-data
+  observations" **#7**, ROADMAP "Pre-Phase-6 sequence" PR 6, and
+  [`verification.md`](../runbooks/verification.md) "PR 6 genes seed gate".
 - **Re-running Beagle imputation.** Hom-only recovery enables a *future*
   `genome imputation prepare` to include those rows (the `ref!=alt` filter at
   `backend/src/genome/imputation/vcf_export.py:191` is unchanged; recovered
