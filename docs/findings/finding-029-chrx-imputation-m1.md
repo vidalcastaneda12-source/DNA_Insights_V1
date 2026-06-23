@@ -211,13 +211,18 @@ re-derive read-only against `data/genome.duckdb`):
   `imputed_only` **2,218,539**; `single_source` **821,285**; `both_concordant`
   **120,513**; `disagreement_resolved` **0**; `unresolvable` **27**. The chrX
   `imputed_only` contribution is **72,237**.
-- **Index anchors — DEFERRED to PR C.** `row_count`, `gnomad_matches`,
-  `clinvar_matches`, `gwas_matches`, `pharmgkb_matches`, `is_rare`, `is_ultrarare`
-  are **not** locked here: the live gate DB is a `user_only` gnomAD build
-  (`finding-035`) and gnomAD was loaded before the chrX import, so the new chrX
-  positions mostly lack gnomAD annotations. They re-lock at the post-chrX gnomAD
-  reload + `refresh-index` (plan Items 2/4 / PR C); CLAUDE.md obs #4 is unchanged
-  until then.
+- **Index anchors — locked in PR C (post-chrX `user_only` gnomAD reload +
+  `refresh-index`, gate-run 2026-06-22).** `row_count` **3,077,001**,
+  `gnomad_matches` **3,054,426**, `clinvar_matches` **61,926**, `gwas_matches`
+  **66,742**, `pharmgkb_matches` **1,737**, `is_rare` **173,689**, `is_ultrarare`
+  **109,013** (`curated_count` 63,198). The `gnomad_matches` rise over the
+  pre-reload `user_only` build (2,982,431 → 3,054,426, **+71,995**) is **entirely
+  chrX**: chrX index `gnomad_matches` **22,640 → 94,635**, chrX
+  `gnomad_frequencies` **36,867 → 138,299**. gnomAD was loaded before the chrX
+  import, so the pre-reload build covered only the chrX *chip* positions, leaving
+  the 72,237 imputed chrX positions un-annotated; the reload closes that gap.
+  Coord/rsid-keyed legs unchanged by the reload; merge negative control
+  byte-identical. See CLAUDE.md obs #4 + `docs/runbooks/annotations.md` §5.5.
 - **Negative control (must stay unchanged — exact):** autosomal `both_concordant`
   **115,509** / `single_source` **793,917** / `imputed_only` **2,146,302** /
   `unresolvable` **26**; shared-call concordance **0.9997760079641613**
@@ -321,8 +326,9 @@ The Task 0 probe passed, so M3-physical was built and the M1 *code* deleted
   single-sample male non-PAR (see `## Correction` / finding-031);
   `male_nonpar_het_anomaly` = **1**; `consensus_total` **3,160,364**; negative
   controls (autosomal anchors, PAR, shared-call concordance **0.9997760079641613**)
-  unchanged. Re-locked **index** match counts are **DEFERRED to PR C** (gnomAD-
-  gated). Done in PR A: CLAUDE.md obs #3 updated and ROADMAP PR 5 / 5a flipped to
+  unchanged. Re-locked **index** match counts are **locked in PR C** (post-chrX
+  `user_only` reload, 2026-06-22): `gnomad_matches` **3,054,426** / `row_count`
+  **3,077,001** — see CLAUDE.md obs #4. Done in PR A: CLAUDE.md obs #3 updated and ROADMAP PR 5 / 5a flipped to
   `[x]`.
 - Persist `--sex` to `sample_qc.sex_expected` (the sex-edge remedy) when an
   all-ambiguous profile actually needs it — not required for this user.

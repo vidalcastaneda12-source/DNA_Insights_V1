@@ -1,6 +1,6 @@
 # Finding 035 — gnomAD filter-set consumer audit: ClinVar/GWAS-only rows are loaded but never read
 
-**Status: adopted — VSC-User ruled `user_only` on 2026-06-21; implemented in PR B (gnomAD filter strategy swap). The gnomAD reload + authoritative number re-lock is deferred to PR C.**
+**Status: adopted — VSC-User ruled `user_only` on 2026-06-21; implemented in PR B (gnomAD filter strategy swap). The gnomAD reload + authoritative number re-lock completed in PR C (gate-run 2026-06-22) — see CLAUDE.md obs #4 + `docs/runbooks/annotations.md` §5.5.**
 
 ## Context
 
@@ -99,10 +99,14 @@
     `strategy="user_only"`, updates the durable docs (this finding, finding-011,
     CLAUDE.md #3, the annotations runbook), and rewrites the wrapper tests to
     assert `user_only` semantics — **no reload, no DB mutation.** **PR C** (plan
-    Item 4, `docs/plans/post-merge-followups-chrx-m3-and-gnomad-jobs.md`) re-runs
-    the load against the post-chrX corpus (now ~4–5× less data, compounding with
-    `--jobs`) and re-locks the runbook drift identifiers + CLAUDE.md observation
-    #4 from the real-data `user_only` run. The `three_way` strategy stays
+    Item 4, `docs/plans/post-merge-followups-chrx-m3-and-gnomad-jobs.md`) re-ran
+    the load against the post-chrX corpus and re-locked the runbook drift
+    identifiers + CLAUDE.md observation #4 from the real-data `user_only` run
+    (gate-run 2026-06-22): `rows_loaded` 4,568,802, `match_rate` 0.9957, index
+    `gnomad_matches` 3,054,426 / `row_count` 3,077,001. The post-imputation
+    `user_only` filter is 3,144,800 positions (~61% of the 5.13 M three-way set),
+    **not** the ~4–5× reduction this finding's pre-imputation estimate assumed —
+    the Phase-4 imputed corpus grew `variants_master`, so the load ran ~7 h. The `three_way` strategy stays
     first-class in `genome.annotate.filter_set` as the revert path.
 
 11. Related: when PGS per-variant weights land (finding-011 Phase-6 follow-up),

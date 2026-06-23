@@ -224,6 +224,20 @@ raw-match-set at variant grain (a tens-of-thousands rise = over-collapse = STOP)
 `refresh-index` ~120 s here is commit-dominated (2.8M-row rebuild), not a PR-4
 regression.
 
+**Post-chrX `user_only` re-lock (PR C, gate-run 2026-06-22).** The anchors above
+are the **pre-chrX three-way** PR-4 boundary (re-running the canonicalize gate on
+that corpus reproduces them). PR C — the post-chrX `user_only` gnomAD reload
+(`refresh --source gnomad --force --jobs 8`) + `refresh-index` — establishes a
+**new** boundary: `gnomad_matches` **3,054,426** / `row_count` **3,077,001** /
+`clinvar_matches` **61,926** / `gwas_matches` **66,742** / `pharmgkb_matches`
+**1,737** / `is_rare` **173,689** / `is_ultrarare` **109,013**. The
+`gnomad_matches` rise (+71,995 over the pre-reload `user_only` 2,982,431) is
+**entirely chrX** (chrX index matches 22,640 → 94,635; chrX `gnomad_frequencies`
+36,867 → 138,299); the autosomal coord/rsid-keyed legs are unchanged by the
+reload, and the merge-anchor negative control is byte-identical. See CLAUDE.md
+obs #4 + annotations.md §5.5. Query chrX as `chrom = 'X'` (bare enum), not
+`'chrX'`.
+
 Tripwires (gate-measured and reconciled — these are now the *expected* values, not
 open escalations): concordance drops to **0.999776**, driven entirely by 27
 palindromic `strand_ambiguous` no-calls with `genotype_mismatch`=0 (finding-020
