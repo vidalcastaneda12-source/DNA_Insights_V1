@@ -1782,6 +1782,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `result/chrX.vcf.gz`, the zero-variant cyvcf2 read on import, and
   the deferred status of the two known fixes. Pure docs: no code,
   schema, DDL, CLI, or test changes.
+- Repo hygiene: prune five spent plan artifacts from `docs/plans/` whose
+  implementation gates have passed and whose durable content already lives in the
+  post-gate ledgers — the PR-6 genes-seed plan + its ACMG SF v3.3 dataset CSV +
+  session-start prompt (#88/#90; numbers locked in CLAUDE.md obs #7), the
+  finding-034 Stages-2–5 build brief (#79–#81; the agents/skills/workflows now ship
+  under `.claude/`), and the chrX-M3 + gnomAD-`--jobs` post-merge follow-up plan
+  (#82/#83/#85; all five items locked in CLAUDE.md obs #3/#4 + findings 029/035).
+  `decision-tracking-leak-fix.md` is retained — it is an as-yet-unimplemented plan.
+  Three inbound provenance breadcrumbs were re-pointed off the deleted files: the
+  `seed_genes.py` ACMG comment now cites the official supplementary, and the
+  finding-034 / finding-035 "see also" links now point at `.claude/agents/README.md`
+  / PR #85. Docs + comments only — no behavior, schema, DDL, or test-logic change.
+  (`docs/plans/` is non-durable by design per `docs/runbooks/verification.md`.)
 
 ## [0.4.0] — 2026-05-14
 

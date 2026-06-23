@@ -98,9 +98,8 @@
     **PR B (this implementation)** swaps `_build_filter_set` to
     `strategy="user_only"`, updates the durable docs (this finding, finding-011,
     CLAUDE.md #3, the annotations runbook), and rewrites the wrapper tests to
-    assert `user_only` semantics — **no reload, no DB mutation.** **PR C** (plan
-    Item 4, `docs/plans/post-merge-followups-chrx-m3-and-gnomad-jobs.md`) re-ran
-    the load against the post-chrX corpus and re-locked the runbook drift
+    assert `user_only` semantics — **no reload, no DB mutation.** **PR C** (#85)
+    re-ran the load against the post-chrX corpus and re-locked the runbook drift
     identifiers + CLAUDE.md observation #4 from the real-data `user_only` run
     (gate-run 2026-06-22): `rows_loaded` 4,568,802, `match_rate` 0.9957, index
     `gnomad_matches` 3,054,426 / `row_count` 3,077,001. The post-imputation

@@ -1,7 +1,9 @@
 """Tests for :mod:`genome.annotate.seed_genes` — the minimal ``genes`` seed (PR 6).
 
-Plan-blind spec source: ``docs/plans/pr-6-genes-seed.md`` §5 (test list) + §6
-(verification / expected values), plus the frozen interface contract handed to the
+Plan-blind spec source: the approved PR-6 plan §5 (test list) + §6 (verification /
+expected values; durable equivalent now in CLAUDE.md "Real-data observations" #7 and
+``docs/runbooks/verification.md`` "PR 6 genes seed gate"), plus the frozen interface
+contract handed to the
 Stage-2 test-author and the DDL NOT-NULL/FK shapes in ``ddl/group_2_annotations.sql``
 (``genes`` :374-409, ``annotation_sources`` :33-36) and ``ddl/group_3_derived.sql``
 (``analysis_runs`` :9-39, ``derived_acmg_sf_findings`` :190-216, ``derived_compound_het``
@@ -67,7 +69,7 @@ seed_genes_module = importlib.import_module("genome.annotate.seed_genes")
 # additions ABCD1, CYP27A1, PLN; none removed).
 _EXPECTED_FRESH_ACMG_GENES = 84
 
-# A gene known to be in the ACMG panel (pr-6-acmg-sf-v3.3-genes.csv row for BRCA1).
+# A gene known to be in the ACMG panel (the ACMG SF v3.3 row for BRCA1).
 _SEEDED_ACMG_GENE = "BRCA1"
 
 # A symbol that is in neither the ACMG panel nor any seeded PGx table.
@@ -555,7 +557,7 @@ def test_seed_genes_dual_flag_and_acmg_metadata() -> None:
       * a PGx-only gene -> is_acmg_sf=FALSE and acmg_sf_disease IS NULL.
 
     Every asserted metadata value is verbatim from the spec
-    (docs/plans/pr-6-acmg-sf-v3.3-genes.csv: RYR1 / BRCA1 rows), NOT read from the
+    (the ACMG SF v3.3 panel: RYR1 / BRCA1 rows), NOT read from the
     implementation — a subtle flag-swap or metadata-null bug in _build_rows would
     pass the count-only tests but fail here.
     """
