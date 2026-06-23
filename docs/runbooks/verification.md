@@ -272,15 +272,15 @@ confirmed the reorient-movers + post-align `disagreement_resolved`=1; C confirme
 `is_ultrarare` 103,261; `chip+imputed overlap` 222,847). The check is now clean:
 
 ```
-git grep -nE 'GATE[-]FILL' -- ':!.claude/' ':!CHANGELOG.md' ':!docs/findings/finding-034*'
-# → prints nothing across the durable-content docs. All 18 gate numbers are locked;
-#   the PR is no longer placeholder-gated. Any hit = an un-gated number about to ship
-#   into a durable doc — STOP and fill or remove it before squashing.
+git grep -nE 'GATE[-]FILL' -- CLAUDE.md ROADMAP.md 'docs/findings/' 'docs/runbooks/' ':!docs/findings/finding-034*'
+# → prints nothing. All 18 gate numbers are locked; the PR is no longer
+#   placeholder-gated. Any hit = an un-gated number about to ship into a durable
+#   post-gate doc — STOP and fill or remove it before squashing.
 #
-#   The path excludes drop the agent-team tooling (.claude/), the CHANGELOG, and
-#   finding-034 — these legitimately *describe* the placeholder-marker mechanism
-#   (the lens that hunts for it, the warn hook, the design doc) rather than carry an
-#   un-filled marker, so a bare tree-wide grep reports them as false positives.
+#   Positive allowlist of the durable post-gate ledgers only. docs/plans/ is out by
+#   design (an approved plan legitimately carries pre-gate placeholders until its own
+#   implementation gate), as are the agent-team tooling (.claude/), the CHANGELOG, and
+#   finding-034 — which *describe* the placeholder-marker mechanism, not carry a marker.
 ```
 
 ### PR 6 genes seed gate (minimal `genes` seed / finding-020 amendment)
