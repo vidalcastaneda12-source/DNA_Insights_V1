@@ -79,7 +79,7 @@ _TARGET_TABLE: Final[str] = "genes"
 # ---------------------------------------------------------------------------
 # The static ACMG SF v3.3 secondary-findings panel.
 #
-# Transcribed VERBATIM from docs/plans/pr-6-acmg-sf-v3.3-genes.csv (84 distinct
+# Transcribed VERBATIM from the official ACMG SF v3.3 supplementary (84 distinct
 # genes = ACMG SF v3.2's 81 + the three v3.3 additions ABCD1, CYP27A1, PLN).
 # Source of truth: the official ACMG SF v3.3 supplementary spreadsheet
 # (mmc1.xlsx, doi:10.1016/j.gim.2025.101454). gene_symbol, inheritance, and the

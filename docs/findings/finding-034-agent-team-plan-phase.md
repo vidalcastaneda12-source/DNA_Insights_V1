@@ -18,8 +18,7 @@ ClaudeCodeVerification / ClaudeCodePlanning (no code was written that session).
 > the four authoring skills in `.claude/commands/`, and the four guardrail hooks. The
 > one runtime caveat: the dynamic-workflows subagent-invocation primitive is undocumented,
 > so each orchestrator isolates it behind a single `runAgent()` helper (`node --check`-
-> clean, not end-to-end executed). See `.claude/agents/README.md` and
-> `docs/plans/finding-034-stages-2-5-build.md`.
+> clean, not end-to-end executed). See `.claude/agents/README.md`.
 
 Decisions locked this session:
 
