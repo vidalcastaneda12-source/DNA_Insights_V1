@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Seed the `genes` table with the FK-satisfying gene-symbol subset (new `genome annotate
+  seed-genes`), unblocking Phase 6: four `derived_*` tables plus `pathway_genes` carry
+  `REFERENCES genes(gene_symbol)`, so with `genes` empty every Phase-6 derived insert
+  failed the FK. The seed writes the set-union of the ACMG SF v3.3 secondary-findings
+  panel (84 genes, verbatim from the verified supplementary) and the gene symbols the
+  currently-active CPIC + PharmGKB tables carry, under a freshly-allocated `hgnc`
+  `annotation_source_versions` row (provenance, decision #8). It is a one-time static
+  backfill, not a registered loader — no `annotation_sources` pointer flip. Full
+  `genes`/`traits`/`pathways` dictionaries remain deferred to Phase 7. (PR 6)
 - Docs (PR-C fast-follow): clear two post-merge residuals the Stage-5 repo-sweep flagged.
   (1) Fix a stale forward-reference in `docs/runbooks/verification.md` ("gnomAD/index match
   counts re-lock later at PR C" → "were re-locked in PR C"). (2) Add a ⚠️ guard note to
