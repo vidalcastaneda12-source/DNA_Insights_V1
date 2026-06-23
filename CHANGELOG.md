@@ -6,17 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-- Docs (post-merge follow-up PR C — prepare): add the chrX gnomAD gap-close run sheet
-  to `docs/plans/post-merge-followups-chrx-m3-and-gnomad-jobs.md` — the exact
-  `genome annotate refresh --source gnomad --force --jobs 8` + `refresh-index` sequence
-  (VSC-User runs it; multi-hour, needs `external_calls_enabled`), the read-only
-  capture + negative-control SQL, the pass criteria, and the Phase-2 doc-lock map.
-  gnomAD was loaded before the chrX M3 import, so the 72,237 chrX imputed-only positions
-  lack gnomAD AFs (~135 covered); the reload closes that gap and produces the
-  authoritative `user_only` gnomAD/index numbers. Item 3 (three-way `--jobs` reproduction)
-  is moot — PR B kept `user_only`. The number-lock (CLAUDE.md obs #4 + #3, runbook
-  §5.5/§5.7, `verification.md`, findings 029/035) lands in the follow-up commit once the
-  reload runs — no number is locked before it. (PR C)
+- Docs (post-merge follow-up PR C): run the post-chrX `user_only` gnomAD reload
+  (`genome annotate refresh --source gnomad --force --jobs 8`) + `refresh-index` and lock
+  the authoritative numbers, closing the chrX gnomAD annotation gap and CLAUDE.md obs #4
+  (deferred since PR A). The reload re-streamed all 23 chromosomes at the chrX-inclusive
+  `user_only` filter (3,144,800 positions; `rows_loaded` 4,568,802, `match_rate` 0.9957,
+  23/23 succeeded), and `refresh-index` re-locked the index anchors: `gnomad_matches`
+  2,982,431 → 3,054,426 (+71,995, entirely chrX — chrX index matches 22,640 → 94,635,
+  chrX `gnomad_frequencies` 36,867 → 138,299), `row_count` 3,005,358 → 3,077,001;
+  coord/rsid-keyed legs (clinvar 61,926 / gwas 66,742 / pharmgkb 1,737) unchanged and the
+  merge negative control byte-identical. Locked across CLAUDE.md obs #4 + #3,
+  `annotations.md` §5.5 (`user_only` drift table) + §5.7, `verification.md`, findings
+  029/035, and the run sheet. Also fixes a chrom-label bug (`'chrX'` → bare enum `'X'`) in
+  the run-sheet SQL. Item 3 (three-way `--jobs` reproduction) moot — PR B kept `user_only`.
+  (PR C, #85)
 - Narrow the gnomAD annotation filter from the three-way `(user ∪ ClinVar ∪ GWAS)`
   union to `user_only` (the user's own variants), per the finding-035 consumer audit:
   every `gnomad_frequencies` reader (the `variant_annotations_index` rollup and the

@@ -4,9 +4,13 @@
 > notes) and PR B merged (#83 — **Item 2 RESOLVED: VSC-User ruled `user_only`;
 > the `_build_filter_set` strategy swap + doc reconciliation shipped**). **Item 3
 > (three-way `--jobs` exact-count check) is now MOOT** — three-way was not kept.
-> **Remaining live work: Item 4** (the post-chrX gnomAD reload = "PR C", which
-> produces the authoritative `user_only` gnomAD/index numbers and closes CLAUDE.md
-> obs #4). The gating decision below is answered — do not re-ask it.
+> **Item 4 + the deferred half of Item 1 COMPLETED in PR C** (gate-run
+> 2026-06-22): the post-chrX `user_only` gnomAD reload (`--force --jobs 8`) +
+> `refresh-index` produced the authoritative numbers (`rows_loaded` 4,568,802,
+> `match_rate` 0.9957, index `gnomad_matches` 3,054,426 / `row_count` 3,077,001)
+> and closed CLAUDE.md obs #4. The chrX gnomAD gap is closed (chrX gnomAD rows
+> 36,867 → 138,299). See the run sheet + its RESULT block below. **All five
+> follow-up items are now complete.**
 
 **Purpose:** the five remaining follow-up items after PR #74 (chrX imputation via
 M3-physical region split + dosage-confidence QC) and PR #75 (gnomAD parallel import
@@ -107,7 +111,8 @@ Long real-data op — VSC-User executes; you prepare + verify.
 ### 4. chrX gnomAD annotation gap
 
 gnomAD was loaded **before** the chrX M3 import, so the 72,237 new chrX imputed
-positions mostly lack gnomAD annotations (+135 only). Close it with a post-chrX gnomAD
+positions lacked gnomAD annotations (the pre-reload `user_only` build covered only
+the chrX *chip* positions = 36,867 gnomAD rows; PR C raised chrX to 138,299). Close it with a post-chrX gnomAD
 reload (`genome annotate refresh --source gnomad --force --jobs 8` at the chosen filter)
 then `genome annotate refresh-index`. **This run produces the authoritative gnomAD/index
 numbers** → feeds the deferred part of Item 1 and closes obs #4. Long real-data op
@@ -153,7 +158,21 @@ rather than assuming you can run them; keep the dev-loop green
 
 ## PR C run sheet — chrX gnomAD gap reload + final number-lock (Item 4 + deferred Item 1)
 
-> **Status (2026-06-22):** Phase 1 (this artifact — exact commands + capture list)
+> **✅ EXECUTED & LOCKED (gate-run 2026-06-22).** Reload + index re-lock are done;
+> authoritative numbers are locked in CLAUDE.md obs #4, `annotations.md` §5.5
+> (`user_only` drift table) + §5.7, `verification.md`, and findings 029/035.
+> Headline results:
+> - **gnomAD reload:** `rows_loaded` 4,568,802 · `match_rate` 0.9957 · filter
+>   `user`=`union` 3,144,800 · 23/23 chroms, 0 failed · 2 htslib recovers · ~7 h 14 m.
+> - **index re-lock:** `gnomad_matches` 2,982,431 → **3,054,426** (+71,995, all chrX) ·
+>   `row_count` 3,005,358 → **3,077,001** · clinvar/gwas/pharmgkb unchanged.
+> - **chrX gap closed:** chrX gnomAD rows **36,867 → 138,299**, chrX index matches
+>   **22,640 → 94,635**. Negative control (merge anchors + `variants_master`) byte-identical.
+> - **Correction:** the chrom enum value is bare `'X'`, **not** `'chrX'` — the Step-0/3
+>   SQL below is fixed accordingly; the true pre-reload chrX baseline is **36,867 gnomAD
+>   rows / 22,640 index matches** (an earlier `'chrX'`-label query wrongly read 0).
+
+> **Status (2026-06-22 — historical):** Phase 1 (this artifact — exact commands + capture list)
 > ready on branch `pr-c-chrx-gnomad-gap-reload`. **Item 3 is MOOT** — PR B kept
 > `user_only`, so the three-way `--jobs` exact-count reproduction is not run.
 > Phase 2 (re-derive + number-lock) is gated on VSC-User executing the reload
@@ -166,7 +185,9 @@ rather than assuming you can run them; keep the dev-loop green
 
 **Why.** gnomAD was loaded *before* the chrX M3 import, so the **72,237** chrX
 imputed-only positions now in `variants_master` (finding-029) are absent from the
-`user_only` filter the live load was built from — only **~135** carry a gnomAD AF.
+`user_only` filter the live load was built from (the pre-reload build covered only
+the chrX *chip* positions — **36,867** gnomAD rows / 22,640 index matches — leaving
+the imputed positions uncovered).
 This reload rebuilds the `user_only` filter (now chrX-inclusive), re-streams gnomAD,
 and rebuilds the index, producing the authoritative post-chrX numbers.
 
@@ -182,17 +203,18 @@ Read-only connection: `duckdb -readonly data/genome.duckdb` (or
 `duckdb.connect("data/genome.duckdb", read_only=True)`). Save the output.
 
 ```sql
--- (A) gnomAD chrX coverage — the gap being closed (expect small now)
+-- (A) gnomAD chrX coverage — the gap being closed.
+--     NOTE: chromosome_enum stores the BARE label 'X' (NOT 'chrX'); query WHERE chrom = 'X'.
 SELECT COUNT(*) AS gnomad_chrx_rows_active
 FROM gnomad_frequencies gn
 JOIN annotation_sources s
   ON s.source_db = 'gnomad' AND s.current_source_version_id = gn.source_version_id
-WHERE gn.chrom = 'chrX';
+WHERE gn.chrom = 'X';
 
 SELECT COUNT(*) AS index_chrx_gnomad_matches
 FROM variant_annotations_index vai
 JOIN variants_master vm ON vm.variant_id = vai.variant_id
-WHERE vm.chrom = 'chrX' AND vai.af_global IS NOT NULL;
+WHERE vm.chrom = 'X' AND vai.af_global IS NOT NULL;
 
 -- (B) index match anchors (== verification.md "index match anchors" block;
 --     these are what Phase 2 LOCKS, re-derived from the DB)
@@ -256,7 +278,7 @@ The (A)/(B) values are the authoritative lock source. (C) is the tripwire.
 |---|---|
 | `chromosomes_succeeded` / `failed` | **23 / 0** (autosomes 1-22 + X) |
 | `match_rate` | ≈ **0.988** (investigate only if `< 0.95`; a dip from chrX imputed positions gnomAD lacks is corpus-expected, not a regression — runbook §5.5) |
-| chrX gnomAD coverage (A) | **rises** materially (~135 → N) — the gap closed |
+| chrX gnomAD coverage (A) | **rose** 36,867 → **138,299** gnomAD rows (index matches 22,640 → 94,635) — gap closed |
 | index `gnomad_matches` / `row_count` (B) | **rise** vs the pre-reload ~2,982,431 / ~3,005,358 start (lower-bound sanity; lock the actual re-derived values, never these) |
 | negative control (C) | **byte-identical** before vs after: `variants_master` 3,160,364 · `imputed_only` 2,218,539 · `both_concordant` 120,513 · `single_source` 821,285 · `disagreement_resolved` 0 · `unresolvable` 27. **Any drift = STOP** — the reload must not reach consensus/variants_master. |
 

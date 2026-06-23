@@ -1405,6 +1405,71 @@ Capture from the `gnomad.refresh.complete` structlog line:
 `pop_af_presence`, plus `chromosomes_succeeded` /
 `chromosomes_failed` and wall-clock.
 
+#### Locked `user_only` numbers (PR C, gate-captured 2026-06-22)
+
+Authoritative `user_only` drift identifiers from the post-chrX gnomAD reload
+(`genome annotate refresh --source gnomad --force --jobs 8`, gnomAD v4.1.1,
+active `source_version_id`=10). These **supersede** the three-way baseline below
+as the current expected output (the three-way table is retained as the revert /
+PGS-comparison reference). Drift on a re-run against the same corpus + gnomAD
+4.1.1 is a regression signal.
+
+| Metric | Locked value |
+|---|---|
+| `rows_loaded` | 4,568,802 |
+| `match_rate` (vs `variants_master`) | 0.9957 |
+| `filter_set_composition` (`user` = `union_total`) | 3,144,800 |
+| `mean_af_user_overlap` | 0.2288 |
+| `chromosomes_succeeded` / `failed` | 23 / 0 |
+| htslib recovers | 2 |
+| Wall-clock (`--jobs 8`) | ~7 h 14 m (26,034 s) |
+
+AF buckets on the user-variant overlap:
+
+| Bucket | Count |
+|---|---|
+| `lt_0.001` | 1,429,060 |
+| `0.001_to_0.01` | 122,120 |
+| `0.01_to_0.05` | 306,849 |
+| `0.05_to_0.5` | 1,905,865 |
+| `gt_0.5` | 804,593 |
+
+Per-population AF presence (rows where `af_<pop> IS NOT NULL`):
+
+| Population | Rows | Population | Rows |
+|---|---|---|---|
+| `afr` | 4,489,763 | `fin` | 4,510,788 |
+| `ami` | 4,091,654 | `mid` | 4,468,197 |
+| `amr` | 4,471,376 | `nfe` | 4,546,402 |
+| `asj` | 4,473,362 | `sas` | 4,477,206 |
+| `eas` | 4,483,556 | `oth` | 4,515,633 |
+
+Under `user_only` the `ami` leg (4.09 M) is only mildly sparser than the other
+nine (~4.5 M) — unlike the three-way ~0.26 ratio below — because the
+ClinVar/GWAS-only positions dropped by the narrowing (not the user's own) were
+where `ami` coverage was sparsest.
+
+Distinct variants per chromosome (= per-chrom row count):
+
+| Chr | Variants | Chr | Variants | Chr | Variants |
+|---|---|---|---|---|---|
+| 1 | 340,364 | 9 | 185,712 | 17 | 128,639 |
+| 2 | 364,062 | 10 | 226,447 | 18 | 116,994 |
+| 3 | 303,336 | 11 | 220,179 | 19 | 107,417 |
+| 4 | 311,056 | 12 | 225,642 | 20 | 101,725 |
+| 5 | 280,865 | 13 | 160,664 | 21 | 58,418 |
+| 6 | 307,984 | 14 | 151,198 | 22 | 62,715 |
+| 7 | 258,506 | 15 | 125,630 | **X** | **138,299** |
+| 8 | 242,562 | 16 | 150,388 | | |
+
+**chrX 138,299** is the headline — the post-chrX reload closed the gnomAD
+annotation gap on the 72,237 imputed chrX positions (chrX gnomAD rows
+**36,867 → 138,299**; the pre-reload `user_only` build covered only the chrX
+*chip* positions). NB: the chrom label in `gnomad_frequencies`/`variants_master`
+is the bare enum value `'X'`, **not** `'chrX'` — query `WHERE chrom = 'X'`. The
+companion index re-lock (`gnomad_matches` 2,982,431 → 3,054,426, entirely chrX;
+`row_count` 3,077,001) is in CLAUDE.md obs #4 and §5.7.
+
 #### Superseded three-way baseline (retained for revert + PGS comparison)
 
 The locked numbers below were captured under the **`three_way`**
@@ -1419,11 +1484,11 @@ buckets, and the per-population presence shrink too, but by **less** than
 ~5.5× (the user's positions are denser in gnomAD — multiple AF rows each —
 than the dropped ClinVar/GWAS-only positions), so the loaded-row magnitude is
 re-captured at the PR-C reload, not predicted here. **Do not treat these as
-the `user_only` expectation.** The authoritative `user_only` numbers are
-captured at the **PR-C post-chrX gnomAD reload** (plan Item 4,
-`docs/plans/post-merge-followups-chrx-m3-and-gnomad-jobs.md`) — that reload
-needs `external_calls_enabled` + a multi-hour run and is **not** performed
-in the finding-035 filter-swap PR. The filter-independent invariant that
+the `user_only` expectation.** The authoritative `user_only` numbers are now
+**locked above** (the "Locked `user_only` numbers (PR C, gate-captured
+2026-06-22)" table) — `rows_loaded` 4,568,802, `match_rate` 0.9957, the filter
+at 3,144,800 positions (the post-imputation `variants_master`, ~61% of the
+5.13 M three-way set — not the ~18% this estimate assumed). The filter-independent invariant that
 **does** carry forward is `match_rate` ≈ 0.988 against `variants_master`
 (user variants matched in gnomAD — `user_only` loads exactly that overlap).
 
@@ -1825,7 +1890,13 @@ with REF/ALT swapped (un-canonicalized REF/ALT, finding-005 #1). This is
 expected, not a regression: re-running `refresh-index` after the post-5.7
 canonical-REF/ALT backfill is expected to materially raise the coord-keyed
 counts; capture and re-lock then. The rsid-keyed counts (GWAS, PharmGKB) are
-unaffected by REF/ALT.
+unaffected by REF/ALT. **Re-lock status:** done across PR-3 (canonicalize),
+PR-4 (tier-2 rsID), and **PR C** (post-chrX `user_only` gnomAD reload,
+gate-run 2026-06-22). The current authoritative anchors are `gnomad_matches`
+**3,054,426** / `row_count` **3,077,001** / `clinvar_matches` **61,926** /
+`gwas_matches` **66,742** / `pharmgkb_matches` **1,737** / `is_rare` **173,689**
+/ `is_ultrarare` **109,013** (see CLAUDE.md obs #4); the table above is the
+finding-018 first-run pre-canon historical baseline.
 
 **Tier-2 rsID matching (PR 4, finding-025)** is the separate event that lifts the
 rsid-keyed counts: `refresh-index` now resolves merged-away rsIDs on both the user
