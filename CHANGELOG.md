@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Docs (PR-C fast-follow): clear two post-merge residuals the Stage-5 repo-sweep flagged.
+  (1) Fix a stale forward-reference in `docs/runbooks/verification.md` ("gnomAD/index match
+  counts re-lock later at PR C" → "were re-locked in PR C"). (2) Add a ⚠️ guard note to
+  ROADMAP PR 7 + a finding-015 amendment: the deferred orphan-cleanup SQL
+  `DELETE … source_version_id IN (6,7,8,10)` is stale + dangerous post-PR-C — the live
+  (rebuilt) DB has only id=8 (superseded, 4,467,370 rows) + id=10 (active, 4,568,802 rows),
+  so that DELETE would erase the active gnomAD version + the superseded build; PR 7 must
+  re-derive the real zero-row orphan set against the live DB first (likely moot). Docs-only.
 - Docs (post-merge follow-up PR C): run the post-chrX `user_only` gnomAD reload
   (`genome annotate refresh --source gnomad --force --jobs 8`) + `refresh-index` and lock
   the authoritative numbers, closing the chrX gnomAD annotation gap and CLAUDE.md obs #4

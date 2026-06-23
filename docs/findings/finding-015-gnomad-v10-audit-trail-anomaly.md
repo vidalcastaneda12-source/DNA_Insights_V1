@@ -157,3 +157,21 @@
     the planning chat decides the failed-attempt audit has no
     forward value; that judgement is the planning chat's, not this
     investigation's.
+
+## Amendment — post-PR-C reload (2026-06-22): the id-specific cleanup is stale
+
+The orphan analysis above (v6/v7/v8/v10 inert, **v9** the active pointer) describes
+a **pre-rebuild** DB. The DB has since been rebuilt and PR C re-ran the gnomAD load,
+so the live source-version landscape is now entirely different: **only**
+`source_version_id=8` (superseded, **4,467,370** rows — the pre-chrX `user_only`
+build) and `source_version_id=10` (**ACTIVE** pointer, **4,568,802** rows — the
+post-chrX reload) exist; there is **no** v6 / v7 / v9.
+
+**⚠️ The §12 Option-C SQL `DELETE … source_version_id IN (6, 7, 8, 10)` is STALE and
+DANGEROUS on the current DB.** It would delete the **active** version (v10) and the
+superseded build (v8, 4.47M rows) — no longer the zero-reference case the §12 FK-safety
+argument relied on (v10 is referenced by `annotation_sources`; v8 by 4.47M
+`gnomad_frequencies` rows). **Do not run it.** Any orphan cleanup (ROADMAP PR 7) must
+first re-derive the *actual* zero-row orphan set against the live DB — by current
+evidence there are **none** by those ids, so PR 7 may now be **moot**. Current
+landscape: CLAUDE.md obs #4 (PR C re-lock).
