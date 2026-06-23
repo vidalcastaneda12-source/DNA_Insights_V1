@@ -604,6 +604,46 @@ def annotate_collapse_duplicate_variants(
     )
 
 
+@annotate_app.command("seed-genes")
+def annotate_seed_genes(
+    force: Annotated[  # noqa: FBT002 — typer boolean flag, opt-in
+        bool,
+        typer.Option(
+            "--force",
+            help=(
+                "Re-seed even when genes is already populated: DELETE FROM genes "
+                "and re-INSERT under a fresh source_version_id, in one transaction. "
+                "Refuses (raises) if any of the five FK dependents (the four "
+                "derived_* tables or pathway_genes) still reference genes."
+            ),
+        ),
+    ] = False,
+) -> None:
+    """Seed ``genes`` with the FK-satisfying gene-symbol subset (PR 6).
+
+    Writes the set-union of the ACMG SF v3.3 secondary-findings panel (84 genes)
+    and the gene symbols the currently-active CPIC + PharmGKB tables carry, under
+    a freshly-allocated ``hgnc`` ``annotation_source_versions`` row (decision #8).
+    This satisfies the ``REFERENCES genes(gene_symbol)`` FK that four Phase-6
+    ``derived_*`` tables plus ``pathway_genes`` carry, unblocking Phase 6. The
+    ``annotation_sources`` pointer is NOT flipped (genes is a one-time static
+    seed, not an evolving source). Full genes/traits/pathways dictionaries remain
+    deferred to Phase 7.
+    """
+    from genome.annotate.seed_genes import seed_genes  # noqa: PLC0415
+
+    result = seed_genes(force=force)
+    typer.echo(
+        f"genes seeded: source_version_id={result.source_version_id} "
+        f"already_populated={result.already_populated} "
+        f"genes_rows={result.genes_rows} "
+        f"acmg_sf_genes={result.acmg_sf_genes} "
+        f"pgx_genes={result.pgx_genes} "
+        f"cpic_covered={result.cpic_covered} "
+        f"pharmgkb_covered={result.pharmgkb_covered}",
+    )
+
+
 __all__ = [
     "annotate_app",
 ]

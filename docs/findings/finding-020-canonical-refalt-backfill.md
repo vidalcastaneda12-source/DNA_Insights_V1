@@ -551,7 +551,12 @@ must not be read by Phase-6 consumers during the sequence.
   finding-005 #1 as an explicit deferred sub-item.
 - **Tier-2 rsID matching via `variant_aliases`.** Separate PR 4; finding-005
   #4 / finding-019.
-- **`genes` seed.** Phase 7.
+- **`genes` seed.** ~~Phase 7.~~ **Amended (PR 6):** the FK-satisfying
+  gene-symbol subset (ACMG SF v3.3 panel ∪ in-DB CPIC/PharmGKB symbols) was
+  pulled forward to **PR 6** to unblock Phase 6 (four `derived_*` tables +
+  `pathway_genes` carry `REFERENCES genes(gene_symbol)`). The full
+  `genes`/`traits`/`pathways` dictionaries + HGNC bulk loader remain Phase 7.
+  NB `genes` has **five** FK dependents, not zero — it was never a leaf.
 - **Re-running Beagle imputation.** Hom-only recovery enables a *future*
   `genome imputation prepare` to include those rows (the `ref!=alt` filter at
   `backend/src/genome/imputation/vcf_export.py:191` is unchanged; recovered

@@ -42,6 +42,12 @@ from genome.annotate.registry import (
     known_loaders,
     register_loader,
 )
+from genome.annotate.seed_genes import (
+    GeneSeedCoverageError,
+    GeneSeedResult,
+    GenesNotLeafError,
+    seed_genes,
+)
 from genome.annotate.source_versions import (
     KNOWN_SOURCE_DBS,
     SourceVersion,
@@ -58,6 +64,9 @@ from genome.annotate.supersession import (
 __all__ = [
     "KNOWN_SOURCE_DBS",
     "DownloadResult",
+    "GeneSeedCoverageError",
+    "GeneSeedResult",
+    "GenesNotLeafError",
     "RefreshFn",
     "RefreshResult",
     "SourceVersion",
@@ -73,5 +82,6 @@ __all__ = [
     "known_loaders",
     "maybe_skip_same_version",
     "register_loader",
+    "seed_genes",
     "source_download_dir",
 ]
