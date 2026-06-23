@@ -1,0 +1,85 @@
+gene_symbol,acmg_sf_disease,acmg_sf_inheritance,acmg_sf_version
+ABCD1,X-linked adrenoleukodystrophy,XL,v3.3
+ACTA2,Familial thoracic aortic aneurysm and dissection,AD,v1.0
+ACTC1,Hypertrophic cardiomyopathy,AD,v1.0
+ACVRL1,Hereditary hemorrhagic telangiectasia,AD,v3.0
+APC,Familial adenomatous polyposis,AD,v1.0
+APOB,Familial hypercholesterolemia,AD,v1.0
+ATP7B,Wilson disease,AR,v2.0
+BAG3,Dilated cardiomyopathy / myofibrillar myopathy,AD,v3.1
+BMPR1A,Juvenile polyposis syndrome,AD,v1.0
+BRCA1,Hereditary breast and ovarian cancer,AD,v1.0
+BRCA2,Hereditary breast and ovarian cancer,AD,v1.0
+BTD,Biotinidase deficiency,AR,v3.0
+CACNA1S,Malignant hyperthermia susceptibility,AD,v1.0
+CALM1,Long QT syndrome / catecholaminergic polymorphic ventricular tachycardia,AD,v3.2
+CALM2,Long QT syndrome / catecholaminergic polymorphic ventricular tachycardia,AD,v3.2
+CALM3,Long QT syndrome / catecholaminergic polymorphic ventricular tachycardia,AD,v3.2
+CASQ2,Catecholaminergic polymorphic ventricular tachycardia,AR,v3.0
+COL3A1,"Ehlers-Danlos syndrome, vascular type",AD,v1.0
+CYP27A1,Cerebrotendinous xanthomatosis,AR,v3.3
+DES,Dilated cardiomyopathy / myofibrillar myopathy,AD,v3.1
+DSC2,Arrhythmogenic right ventricular cardiomyopathy,AD,v1.0
+DSG2,Arrhythmogenic right ventricular cardiomyopathy,AD,v1.0
+DSP,Arrhythmogenic right ventricular cardiomyopathy / dilated cardiomyopathy,AD,v1.0
+ENG,Hereditary hemorrhagic telangiectasia,AD,v3.0
+FBN1,Marfan syndrome,AD,v1.0
+FLNC,Dilated/hypertrophic cardiomyopathy / myofibrillar myopathy,AD,v3.0
+GAA,Pompe disease,AR,v3.0
+GLA,Fabry disease,XL,v1.0
+HFE,Hereditary hemochromatosis,AR,v3.0
+HNF1A,Maturity-onset diabetes of the young,AD,v3.0
+KCNH2,Long QT syndrome,AD,v1.0
+KCNQ1,Long QT syndrome,AD,v1.0
+LDLR,Familial hypercholesterolemia,AD,v1.0
+LMNA,Dilated cardiomyopathy,AD,v1.0
+MAX,Hereditary paraganglioma-pheochromocytoma syndrome,AD,v3.0
+MEN1,Multiple endocrine neoplasia type 1,AD,v1.0
+MLH1,Lynch syndrome,AD,v1.0
+MSH2,Lynch syndrome,AD,v1.0
+MSH6,Lynch syndrome,AD,v1.0
+MUTYH,MUTYH-associated polyposis,AR,v1.0
+MYBPC3,Hypertrophic cardiomyopathy,AD,v1.0
+MYH11,Familial thoracic aortic aneurysm and dissection,AD,v1.0
+MYH7,Hypertrophic / dilated cardiomyopathy,AD,v1.0
+MYL2,Hypertrophic cardiomyopathy,AD,v1.0
+MYL3,Hypertrophic cardiomyopathy,AD,v1.0
+NF2,NF2-related schwannomatosis,AD,v1.0
+OTC,Ornithine transcarbamylase deficiency,XL,v2.0
+PALB2,Hereditary breast cancer,AD,v3.0
+PCSK9,Familial hypercholesterolemia,AD,v1.0
+PKP2,Arrhythmogenic right ventricular cardiomyopathy,AD,v1.0
+PLN,Dilated cardiomyopathy / arrhythmogenic cardiomyopathy,AD,v3.3
+PMS2,Lynch syndrome,AD,v1.0
+PRKAG2,Hypertrophic cardiomyopathy,AD,v1.0
+PTEN,PTEN hamartoma tumor syndrome,AD,v1.0
+RB1,Retinoblastoma,AD,v1.0
+RBM20,Dilated cardiomyopathy,AD,v3.1
+RET,Multiple endocrine neoplasia type 2 / familial medullary thyroid cancer,AD,v1.0
+RPE65,RPE65-related retinopathy,AR,v3.0
+RYR1,Malignant hyperthermia susceptibility,AD,v1.0
+RYR2,Catecholaminergic polymorphic ventricular tachycardia,AD,v1.0
+SCN5A,Long QT syndrome type 3 / Brugada syndrome,AD,v1.0
+SDHAF2,Hereditary paraganglioma-pheochromocytoma syndrome,AD,v1.0
+SDHB,Hereditary paraganglioma-pheochromocytoma syndrome,AD,v1.0
+SDHC,Hereditary paraganglioma-pheochromocytoma syndrome,AD,v1.0
+SDHD,Hereditary paraganglioma-pheochromocytoma syndrome,AD,v1.0
+SMAD3,Loeys-Dietz syndrome,AD,v1.0
+SMAD4,Juvenile polyposis syndrome / hereditary hemorrhagic telangiectasia,AD,v1.0
+STK11,Peutz-Jeghers syndrome,AD,v1.0
+TGFBR1,Loeys-Dietz syndrome,AD,v1.0
+TGFBR2,Loeys-Dietz syndrome,AD,v1.0
+TMEM127,Hereditary paraganglioma-pheochromocytoma syndrome,AD,v3.0
+TMEM43,Arrhythmogenic right ventricular cardiomyopathy,AD,v1.0
+TNNC1,Dilated cardiomyopathy,AD,v3.1
+TNNI3,Hypertrophic cardiomyopathy,AD,v1.0
+TNNT2,Dilated / hypertrophic cardiomyopathy,AD,v1.0
+TP53,Li-Fraumeni syndrome,AD,v1.0
+TPM1,Hypertrophic cardiomyopathy,AD,v1.0
+TRDN,Catecholaminergic polymorphic ventricular tachycardia / long QT syndrome,AR,v3.0
+TSC1,Tuberous sclerosis complex,AD,v1.0
+TSC2,Tuberous sclerosis complex,AD,v1.0
+TTN,Dilated cardiomyopathy (truncating variants only),AD,v3.0
+TTR,Hereditary transthyretin-related amyloidosis,AD,v3.1
+VHL,Von Hippel-Lindau syndrome,AD,v1.0
+WT1,WT1-related Wilms tumor,AD,v1.0
