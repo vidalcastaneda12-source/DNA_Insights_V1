@@ -140,8 +140,9 @@ identifiers documented in CLAUDE.md "Real-data observations":
   DR² (structurally dead for single-sample male non-PAR). The
   imputation-derived counts (chrX yield, dconf split, LOO) are
   tolerance-banded; the consensus counts are exact. See CLAUDE.md obs #3
-  and findings 029/031/033. gnomAD/index match counts re-lock later at
-  PR C — the live gate DB is a `user_only` gnomAD build.
+  and findings 029/031/033. gnomAD/index match counts were re-locked in
+  PR C (gate-run 2026-06-22) — see the post-chrX `user_only` boundary block
+  below + CLAUDE.md obs #4.
 
 Drift in any of these numbers against the same input corpus is a
 regression signal, not noise. The numbers are recorded as stable

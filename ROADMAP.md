@@ -142,6 +142,13 @@ finding-016 #8):
   v6/v7/v8/v10, zero `gnomad_frequencies` references each). Distinct from PR #53, which
   shipped finding-015 Option B (loader hardening to prevent *future* orphans) but
   deliberately left these rows in place.
+  - **⚠️ Re-scope before running (post-PR-C, 2026-06-22):** the `v6/v7/v8/v10` list is
+    **stale**. The live (rebuilt) DB has only `source_version_id=8` (superseded,
+    4,467,370 rows) + `source_version_id=10` (**active**, 4,568,802 rows) — the
+    `IN (6,7,8,10)` DELETE would erase the **active** gnomAD version + the superseded
+    build (data loss). Re-derive the real zero-row orphan set against the live DB first;
+    by current evidence PR 7 may be **moot** (no zero-row orphans by those ids). See
+    finding-015 "Amendment — post-PR-C reload" + CLAUDE.md obs #4.
 - [ ] **PR 8** — Deferred docs/cosmetic batch: the `MAPPED_TRAIT_URI` truncation finding
   entry (finding-005, deferred from 5.3), the imputation docstring filename fix, and the
   PharmGKB/CPIC `already_current=True` cosmetic cleanup (finding-010 #12).
