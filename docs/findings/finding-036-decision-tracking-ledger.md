@@ -62,7 +62,10 @@ was read first so the pattern's *intent* — not its deprecated column names —
 
 ## Follow-up
 
-- The full **per-PR-history backfill** (≈90 rows) is the separable Task-6 final pass.
+- The **per-PR-history backfill** is **done** in this PR: `DEC-0022 … DEC-0084`, one row per
+  merged PR (#19–#93, 63 PR-referenced commits in `main`'s lineage), the squash-merge subject
+  git-verbatim as the decision. Declared-complete boundary in `MEMORY.md`. New PRs append the
+  next row at the `/handoff` / Stage-5 checkpoint.
 - A CI/pre-commit hook for `genome docs check` is deferred; the enforcement surface is the
   `repo-sweep` missing-DEC-row detector + the checkpoint prompts + the gate itself.
 - The "fresh checkout with no SQLCipher built" goal for `genome docs check` needs a broader
