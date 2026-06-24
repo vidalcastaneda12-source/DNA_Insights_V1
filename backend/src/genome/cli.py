@@ -13,7 +13,7 @@ import typer
 
 from genome import __version__
 from genome.annotate import annotate_app
-from genome.config import get_settings
+from genome.config import get_logging_settings, get_settings
 from genome.db.duckdb_conn import duckdb_connection
 from genome.db.init_schema import init_databases
 from genome.docs import docs_app
@@ -81,7 +81,7 @@ imputation_app.add_typer(panel_app, name="panel")
 
 
 def _configure_logging() -> None:
-    settings = get_settings()
+    settings = get_logging_settings()
     level = logging.getLevelNamesMapping().get(settings.log_level.upper(), logging.INFO)
     structlog.configure(
         processors=[

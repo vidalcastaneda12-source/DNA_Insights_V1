@@ -61,10 +61,15 @@ changes; the local fix is `uv run ruff format <path>`.
 
 `uv run genome docs check` is the decision-tracking gate (the repo-root
 `MEMORY.md` decision ledger + per-finding frontmatter — CAPTURE / RETRIEVAL /
-LIFECYCLE; finding-036). It is **DB-free** — it runs on a fresh checkout with no
-SQLCipher built — and must exit 0. Run it whenever a PR touches
-`docs/findings/`, `MEMORY.md`, or records a decision; it is cheap enough to run
-on every PR.
+LIFECYCLE; finding-036). It is **DB-free and config-free** — it runs on a fresh
+checkout with no SQLCipher built and needs no `APP_DB_PASSPHRASE` — and must exit
+0. It now runs **automatically**: as a step in `scripts/verify.sh`, at the
+pre-commit boundary where the tracked hook is installed
+(`./scripts/install-hooks.sh`), and as the `docs-check` GitHub Action on every PR.
+To make a CI failure block merge, a repo admin adds the `docs-check` job as a
+required status check on `main` (Settings → Branches → branch protection); until
+then the Action is advisory. The local hook is bypassable with
+`git commit --no-verify`, so the verify.sh run and the CI gate are authoritative.
 
 ## Additional steps for schema changes
 

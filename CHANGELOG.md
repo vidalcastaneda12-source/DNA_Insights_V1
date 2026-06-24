@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Enforce the decision-tracking gate (`genome docs check`, finding-036) automatically: a tracked
+  git pre-commit hook (`scripts/git-hooks/pre-commit` + `scripts/install-hooks.sh`), a step in
+  `scripts/verify.sh`, and a `docs-check` GitHub Action on every PR (the repo's first CI). Also
+  made the gate config-free — a logging-only `LoggingSettings` so `_configure_logging` no longer
+  constructs the passphrase-bearing `Settings`, and `genome docs check` runs on a bare checkout
+  with no `APP_DB_PASSPHRASE`. Reverses the finding-036 deferred-hook stance (DEC-0086).
+  (docs-gate-enforcement)
 - Make the `genome` CLI pysqlcipher3-lazy so the console script — and `genome docs check` —
   load on a fresh checkout with no SQLCipher built. Four module-scope SQLCipher imports
   (cli.py, the `genome.db` package re-export, init_schema, external_client) moved to call time;
