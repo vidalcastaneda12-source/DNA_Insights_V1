@@ -59,6 +59,13 @@ from the formatter's canonical layout, so both must run. `ruff
 format --check` reports what it would reformat without writing any
 changes; the local fix is `uv run ruff format <path>`.
 
+`uv run genome docs check` is the decision-tracking gate (the repo-root
+`MEMORY.md` decision ledger + per-finding frontmatter — CAPTURE / RETRIEVAL /
+LIFECYCLE; finding-036). It is **DB-free** — it runs on a fresh checkout with no
+SQLCipher built — and must exit 0. Run it whenever a PR touches
+`docs/findings/`, `MEMORY.md`, or records a decision; it is cheap enough to run
+on every PR.
+
 ## Additional steps for schema changes
 
 If the PR touches `docs/schemas/` or `ddl/`, the local DuckDB and

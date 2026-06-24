@@ -16,7 +16,6 @@ import structlog
 
 from genome.config import get_settings
 from genome.db.duckdb_conn import duckdb_connection
-from genome.db.sqlite_conn import sqlcipher_connection
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -228,6 +227,8 @@ def init_databases() -> InitResult:
         logger.info("app.db already present; skipping", path=str(settings.app_db_path))
     else:
         logger.info("creating app.db", path=str(settings.app_db_path))
+        from genome.db.sqlite_conn import sqlcipher_connection  # noqa: PLC0415
+
         with sqlcipher_connection() as conn:
             sql = (DDL_DIR / SQLITE_DDL_FILE).read_text(encoding="utf-8")
             conn.executescript(sql)

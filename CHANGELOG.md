@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Make the `genome` CLI pysqlcipher3-lazy so the console script — and `genome docs check` —
+  load on a fresh checkout with no SQLCipher built. Four module-scope SQLCipher imports
+  (cli.py, the `genome.db` package re-export, init_schema, external_client) moved to call time;
+  pysqlcipher3 is lazy, not removed (locked decisions #1/#6 intact). Added a clean-subprocess
+  regression-lock test and documented the gate in CLAUDE.md + verification.md (the finding-036
+  follow-up). (decision-tracking-followups)
 - Add a decision-tracking ledger to close the repo's decision-leak (tactical/reversed
   decisions previously lived only in PR bodies + prose). A git-tracked `MEMORY.md` decision
   log + per-finding frontmatter (`type`/`status`/`actors`/`date`/supersession), generated and

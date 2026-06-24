@@ -6,6 +6,7 @@ A local-first personal DNA insights application that ingests 23andMe + Ancestry 
 ## Read this before any work
 - The five schema documents in `docs/schemas/` are the source of truth for data design. Read the relevant one(s) before touching any DB-adjacent code.
 - `ROADMAP.md` defines build phases. Stay within the current phase unless explicitly directed otherwise.
+- `MEMORY.md` (repo root) is the decision ledger — every architectural/tactical decision as a `DEC-NNNN` row, and findings carry machine-readable frontmatter. The `genome docs check` gate enforces it (finding-036). Not to be confused with Claude Code's session auto-memory.
 - This file (`CLAUDE.md`) is the persistent context for every session.
 
 ## Working with this codebase
@@ -168,6 +169,7 @@ VSC-User runs the canonical verification independently against the pushed branch
 - Tests: `pytest`
 - Lint: `ruff check && ruff format --check`
 - Types: `mypy --strict backend/src`
+- Decision gate: `genome docs check` — validates the `MEMORY.md` ledger + finding frontmatter (CAPTURE / RETRIEVAL / LIFECYCLE). DB-free: runs on a fresh checkout with no SQLCipher built. See finding-036.
 - Dev API (later phases): `uvicorn genome.api.main:app --reload`
 - Frontend (later phases): `cd frontend && pnpm dev`
 
