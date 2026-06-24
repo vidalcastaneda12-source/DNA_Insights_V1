@@ -23,9 +23,11 @@ from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
 
+import structlog
+
 from genome.docs.frontmatter import FrontmatterError, parse_frontmatter
 from genome.docs.index import build_index
-from genome.docs.ledger import LedgerError, parse_ledger
+from genome.docs.ledger import LedgerError, iter_data_rows, parse_ledger, row_from_cells
 from genome.docs.model import (
     BAD_KIND_VOCAB,
     BAD_STATUS_VOCAB,
@@ -34,9 +36,14 @@ from genome.docs.model import (
     COPIED_ANCHOR_NUMBER,
     DECISION_WITHOUT_DEC_ROW,
     DUPLICATE_DEC_ID,
+    INDEX_BEGIN_MARKER,
+    INDEX_END_MARKER,
     INPLACE_CONTENT_EDIT,
     LIFECYCLE,
+    MALFORMED_FRONTMATTER,
+    MALFORMED_LEDGER_ROW,
     MISSING_FRONTMATTER,
+    MISSING_INDEX_MARKER,
     MISSING_PROVENANCE,
     MULTIPLE_SUPERSEDERS,
     NON_CANONICAL_ACTOR,
@@ -51,6 +58,8 @@ from genome.docs.model import (
     LedgerRow,
 )
 
+_log = structlog.get_logger("genome.docs.validator")
+
 __all__ = [
     "BAD_KIND_VOCAB",
     "BAD_STATUS_VOCAB",
@@ -59,7 +68,9 @@ __all__ = [
     "DECISION_WITHOUT_DEC_ROW",
     "DUPLICATE_DEC_ID",
     "INPLACE_CONTENT_EDIT",
+    "MALFORMED_FRONTMATTER",
     "MISSING_FRONTMATTER",
+    "MISSING_INDEX_MARKER",
     "MISSING_PROVENANCE",
     "MULTIPLE_SUPERSEDERS",
     "NON_CANONICAL_ACTOR",
@@ -163,14 +174,30 @@ def _load_findings(findings_dir: Path) -> list[_FindingInfo]:
     return out
 
 
-def _load_ledger(path: Path) -> tuple[list[LedgerRow], str | None]:
+def _load_ledger(path: Path) -> tuple[list[LedgerRow], list[CheckViolation]]:
+    """Parse ``MEMORY.md`` leniently: collect a violation per malformed row **and** keep the
+    parseable rows so the structural checks still run on the good subset.
+
+    Uses the lenient ``row_from_cells`` core (which returns ``(None, code)`` instead of
+    raising) — built for exactly this. ``parse_ledger``'s raise-on-first is for the render /
+    round-trip path, not the gate, which must report every violation in one pass.
+    """
     text = _read_text(path)
-    if not text:
-        return [], None
-    try:
-        return parse_ledger(text), None
-    except LedgerError as err:
-        return [], err.code
+    rows: list[LedgerRow] = []
+    violations: list[CheckViolation] = []
+    for line_no, cells in iter_data_rows(text):
+        row, code = row_from_cells(cells)
+        if row is None:
+            violations.append(
+                _violation(
+                    code or MALFORMED_LEDGER_ROW,
+                    f"MEMORY.md:{line_no}",
+                    "ledger row failed to parse",
+                ),
+            )
+        else:
+            rows.append(row)
+    return rows, violations
 
 
 def _finding_violations(findings: list[_FindingInfo]) -> list[CheckViolation]:
@@ -286,30 +313,56 @@ def _decision_row_violations(
     return out
 
 
-def _content_columns(row: LedgerRow) -> tuple[str, tuple[str, ...], str, str, str]:
-    """The immutable content columns — everything except status / superseded_by."""
-    return row.kind, row.actors, row.provenance, row.decision, row.detail_link
+def _content_columns(row: LedgerRow) -> tuple[str, str, tuple[str, ...], str, str, str]:
+    """The immutable content columns — everything except ``status`` / ``superseded_by``
+    (matches MEMORY.md's documented immutable set, ``date`` included)."""
+    return row.kind, row.date, row.actors, row.provenance, row.decision, row.detail_link
 
 
-def _git_baseline(repo_root: Path, rel: str) -> str | None:
+def _git_run(repo_root: Path, *args: str) -> subprocess.CompletedProcess[str] | None:
+    """Run ``git -C repo_root <args>``; ``None`` if git is unavailable / not a repo."""
     try:
-        result = subprocess.run(  # noqa: S603
-            ["git", "-C", str(repo_root), "show", f"HEAD:{rel}"],  # noqa: S607
+        return subprocess.run(  # noqa: S603
+            ["git", "-C", str(repo_root), *args],  # noqa: S607
             check=False,
             capture_output=True,
             text=True,
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    return result.stdout if result.returncode == 0 else None
+
+
+def _git_toplevel(repo_root: Path) -> Path | None:
+    """The git work-tree root for ``repo_root``, or ``None`` if git is absent / not a repo."""
+    result = _git_run(repo_root, "rev-parse", "--show-toplevel")
+    if result is None or result.returncode != 0:
+        return None
+    return Path(result.stdout.strip()).resolve()
+
+
+def _git_baseline(repo_root: Path, rel: str) -> str | None:
+    result = _git_run(repo_root, "show", f"HEAD:{rel}")
+    if result is None or result.returncode != 0:
+        return None
+    return result.stdout
 
 
 def _inplace_violations(repo_root: Path, rows: list[LedgerRow]) -> list[CheckViolation]:
     if not rows:
         return []
+    # Diff against the git baseline only when repo_root IS the git work-tree root — otherwise
+    # `git show HEAD:MEMORY.md` resolves an ancestor's MEMORY.md, not this one. A missing git
+    # or a nested checkout skips the immutability check; log it so the skip is observable
+    # (fail-open is substrate-honest here, but it must not be silent).
+    toplevel = _git_toplevel(repo_root)
+    if toplevel is None or toplevel != repo_root.resolve():
+        _log.debug(
+            "docs.check.inplace_skipped", repo_root=str(repo_root), git_toplevel=str(toplevel)
+        )
+        return []
     baseline = _git_baseline(repo_root, "MEMORY.md")
     if baseline is None:
-        return []
+        return []  # MEMORY.md not yet in HEAD (the PR introducing it) — no baseline to diff
     try:
         base_by_id = {row.dec: row for row in parse_ledger(baseline)}
     except LedgerError:
@@ -329,16 +382,34 @@ def _inplace_violations(repo_root: Path, rows: list[LedgerRow]) -> list[CheckVio
 
 
 def _retrieval_violations(repo_root: Path) -> list[CheckViolation]:
+    # A missing README or absent index markers is a RETRIEVAL failure, NOT a no-op: the
+    # retrieval surface is broken exactly when it most needs flagging. Detect it explicitly
+    # rather than swallowing the ValueError build_index would raise on absent markers.
+    readme = "docs/findings/README.md"
+    text = _read_text(repo_root / "docs" / "findings" / "README.md")
+    if not text:
+        return [_violation(MISSING_INDEX_MARKER, readme, "findings README missing or unreadable")]
+    if INDEX_BEGIN_MARKER not in text or INDEX_END_MARKER not in text:
+        return [
+            _violation(
+                MISSING_INDEX_MARKER,
+                readme,
+                "findings-index markers absent; add the BEGIN/END block then run build-index",
+            ),
+        ]
     try:
         result = build_index(repo_root, write=False)
-    except (OSError, ValueError):
-        return []
+    except (OSError, ValueError) as err:
+        _log.warning("docs.check.index_unbuildable", error=str(err))
+        return [
+            _violation(
+                MISSING_INDEX_MARKER, readme, f"findings index could not be regenerated: {err}"
+            )
+        ]
     if result.changed:
         return [
             _violation(
-                STALE_INDEX,
-                "docs/findings/README.md",
-                "findings index is stale; run `genome docs build-index`",
+                STALE_INDEX, readme, "findings index is stale; run `genome docs build-index`"
             )
         ]
     return []
@@ -352,13 +423,17 @@ def check(repo_root: Path) -> CheckReport:
     filesystem read plus an optional ``git`` baseline; never imports :mod:`genome.db`.
     """
     findings = _load_findings(repo_root / "docs" / "findings")
-    rows, ledger_code = _load_ledger(repo_root / "MEMORY.md")
-    anchors = anchor_numbers(_read_text(repo_root / "CLAUDE.md"))
+    rows, ledger_violations = _load_ledger(repo_root / "MEMORY.md")
+    claude_text = _read_text(repo_root / "CLAUDE.md")
+    if not claude_text:
+        # An unreadable anchor source silently empties the COPIED_ANCHOR_NUMBER guard — log so
+        # the disabled guard is observable rather than a silent pass.
+        _log.debug("docs.check.anchor_source_unreadable", path=str(repo_root / "CLAUDE.md"))
+    anchors = anchor_numbers(claude_text)
 
     violations: list[CheckViolation] = []
     violations += _finding_violations(findings)
-    if ledger_code is not None:
-        violations.append(_violation(ledger_code, "MEMORY.md", "ledger row failed to parse"))
+    violations += ledger_violations
     violations += _dec_id_violations(rows)
     violations += _supersession_violations(rows)
     violations += _row_value_violations(rows, anchors)

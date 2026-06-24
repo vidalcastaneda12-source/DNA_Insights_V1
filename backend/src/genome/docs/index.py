@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from genome.docs.frontmatter import parse_frontmatter
+from genome.docs.frontmatter import FrontmatterError, parse_frontmatter
 from genome.docs.model import (
     INDEX_BEGIN_MARKER,
     INDEX_END_MARKER,
@@ -67,7 +67,7 @@ def _read_findings(findings_dir: Path) -> list[tuple[str, Frontmatter]]:
             continue
         try:
             frontmatter = parse_frontmatter(path.read_text(encoding="utf-8"))
-        except ValueError:
+        except FrontmatterError:
             continue  # malformed frontmatter is a CAPTURE concern of `check`, not the index
         if frontmatter is not None:
             out.append((fid, frontmatter))

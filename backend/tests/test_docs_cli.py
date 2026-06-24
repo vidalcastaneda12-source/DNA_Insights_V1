@@ -291,3 +291,22 @@ def test_docs_help_lists_both_subcommands() -> None:
     assert result.exit_code == 0, result.output
     assert "build-index" in result.output
     assert "check" in result.output
+
+
+def test_check_decision_gap_prints_the_capture_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """from: Stage-3 test-adequacy — the injected-gap check must print the SPECIFIC
+    DECISION_WITHOUT_DEC_ROW code, so a different violation can't produce a false pass."""
+    findings = _clean_findings()
+    findings["finding-099-undocumented-decision.md"] = _finding(
+        number="099",
+        type_="decision",
+        status="active",
+        title="a decision with no DEC row",
+    )
+    _write_repo(tmp_path, findings=findings, ledger=_ledger(_CLEAN_LEDGER_ROWS))
+    result = _run_in_repo(monkeypatch, tmp_path, ["check"])
+    _assert_clean_exit(result, 1)
+    assert "DECISION_WITHOUT_DEC_ROW" in result.output

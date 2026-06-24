@@ -605,3 +605,87 @@ def test_inplace_rule_skipped_gracefully_without_git_baseline(tmp_path: Path) ->
     # Deliberately do NOT init git here.
     report = check(tmp_path)
     assert validator.INPLACE_CONTENT_EDIT not in _codes(report)
+
+
+# ---------------------------------------------------------------------------
+# Stage-3 fix-first coverage — review-identified gaps (silent-failure blocker,
+# convention date-immutability, test-adequacy untested codes).
+# ---------------------------------------------------------------------------
+
+
+def test_missing_index_markers_is_retrieval_violation(tmp_path: Path) -> None:
+    """from: Stage-3 silent-failure review (blocker) — a README with no index markers must
+    FAIL the gate, not silently pass. RETRIEVAL is not a no-op when the index surface is
+    broken."""
+    no_markers = "# Findings\n\nA findings README with no index marker block at all.\n"
+    _write_repo(
+        tmp_path,
+        findings=_clean_findings(),
+        ledger=_ledger(_CLEAN_LEDGER_ROWS),
+        readme=no_markers,
+    )
+    report = check(tmp_path)
+    assert validator.MISSING_INDEX_MARKER in _codes(report)
+    assert report.ok is False
+
+
+def test_stale_index_is_retrieval_violation_via_check(tmp_path: Path) -> None:
+    """from: Stage-3 test-adequacy — STALE_INDEX surfaces through check() (markers present but
+    an empty/stale body vs the findings), not only via build_index() directly."""
+    _write_repo(tmp_path, findings=_clean_findings(), ledger=_ledger(_CLEAN_LEDGER_ROWS))
+    report = check(tmp_path)
+    assert validator.STALE_INDEX in _codes(report)
+
+
+def test_malformed_frontmatter_is_capture_violation_via_check(tmp_path: Path) -> None:
+    """from: Stage-3 test-adequacy — a present-but-structurally-broken frontmatter block (a
+    line with no colon) surfaces as MALFORMED_FRONTMATTER through check()."""
+    findings = _clean_findings()
+    findings["finding-070-malformed.md"] = (
+        "---\nno_colon_here\n---\n# Finding 070 — malformed frontmatter\n\nBody.\n"
+    )
+    _write_repo(tmp_path, findings=findings, ledger=_ledger(_CLEAN_LEDGER_ROWS))
+    report = check(tmp_path)
+    assert validator.MALFORMED_FRONTMATTER in _codes(report)
+    assert report.ok is False
+
+
+def test_reversed_without_pointer_is_lifecycle_violation(tmp_path: Path) -> None:
+    """from: Stage-3 test-adequacy — the 'reversed' terminal status (not only 'superseded')
+    requires a superseded_by pointer."""
+    rows = (
+        "| DEC-0001 | architectural | 2026-05-22 | reversed | — | VSC-User |"
+        " finding-011 | reversed but no pointer | docs/findings/finding-011.md |\n"
+    )
+    _write_repo(tmp_path, findings=_clean_findings(), ledger=_ledger(rows))
+    report = check(tmp_path)
+    assert validator.SUPERSEDED_WITHOUT_POINTER in _codes(report)
+    assert report.ok is False
+
+
+def test_type_both_finding_without_dec_row_is_violation(tmp_path: Path) -> None:
+    """from: Stage-3 test-adequacy — a type='both' finding (not only 'decision') with no DEC
+    row is a DECISION_WITHOUT_DEC_ROW violation."""
+    findings = _clean_findings()
+    findings["finding-071-both.md"] = _finding(
+        number="071",
+        type_="both",
+        status="active",
+        title="observation plus a decision",
+    )
+    _write_repo(tmp_path, findings=findings, ledger=_ledger(_CLEAN_LEDGER_ROWS))
+    report = check(tmp_path)
+    locs = [v.location for v in report.violations if v.code == validator.DECISION_WITHOUT_DEC_ROW]
+    assert any("finding-071" in loc for loc in locs), locs
+
+
+def test_inplace_date_edit_is_rejected(tmp_path: Path) -> None:
+    """from: Stage-3 convention review — the `date` content column is immutable (MEMORY.md
+    legend + LedgerRow docstring); editing ONLY the date of an existing DEC row against the git
+    baseline trips INPLACE_CONTENT_EDIT (date is in the enforced content set)."""
+    _write_repo(tmp_path, findings=_clean_findings(), ledger=_ledger(_CLEAN_LEDGER_ROWS))
+    _git_commit_all(tmp_path)
+    edited = _CLEAN_LEDGER_ROWS.replace("2026-05-22", "2026-05-23")  # DEC-0001 date only
+    (tmp_path / "MEMORY.md").write_text(_ledger(edited), encoding="utf-8")
+    report = check(tmp_path)
+    assert validator.INPLACE_CONTENT_EDIT in _codes(report)
