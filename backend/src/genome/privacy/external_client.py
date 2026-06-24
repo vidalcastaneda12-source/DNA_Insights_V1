@@ -29,7 +29,6 @@ import httpx
 import structlog
 
 from genome.config import get_settings
-from genome.db.sqlite_conn import sqlcipher_connection
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -181,6 +180,8 @@ def write_config_change_audit(
         {"pref_key": pref_key, "old_value": old_value, "new_value": new_value},
         sort_keys=True,
     )
+    from genome.db.sqlite_conn import sqlcipher_connection  # noqa: PLC0415
+
     with sqlcipher_connection() as conn:
         cur = conn.execute(
             """
@@ -208,6 +209,8 @@ def _open_audit_db() -> Iterator[Connection]:
     connection scoped to a single call means a long-running HTTP request never
     holds a lock on ``app.db``.
     """
+    from genome.db.sqlite_conn import sqlcipher_connection  # noqa: PLC0415
+
     with sqlcipher_connection() as conn:
         yield conn
 
@@ -494,6 +497,8 @@ def is_external_enabled() -> bool:
     """
     # Ensure settings is loaded so the app.db path is resolved correctly.
     get_settings()
+    from genome.db.sqlite_conn import sqlcipher_connection  # noqa: PLC0415
+
     with sqlcipher_connection() as conn:
         return _read_external_calls_enabled(conn)
 

@@ -66,8 +66,13 @@ was read first so the pattern's *intent* — not its deprecated column names —
   merged PR (#19–#93, 63 PR-referenced commits in `main`'s lineage), the squash-merge subject
   git-verbatim as the decision. Declared-complete boundary in `MEMORY.md`. New PRs append the
   next row at the `/handoff` / Stage-5 checkpoint.
-- A CI/pre-commit hook for `genome docs check` is deferred; the enforcement surface is the
-  `repo-sweep` missing-DEC-row detector + the checkpoint prompts + the gate itself.
-- The "fresh checkout with no SQLCipher built" goal for `genome docs check` needs a broader
-  `genome.cli` lazy-import refactor (cli.py transitively imports pysqlcipher3 via the other
-  sub-apps); `genome.docs` itself is DB-free. Deferred (VSC-User, 2026-06-23).
+- **Landed** (DEC-0086, scope `docs-gate-enforcement`): the CI/pre-commit hook is now in place —
+  a tracked git pre-commit hook (`scripts/git-hooks/pre-commit` + `scripts/install-hooks.sh`), a
+  `genome docs check` step in `scripts/verify.sh`, and a `docs-check` GitHub Action on every PR
+  (the repo's first CI). The `repo-sweep` missing-DEC-row detector + the checkpoint prompts remain
+  as complementary surfaces.
+- **Resolved:** the "fresh checkout with no SQLCipher built" goal is met — the `genome.cli`
+  lazy-import refactor landed (DEC-0085), and `docs-gate-enforcement` additionally made the gate
+  **config-free** (a logging-only `LoggingSettings` so `_configure_logging` no longer constructs
+  the passphrase-bearing `Settings`), so `genome docs check` runs on a bare checkout with no
+  SQLCipher built and no `APP_DB_PASSPHRASE`.

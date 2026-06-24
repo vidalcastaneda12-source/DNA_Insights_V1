@@ -140,6 +140,8 @@ back-pointer; `DEC-0002` is the live decision.
 | DEC-0082 | tactical | 2026-06-23 | active | — | VSC-User, ClaudeCodeDevelopment | PR #91 | docs(verify): scope the pre-squash GATE-FILL grep to durable docs | https://github.com/vidalcastaneda12-source/DNA_Insights_V1/pull/91 |
 | DEC-0083 | tactical | 2026-06-23 | active | — | VSC-User, ClaudeCodeDevelopment | PR #92 | docs(verify): make the pre-squash GATE-FILL check a positive allowlist | https://github.com/vidalcastaneda12-source/DNA_Insights_V1/pull/92 |
 | DEC-0084 | tactical | 2026-06-23 | active | — | VSC-User, ClaudeCodeDevelopment | PR #93 | docs(plans): prune five implemented plan artifacts; keep the live one | https://github.com/vidalcastaneda12-source/DNA_Insights_V1/pull/93 |
+| DEC-0085 | tactical | 2026-06-24 | active | — | VSC-User, ClaudeCodeDevelopment | finding-036 | Made the `genome` CLI pysqlcipher3-lazy: four module-scope SQLCipher imports moved to call time + the `genome.db` re-export dropped (option b), so `genome docs check` runs on a fresh checkout with no SQLCipher built; pysqlcipher3 is lazy, not removed | docs/plans/decision-tracking-followups.md |
+| DEC-0086 | tactical | 2026-06-24 | active | — | VSC-User, ClaudeCodeDevelopment | docs/plans/docs-gate-enforcement.md | Made the decision-tracking gate automated + blocking via BOTH a tracked git pre-commit hook and a GitHub Action plus a verify.sh step, and made the gate config-free so logging no longer needs the DB passphrase; reverses the finding-036 deferred-hook stance | docs/plans/docs-gate-enforcement.md |
 
 <!-- END decision-ledger -->
 

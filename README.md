@@ -212,7 +212,20 @@ mypy --strict backend/src
 
 # Tests
 pytest
+
+# Decision-tracking gate (MEMORY.md ledger + finding frontmatter; finding-036)
+genome docs check
 ```
+
+`scripts/verify.sh` runs this full local protocol in one shot. To run the
+decision-tracking gate automatically on every commit, install the tracked
+pre-commit hook once per clone:
+
+```bash
+./scripts/install-hooks.sh   # runs `genome docs check` on commit; bypass with --no-verify
+```
+
+The gate also runs as the `docs-check` GitHub Action on every PR.
 
 ## Status
 

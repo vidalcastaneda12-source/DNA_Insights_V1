@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+#
+# Decision-tracking gate (finding-036 / DEC-0086). Aborts the commit when the
+# MEMORY.md ledger or a finding's frontmatter fails `genome docs check`.
+#
+# Gate-only and fast (~0.5s): DB-free and config-free (needs no APP_DB_PASSPHRASE).
+# `--no-sync` reuses the already-synced dev venv, so it never triggers a cyvcf2
+# from-source build. `exec` makes the gate's exit code the hook's exit code, so a
+# failure is never swallowed.
+#
+# Bypass a single commit (deliberately) with `git commit --no-verify`. The
+# authoritative gates are the `scripts/verify.sh` run and the docs-check GitHub
+# Action on the PR; this hook is fast local feedback, not the security boundary.
+set -euo pipefail
+exec uv run --no-sync genome docs check

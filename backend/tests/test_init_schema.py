@@ -7,8 +7,9 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from genome.db import duckdb_connection, init_databases, sqlcipher_connection
+from genome.db import duckdb_connection, init_databases
 from genome.db.init_schema import _apply_duckdb_ddl
+from genome.db.sqlite_conn import sqlcipher_connection
 
 _EXPECTED_DUCKDB_TABLES = {
     # group 1

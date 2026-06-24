@@ -31,6 +31,7 @@ run_step "pytest" uv run pytest
 run_step "ruff check" uv run ruff check
 run_step "ruff format --check" uv run ruff format --check
 run_step "mypy --strict backend/src" uv run mypy --strict backend/src
+run_step "genome docs check" uv run genome docs check
 
 printf '\nAll checks passed\n'
 printf 'For schema or pipeline changes, see docs/runbooks/verification.md for additional steps.\n'

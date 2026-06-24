@@ -13,10 +13,9 @@ import typer
 
 from genome import __version__
 from genome.annotate import annotate_app
-from genome.config import get_settings
+from genome.config import get_logging_settings, get_settings
 from genome.db.duckdb_conn import duckdb_connection
 from genome.db.init_schema import init_databases
-from genome.db.sqlite_conn import sqlcipher_connection
 from genome.docs import docs_app
 from genome.imputation import (
     DEFAULT_BATCH_SIZE,
@@ -82,7 +81,7 @@ imputation_app.add_typer(panel_app, name="panel")
 
 
 def _configure_logging() -> None:
-    settings = get_settings()
+    settings = get_logging_settings()
     level = logging.getLevelNamesMapping().get(settings.log_level.upper(), logging.INFO)
     structlog.configure(
         processors=[
@@ -138,6 +137,8 @@ def status() -> None:
     typer.echo(f"  exists:      {settings.app_db_path.exists()}")
 
     if settings.app_db_path.exists():
+        from genome.db.sqlite_conn import sqlcipher_connection  # noqa: PLC0415
+
         with sqlcipher_connection() as conn:
             tables = conn.execute(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'"
@@ -282,6 +283,8 @@ def config_get(
     "missing" from a present-but-empty value. Use this to script preference
     inspection.
     """
+    from genome.db.sqlite_conn import sqlcipher_connection  # noqa: PLC0415
+
     with sqlcipher_connection() as conn:
         row = conn.execute(
             "SELECT pref_value, value_type FROM user_preferences WHERE pref_key = ?",
@@ -318,6 +321,8 @@ def config_set(
 
         genome config set external_calls_enabled true
     """
+    from genome.db.sqlite_conn import sqlcipher_connection  # noqa: PLC0415
+
     with sqlcipher_connection() as conn:
         existing = conn.execute(
             "SELECT pref_value, value_type FROM user_preferences WHERE pref_key = ?",

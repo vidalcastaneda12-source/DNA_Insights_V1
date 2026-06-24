@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from genome.db import duckdb_connection, init_databases, sqlcipher_connection
+from genome.db import duckdb_connection, init_databases
+from genome.db.sqlite_conn import sqlcipher_connection
 
 
 def test_duckdb_connection_round_trip(isolated_settings: dict[str, str]) -> None:  # noqa: ARG001
