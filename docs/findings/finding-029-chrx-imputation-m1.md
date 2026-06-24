@@ -1,3 +1,11 @@
+---
+type: both
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-06-19
+supersedes: []
+superseded_by: []
+---
 # chrX imputation via M1 panel diploidization
 
 > **Note:** the title names M1 (the option first explored). The **shipped**

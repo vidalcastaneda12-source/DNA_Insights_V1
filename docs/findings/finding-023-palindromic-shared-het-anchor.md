@@ -1,3 +1,11 @@
+---
+type: observation
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-06-10
+supersedes: []
+superseded_by: []
+---
 # Finding 023 — Palindromic-shared anchor is het-defined; hom-only recovery reveals hom palindromic sites
 
 ## Context

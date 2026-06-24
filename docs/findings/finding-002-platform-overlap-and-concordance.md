@@ -1,3 +1,11 @@
+---
+type: observation
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-05-12
+supersedes: []
+superseded_by: []
+---
 # 23andMe v5 and Ancestry v2: chip overlap and concordance
 
 ## Context

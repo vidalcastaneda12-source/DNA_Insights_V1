@@ -35,11 +35,17 @@ You are the detector half of the pair; `knowledge-curator` is the fixer.
   gating signal fired).
 - **Missing `CHANGELOG` `[Unreleased]` entries** — a behavior/schema/dep change with no
   changelog line.
+- **Missing `MEMORY.md` DEC rows** — a `type: decision`/`both` finding, a merged decision PR,
+  or a `status: superseded` finding with no corresponding `DEC-NNNN` ledger row (the
+  decision-tracking analogue of the missing-CHANGELOG detector; run `genome docs check` and
+  surface any `DECISION_WITHOUT_DEC_ROW`). Also a DEC `superseded_by` that dangles, or a
+  decision cell that **copied** a real-data anchor instead of referencing it.
 
 ## Reads
 
 `CLAUDE.md` · `ROADMAP.md` · `docs/runbooks/verification.md` · `docs/findings/**` ·
-`CHANGELOG.md` · git history · CLI↔docs cross-refs. **Read-only.**
+`CHANGELOG.md` · `MEMORY.md` · git history · CLI↔docs cross-refs · `genome docs check`
+output. **Read-only.**
 
 ## Output (return this JSON)
 

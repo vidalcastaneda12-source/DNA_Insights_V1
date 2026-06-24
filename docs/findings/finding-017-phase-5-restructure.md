@@ -1,3 +1,11 @@
+---
+type: decision
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-05-26
+supersedes: []
+superseded_by: []
+---
 # Finding 017 — Phase 5 reset around the loader/runner cut
 
 ## Context

@@ -137,10 +137,11 @@ Stop. The team does not merge.
 
 1. `knowledge-curator` re-locks the anchors **VSC-User confirmed at the gate**
    into `CLAUDE.md` / `verification.md` / the finding's bedrock table, flips the
-   ROADMAP slot, adds cross-links — into a **reviewable doc change**, never a
-   direct push, human-confirmed numbers only.
+   ROADMAP slot, adds cross-links, and appends/flips the scope's `DEC-NNNN`
+   `MEMORY.md` rows (insert-then-flip, `genome docs check` clean) — into a
+   **reviewable doc change**, never a direct push, human-confirmed numbers only.
 2. `repo-sweep` (whole-repo) files residual staleness to the backlog
-   (non-blocking).
+   (non-blocking), including the **missing-DEC-row** check (`genome docs check`).
 
 This closes the anchor loop: predict (Stage 1) → flag with expected values
 (Stage 3) → confirm on real data (gate) → record (Stage 5).

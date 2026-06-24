@@ -1,3 +1,11 @@
+---
+type: decision
+status: active
+actors: [VSC-User, ClaudeCodeDevelopment]
+date: 2026-06-19
+supersedes: [finding-011]
+superseded_by: []
+---
 # Finding 035 — gnomAD filter-set consumer audit: ClinVar/GWAS-only rows are loaded but never read
 
 **Status: adopted — VSC-User ruled `user_only` on 2026-06-21; implemented in PR B (gnomAD filter strategy swap). The gnomAD reload + authoritative number re-lock completed in PR C (gate-run 2026-06-22) — see CLAUDE.md obs #4 + `docs/runbooks/annotations.md` §5.5.**

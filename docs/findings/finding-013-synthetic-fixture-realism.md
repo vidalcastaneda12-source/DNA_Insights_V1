@@ -1,3 +1,11 @@
+---
+type: decision
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-05-22
+supersedes: []
+superseded_by: []
+---
 # Finding 013 — Synthetic fixtures built from assumptions encode the assumptions, not the source
 
 ## Context

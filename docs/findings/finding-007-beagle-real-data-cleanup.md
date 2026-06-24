@@ -1,3 +1,11 @@
+---
+type: observation
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-05-14
+supersedes: []
+superseded_by: []
+---
 # Phase 4 Beagle pipeline — real-data cleanup
 
 ## Context

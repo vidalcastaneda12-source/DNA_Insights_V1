@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Add a decision-tracking ledger to close the repo's decision-leak (tactical/reversed
+  decisions previously lived only in PR bodies + prose). A git-tracked `MEMORY.md` decision
+  log + per-finding frontmatter (`type`/`status`/`actors`/`date`/supersession), generated and
+  gate-checked by a new `genome docs {build-index, check}` Typer sub-app. `check` is the
+  CAPTURE/RETRIEVAL/LIFECYCLE gate that relocates locked decision #7's no-torn-state invariant
+  onto the markdown substrate (insert-then-flip, immutable content columns, anchors
+  referenced-not-copied, finding-id⇄DEC-id cross-resolution); `genome.docs` carries no DB
+  import (stdlib parser, not PyYAML). Prepended frontmatter to all 35 existing findings,
+  seeded the curated decision-finding DEC rows (DEC-0001…DEC-0021), backfilled the per-PR-history
+  retrospective (DEC-0022…DEC-0084, one row per merged PR #19–#93, squash-subject git-verbatim),
+  and wired capture into the handoff / new-finding / knowledge-curator / repo-sweep checkpoints.
+  See `docs/findings/finding-036-decision-tracking-ledger.md`. (decision-tracking-leak-fix; finding-036)
 - Seed the `genes` table with the FK-satisfying gene-symbol subset (new `genome annotate
   seed-genes`), unblocking Phase 6: four `derived_*` tables plus `pathway_genes` carry
   `REFERENCES genes(gene_symbol)`, so with `genes` empty every Phase-6 derived insert

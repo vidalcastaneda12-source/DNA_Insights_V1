@@ -1,3 +1,11 @@
+---
+type: decision
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-05-19
+supersedes: []
+superseded_by: []
+---
 # Finding 010 — Version-pointer supersession for evolving sources
 
 ## Context

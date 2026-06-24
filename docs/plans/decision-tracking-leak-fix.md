@@ -1,8 +1,9 @@
 # Decision Tracking Leak Fix
 
-> **Status:** Plan — produced by the `plan-phase.js` per-scope agent team (finding-034),
-> revised once to fold in the pre-mortem + auditor blockers. **Not implemented.**
-> This document is the pre-gate package for VSC-User approval. No code was written.
+> **Status:** **Approved by VSC-User 2026-06-23** — the four escalations are resolved
+> (see §0) and implementation is underway on branch `decision-tracking-leak-fix`.
+> Produced by the `plan-phase.js` per-scope agent team (finding-034), revised once to
+> fold in the pre-mortem + auditor blockers.
 >
 > **Scope id:** `decision-tracking-leak-fix` · **Risk tier:** 2 (escalated from 1 by open
 > questions) · **Change class:** docs + `.claude` automation + backend tooling (Typer
@@ -18,32 +19,28 @@
 
 ---
 
-## ⛔ Blocking escalation to VSC-User (resolve before implementation)
+## 0 · Resolved escalations (VSC-User, 2026-06-23) — implementation cleared
 
-The bounded revise loop cannot settle these; they are judgment calls outside the code.
-Implementation of the affected tasks is **gated** on your answer.
+The four judgment calls below were escalated to VSC-User and **resolved on 2026-06-23**;
+the answers are now locked spec. (Originally a ⛔ blocking-escalation section; preserved here
+with resolutions for provenance. All four chose toward maximum comprehensiveness, consistent
+with the locked "comprehensiveness over overhead" priority.)
 
-1. **Backfill scope — what does "full retrospective" mean?** (Task 6, blocking.) Three
-   readings, materially different in size and effort:
-   - **(a) Curated set** *(auditor-recommended default)* — the 9 CLAUDE.md locked
-     architecture decisions + the supersession/restructure adoptions (finding-010
-     version-pointer, finding-017 Phase-5 restructure, finding-035 `user_only` superseding
-     finding-011 `three_way`, finding-029 M3-physical chrX superseding M1) + landed PRs 1–5
-     + the agent-team build (finding-034). ~25–40 DEC rows.
-   - **(b) Per-CHANGELOG-bullet** — one DEC row per `[Unreleased]`/release bullet. Hundreds
-     of rows; large `GATE-FILL` / `provenance:unknown` surface.
-   - **(c) Per-PR-history** — one DEC row per merged PR across all history. Largest; a
-     git/gh archaeology task in its own right.
-2. **Closed status vocabulary** — final pick from the candidates the planners diverged on:
-   `{active | superseded | reversed | deferred}` (recommended) vs `{…| tactical}` vs
-   `{proposed | accepted | superseded}`. The validator enforces this as a closed set, so it
-   must be frozen **before** Task 3.
-3. **Command surface naming** — confirm `genome docs {build-index, check}` (3 of 4 planners
-   preferred `docs` over `memory`; `check` consolidates the validate-\* variants).
-4. **Single source of truth for the supersession edge** — confirm **finding frontmatter is
-   authoritative** and the ledger's cross-links are *derived* by `build-index` (vs.
-   hand-maintaining both id-spaces). This plan assumes "yes" per the architecture-fit
-   auditor; flag if you want the ledger authoritative instead.
+1. **Backfill scope (Task 6).** → **(c) Per-PR-history** — one DEC row per merged PR across
+   all history (≈90+ rows; numbering reaches #93). Built as a **separable final pass** with an
+   explicit declared-complete boundary marker (e.g. "backfilled through PR #93"). Arch-grain
+   decisions that don't map cleanly to a single PR are still captured as `kind: architectural`
+   rows. Nothing in the tooling (Tasks 0–5, 7–9) depends on the backfill being complete — Task 5
+   bulk-apply gates only on a `genome docs check` dry-run passing.
+2. **Closed status vocabulary.** → **`{active | superseded | reversed | deferred}`** (four
+   lifecycle states), frozen before Task 3. The fifth candidate `tactical` is **not** a status —
+   it moves to a separate **kind axis `{architectural | tactical}`** (the former `grain ∈ {arch,
+   op}`, renamed), so a tactical decision still carries a full lifecycle status and can be
+   recorded as superseded/reversed. The validator enforces **both** as closed sets.
+3. **Command surface naming.** → **`genome docs {build-index, check}`** (confirmed).
+4. **Supersession-edge source of truth.** → **Finding frontmatter is authoritative**; the
+   ledger's cross-links are **derived** by `build-index`. The validator cross-resolves the
+   finding-id ⇄ DEC-id spaces and hard-fails on divergence.
 
 ---
 
@@ -166,10 +163,11 @@ the bulk-apply both depend on it; it must be fixed before either.
 
 **Task 2 — Author both schemas** (read `finding-010` first).
 - *Ledger (`MEMORY.md`, repo root):* a single append-only markdown table, columns
-  `DEC | grain | date | status | superseded_by | actors | provenance | decision | detail-link`.
-  `grain ∈ {arch, op}` carries the two granularities in one table. The header documents the
-  insert-then-flip rule **and** the advisory/validator-enforced framing, with a worked
-  supersession example. **Free-text safety:** the `decision` column escapes or forbids raw
+  `DEC | kind | date | status | superseded_by | actors | provenance | decision | detail-link`.
+  `kind ∈ {architectural, tactical}` (the former `grain`, per §0 resolution #2) carries the two
+  granularities in one table; `status ∈ {active, superseded, reversed, deferred}` is the
+  orthogonal lifecycle axis. The header documents the insert-then-flip rule **and** the
+  advisory/validator-enforced framing, with a worked supersession example. **Free-text safety:** the `decision` column escapes or forbids raw
   `|`; the worked example must round-trip through its own parser (dogfood).
 - *Frontmatter (atop each finding):* a `---`-fenced block — `type
   {observation|decision|both}`, `status` (closed vocab), `supersedes` / `superseded_by`

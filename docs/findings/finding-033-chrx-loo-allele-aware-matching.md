@@ -1,3 +1,11 @@
+---
+type: both
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-06-19
+supersedes: []
+superseded_by: []
+---
 # chrX LOO harness: position-only matching manufactures cell-collapse
 
 ## Status

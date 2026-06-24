@@ -75,12 +75,20 @@ actually landed.
 
      The explicit "none" matters. The absence is intentional, not an omission.
 
-7. **Pre-change pytest baseline / post-change pytest result.** State the test
+7. **Decision rows (`MEMORY.md`).** Append (or confirm) a `DEC-NNNN` ledger row for
+   every decision made *during this session* — a threshold chosen, an approach
+   reversed, a deferral. A reversal/supersession is **insert-then-flip** (a new row
+   + a back-pointer on the old), never an in-place content edit. Reference real-data
+   anchors by pointer (`see CLAUDE.md obs #N`), never copy the digits. If the session
+   made no durable decision, write **"None"** explicitly — the absence is intentional,
+   not an omission. Confirm `genome docs check` exits 0.
+
+8. **Pre-change pytest baseline / post-change pytest result.** State the test
    count before and after, and call out any tests added, removed, tightened,
    or relaxed with a one-line description of what changed in each. If the
    counts match and no existing tests changed, say so explicitly.
 
-8. **For investigation-only sessions** (no behavior change, only a new
+9. **For investigation-only sessions** (no behavior change, only a new
    `docs/findings/` doc), include a two-line conclusion summary at the very
    end suitable for the planning chat to read first. Skip this section for
    sessions that ship code or schema changes.

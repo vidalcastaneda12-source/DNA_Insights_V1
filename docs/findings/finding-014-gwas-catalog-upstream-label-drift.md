@@ -1,3 +1,11 @@
+---
+type: observation
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-05-22
+supersedes: []
+superseded_by: []
+---
 # Finding 014 — GWAS Catalog upstream label drifts on byte-identical content
 
 ## Context

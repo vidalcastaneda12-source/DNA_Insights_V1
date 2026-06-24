@@ -1,3 +1,11 @@
+---
+type: decision
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-05-12
+supersedes: []
+superseded_by: []
+---
 # Lift-over engine selection: the `liftover` Python package over bcftools
 
 ## Context

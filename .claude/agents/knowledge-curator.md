@@ -19,7 +19,12 @@ Write back the numbers VSC-User **confirmed at the gate** as the new locked anch
   `docs/runbooks/verification.md`, and the relevant finding's **bedrock anchor table** —
   in **every** place each anchor appears;
 - the ROADMAP `[ ] → [x]` flip for the completed slot;
-- new `[[finding]]` cross-links; the MEMORY index.
+- new `[[finding]]` cross-links;
+- the **`MEMORY.md` decision ledger** (finding-036): append — or flip under supersession — the
+  `DEC-NNNN` rows for the decisions VSC-User confirmed at the gate. A supersession is
+  **insert-then-flip** (a new row + a back-pointer on the old), **never** an in-place content
+  edit; human-confirmed only; anchors **referenced** (`see CLAUDE.md obs #N`), never copied.
+  Then run `genome docs build-index` so the derived findings-index cross-links stay current.
 
 This closes the **anchor loop**: pre-mortem *predicted* (Stage 1) → regression-hunter
 *flagged with expected values* (Stage 3) → VSC-User *confirmed on real data* (gate) → you
@@ -64,6 +69,7 @@ A doc-update branch/PR: the re-lock diff + a **one-line-per-anchor change log**
 
 **Done when.** Every gate-confirmed anchor re-locked in **every** place it appears (a
 number re-locked in one doc but not another is exactly the cross-doc drift `repo-sweep`
-exists to catch); the cross-check passed; the change is reviewable, not a direct push.
+exists to catch); the DEC rows for the scope's confirmed decisions are appended/flipped and
+`genome docs check` exits 0; the cross-check passed; the change is reviewable, not a direct push.
 **Hands to.** the normal review gate (the re-lock PR) · the next item's `scope-dispatcher`
 (which reads this freshly re-locked record, so accuracy compounds).

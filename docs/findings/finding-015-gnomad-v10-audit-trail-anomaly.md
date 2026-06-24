@@ -1,3 +1,11 @@
+---
+type: observation
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-05-24
+supersedes: []
+superseded_by: []
+---
 # Finding 015 — gnomad v10 audit-trail anomaly: orphan version rows from chrom-grain partial runs
 
 ## Context
