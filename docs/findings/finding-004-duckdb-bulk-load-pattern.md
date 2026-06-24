@@ -1,3 +1,11 @@
+---
+type: decision
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-05-12
+supersedes: []
+superseded_by: []
+---
 # DuckDB bulk-load: `executemany` vs PyArrow registration
 
 ## Context

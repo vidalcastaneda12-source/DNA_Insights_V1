@@ -1,3 +1,11 @@
+---
+type: decision
+status: superseded
+actors: [ClaudeCodeDevelopment]
+date: 2026-05-22
+supersedes: []
+superseded_by: [finding-035]
+---
 # Finding 011 — gnomAD filter is three-way at PR B; PGS extension is a Phase 6 follow-up
 
 **Status: superseded by [finding-035](finding-035-gnomad-filter-set-consumer-audit.md) — `user_only` adopted 2026-06-21.** The three-way design below is retained as the revert / PGS-extension baseline; the active gnomAD filter is now `user_only`.

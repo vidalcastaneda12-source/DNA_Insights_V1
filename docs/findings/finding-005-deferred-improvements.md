@@ -1,3 +1,11 @@
+---
+type: both
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-05-12
+supersedes: []
+superseded_by: []
+---
 # Deferred improvements identified during Phase 2 and Phase 3
 
 ## Context

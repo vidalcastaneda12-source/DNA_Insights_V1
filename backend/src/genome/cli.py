@@ -17,6 +17,7 @@ from genome.config import get_settings
 from genome.db.duckdb_conn import duckdb_connection
 from genome.db.init_schema import init_databases
 from genome.db.sqlite_conn import sqlcipher_connection
+from genome.docs import docs_app
 from genome.imputation import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_DCONF_THRESHOLD,
@@ -76,6 +77,7 @@ panel_app = typer.Typer(
 app.add_typer(imputation_app, name="imputation")
 app.add_typer(config_app, name="config")
 app.add_typer(annotate_app, name="annotate")
+app.add_typer(docs_app, name="docs")
 imputation_app.add_typer(panel_app, name="panel")
 
 

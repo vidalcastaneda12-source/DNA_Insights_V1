@@ -1,3 +1,11 @@
+---
+type: observation
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-05-22
+supersedes: []
+superseded_by: []
+---
 # Finding 012 — Tabix coalesce distance dominates remote-VCF HTTP/2 reliability
 
 ## Context

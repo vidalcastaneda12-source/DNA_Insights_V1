@@ -1,3 +1,11 @@
+---
+type: both
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-06-10
+supersedes: []
+superseded_by: []
+---
 # Finding 020 — Canonical REF/ALT backfill + hom-only recovery
 
 ## Context

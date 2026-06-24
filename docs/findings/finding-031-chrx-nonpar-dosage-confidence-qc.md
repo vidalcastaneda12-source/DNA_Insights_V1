@@ -1,3 +1,11 @@
+---
+type: both
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-06-19
+supersedes: []
+superseded_by: []
+---
 # chrX non-PAR QC: dosage-confidence + LOO replace the dead DR² gate
 
 ## Status

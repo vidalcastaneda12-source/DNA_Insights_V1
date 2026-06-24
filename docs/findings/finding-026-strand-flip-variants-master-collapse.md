@@ -1,3 +1,11 @@
+---
+type: both
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-06-13
+supersedes: []
+superseded_by: []
+---
 # Same-SNP duplicate `variants_master` collapse (PR 5b — closes finding-005 #1)
 
 ## Context

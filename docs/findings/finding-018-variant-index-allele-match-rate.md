@@ -1,3 +1,11 @@
+---
+type: observation
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-05-26
+supersedes: []
+superseded_by: []
+---
 # Finding 018 — variant_annotations_index allele-match rate is gated on canonical REF/ALT
 
 ## Context

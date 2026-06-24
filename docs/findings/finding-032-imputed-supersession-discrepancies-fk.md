@@ -1,3 +1,11 @@
+---
+type: observation
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-06-19
+supersedes: []
+superseded_by: []
+---
 # Imputed-call re-import crashes on the `discrepancies` -> `genotype_calls` FK
 
 ## Status

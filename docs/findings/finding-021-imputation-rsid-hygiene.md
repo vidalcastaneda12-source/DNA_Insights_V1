@@ -1,3 +1,11 @@
+---
+type: both
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-06-09
+supersedes: []
+superseded_by: []
+---
 # Finding 021 — Synthetic chr:pos:ref:alt IDs in variants_master.rsid from imputation ingest
 
 ## Context

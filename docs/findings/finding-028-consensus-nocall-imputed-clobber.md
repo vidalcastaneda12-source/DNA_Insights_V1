@@ -1,3 +1,11 @@
+---
+type: both
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-06-13
+supersedes: []
+superseded_by: []
+---
 # Finding 028 — `consensus_v1` chip-no-call clobbers a real imputed genotype
 
 ## Context

@@ -1,3 +1,11 @@
+---
+type: observation
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-05-17
+supersedes: []
+superseded_by: []
+---
 # Finding 009 — ClinVar supersession checkpoint cost
 
 ## Context

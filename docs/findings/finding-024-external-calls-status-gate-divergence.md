@@ -1,3 +1,11 @@
+---
+type: observation
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-06-11
+supersedes: []
+superseded_by: []
+---
 # Finding 024 — `genome status` reports the `.env` external-calls flag, not the gate's live value
 
 ## Context

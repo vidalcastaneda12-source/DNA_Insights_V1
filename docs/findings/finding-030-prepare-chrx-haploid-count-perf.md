@@ -1,3 +1,11 @@
+---
+type: observation
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-06-19
+supersedes: []
+superseded_by: []
+---
 # `prepare-chrx` haploid-count is O(variants × samples) — ~80 min on the real panel
 
 ## Status

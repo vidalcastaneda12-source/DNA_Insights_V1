@@ -1,3 +1,11 @@
+---
+type: observation
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-06-13
+supersedes: []
+superseded_by: []
+---
 # Finding 027 — how imputation + chip no-calls create duplicate `variants_master` rows
 
 ## Context

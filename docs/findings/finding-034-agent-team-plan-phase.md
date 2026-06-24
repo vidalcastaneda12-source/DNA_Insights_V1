@@ -1,3 +1,11 @@
+---
+type: decision
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-06-19
+supersedes: []
+superseded_by: []
+---
 # Agent-team workflow — per-scope team design (Stages 0–5, correctness-maximized)
 
 ## Status

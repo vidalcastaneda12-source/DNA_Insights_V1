@@ -1,3 +1,11 @@
+---
+type: both
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-05-27
+supersedes: []
+superseded_by: []
+---
 # Finding 019 — variant_aliases backfill from dbSNP RsMergeArch
 
 ## Context

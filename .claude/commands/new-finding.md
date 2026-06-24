@@ -16,9 +16,14 @@ future session can rely on it without re-deriving it.
 
 ## Structure (match the existing findings)
 
+0. **Frontmatter** — a `---`-fenced block prepended **above** the H1 (`type
+   {observation|decision|both}`, `status` {active|superseded|reversed|deferred}, `actors`,
+   `date`, `supersedes`/`superseded_by`). New findings are **born with** this block; see
+   `docs/findings/README.md` "Frontmatter convention". `genome docs check` enforces it.
 1. **Title** — `# Finding NNN — <human title>`.
 2. **Status** — what this is (observation / decision / surprise / re-lock) and whether it's
-   design-only, built, or superseded; the date and the actors involved.
+   design-only, built, or superseded; the date and the actors involved. (The machine-readable
+   status lives in the frontmatter above; this prose section is the human narrative.)
 3. **Context** — the problem or question that produced the finding; cite the ROADMAP slot /
    PR / sibling findings it relates to.
 4. **The finding itself** — the specific, durable content. For a real-data observation,
@@ -40,11 +45,18 @@ future session can rely on it without re-deriving it.
   hook will warn until it's replaced) rather than guessing.
 - Cross-link related findings with `[[finding-0NN]]` / a relative path, and add the reverse
   link where it belongs.
+- A `type: decision`/`both` finding **must** append (or confirm) a `DEC-NNNN` row in the root
+  `MEMORY.md` ledger whose `detail-link` points back at it, or `genome docs check` fails on
+  `DECISION_WITHOUT_DEC_ROW`. In the row's `decision` cell, reference real-data anchors by
+  pointer (`see CLAUDE.md obs #N`) — never transcribe the digits (the gate fails on a copied
+  anchor). A reversal/supersession is an **insert-then-flip**, never an in-place edit.
 - If this finding re-locks an anchor that appears in `CLAUDE.md` / `verification.md`, note
   that those must be updated too (that is `knowledge-curator`'s job at Stage 5) — a number
   re-locked in one place but not another is cross-doc drift.
 
 ## Done when
 
-The finding exists at `docs/findings/finding-NNN-<slug>.md` with all sections, numbers
-sourced from a real run (or explicitly `GATE-FILL`), and cross-links in both directions.
+The finding exists at `docs/findings/finding-NNN-<slug>.md` with its frontmatter block + all
+sections, numbers sourced from a real run (or explicitly `GATE-FILL`), cross-links in both
+directions, a `DEC-NNNN` ledger row appended for a decision/both finding, and
+`genome docs check` exiting 0.

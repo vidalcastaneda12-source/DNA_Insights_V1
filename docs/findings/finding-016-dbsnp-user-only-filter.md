@@ -1,3 +1,11 @@
+---
+type: decision
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-05-26
+supersedes: []
+superseded_by: []
+---
 # Finding 016 — dbSNP filters to user variants only (not gnomAD's three/four-way overlap)
 
 > **Status note (2026-06-21):** the gnomAD *contrast* in this finding — the

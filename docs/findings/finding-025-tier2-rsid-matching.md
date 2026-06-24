@@ -1,3 +1,11 @@
+---
+type: both
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-06-11
+supersedes: []
+superseded_by: []
+---
 # finding-025 — Tier-2 rsID matching in `refresh-index` (PR 4)
 
 ## Summary

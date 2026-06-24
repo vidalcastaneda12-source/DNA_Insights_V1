@@ -1,3 +1,11 @@
+---
+type: observation
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-06-10
+supersedes: []
+superseded_by: []
+---
 # Finding 022 — ClinVar/GWAS version label decouples from cached data on a rebuild reload
 
 ## Context

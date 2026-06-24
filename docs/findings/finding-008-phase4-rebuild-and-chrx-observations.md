@@ -1,3 +1,11 @@
+---
+type: observation
+status: active
+actors: [ClaudeCodeDevelopment]
+date: 2026-05-14
+supersedes: []
+superseded_by: []
+---
 # Phase 4 rebuild workflow and chrX hemizygous-haploid Beagle failure
 
 > **Status: closed by PR #74** (chrX resolution via the M3-physical region split).
