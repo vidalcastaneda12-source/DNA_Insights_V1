@@ -3,8 +3,11 @@ data/
 archive/
 *.txt
 
-# Verification scratch — TMPDIR for scripts/verify.sh; cleared each run.
+# Verification / pytest scratch — TMPDIR dirs that hold generated test DBs
+# (app.db, genome.duckdb); cleared each run. Gitignored so a stray `git add -A`
+# can never stage real-data DB artifacts (privacy decision #9).
 .verify-tmp/
+.pytest-tmp/
 
 # Tabix index files (cyvcf2 caches these in cwd when opening remote VCFs;
 # they're regenerable on demand and never part of source).
