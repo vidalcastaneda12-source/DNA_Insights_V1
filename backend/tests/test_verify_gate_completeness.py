@@ -97,6 +97,28 @@ def _verdict(runner: CliRunner, package: Path) -> Result:
     return runner.invoke(verify_gate_app, ["verdict", "--package", str(package)])
 
 
+def _format(runner: CliRunner, package: Path) -> Result:
+    return runner.invoke(verify_gate_app, ["format", "--package", str(package)])
+
+
+# Affirmative integrity block for a HAND-WRITTEN evidence.json (bypassing assemble).
+_AFFIRMATIVE_INTEGRITY: dict[str, object] = {
+    "changelog_present": True,
+    "docs_check_clean": True,
+    "weakened_or_removed_test": False,
+    "gate_fill_survivor": False,
+    "test_count_before": 400,
+    "test_count_after": 406,
+}
+
+
+def _write_evidence(path: Path, payload: dict[str, object]) -> Path:
+    """Write a hand-crafted evidence.json DIRECTLY — never via ``assemble`` — to prove the
+    ``verdict`` boundary re-derives completeness on a bypassed package."""
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
 # ── A1: pipeline / annotation missing its required anchors → UNKNOWN ──────────
 
 
@@ -544,3 +566,156 @@ def test_assemble_check_set_unknown_class_raises_value_error() -> None:
     assert "bogus" not in CHANGE_CLASS_VOCAB
     with pytest.raises(ValueError, match="unknown change class"):
         assemble_check_set(frozenset({"bogus"}))
+
+
+# ── verdict-boundary self-sufficiency (Stage-3 cycle 3: close silent-1/silent-2) ──
+# The skill gates on `verdict`'s exit code, so `verdict` must complete a package itself.
+# These write the evidence.json DIRECTLY (bypassing `assemble`) and prove `verdict` re-derives
+# completeness — a hand-crafted incomplete package cannot read GREEN at the read boundary.
+
+
+def test_verdict_completes_handcrafted_core_missing_steps_to_unknown(tmp_path: Path) -> None:
+    """Hunt F: a hand-written ``core`` package with only ``[["pytest","pass"]]`` (five of the
+    six dev-loop steps absent) + affirmative + ``rebuild_pending:false`` fed straight to
+    ``verdict`` must be completed (missing steps → UNKNOWN) → exit non-zero, no ``merge``.
+    """
+    out = _write_evidence(
+        tmp_path / "huntF.json",
+        {
+            "change_class": ["core"],
+            "steps": [["pytest", "pass"]],
+            "anchors": [],
+            "integrity": _AFFIRMATIVE_INTEGRITY,
+            "rebuild_pending": False,
+        },
+    )
+    result = _verdict(CliRunner(), out)
+    assert result.exit_code != 0, result.output
+    assert "merge" not in result.output.lower()
+    assert "UNKNOWN" in result.output.upper()
+
+
+def test_verdict_completes_handcrafted_pipeline_missing_anchors_to_unknown(
+    tmp_path: Path,
+) -> None:
+    """Hunt G: a hand-written ``pipeline`` package with all six steps PASS but ``anchors:[]``
+    fed straight to ``verdict`` must be completed (missing merge anchors → UNKNOWN) → non-zero.
+    """
+    out = _write_evidence(
+        tmp_path / "huntG.json",
+        {
+            "change_class": ["pipeline"],
+            "steps": [[label, "pass"] for label in _DEV_LOOP_STEPS],
+            "anchors": [],
+            "integrity": _AFFIRMATIVE_INTEGRITY,
+            "rebuild_pending": False,
+        },
+    )
+    result = _verdict(CliRunner(), out)
+    assert result.exit_code != 0, result.output
+    assert "merge" not in result.output.lower()
+
+
+def test_verdict_completes_handcrafted_schema_deferred_mismatch_not_green(
+    tmp_path: Path,
+) -> None:
+    """Hunt J: a hand-written ``schema`` package with a ``deferred:true`` MISMATCH anchor +
+    ``rebuild_pending:false`` must NOT read GREEN — a schema class re-forces ``rebuild_pending``
+    (→ UNKNOWN), so the bypassed package is caught at ``verdict``.
+    """
+    out = _write_evidence(
+        tmp_path / "huntJ.json",
+        {
+            "change_class": ["schema"],
+            "steps": [[label, "pass"] for label in _DEV_LOOP_STEPS],
+            "anchors": [
+                {
+                    "name": "consensus_total",
+                    "expected": "100",
+                    "actual": "999999",
+                    "deferred": True,
+                }
+            ],
+            "integrity": _AFFIRMATIVE_INTEGRITY,
+            "rebuild_pending": False,
+        },
+    )
+    result = _verdict(CliRunner(), out)
+    assert result.exit_code != 0, result.output
+    assert "merge" not in result.output.lower()
+
+
+def test_verdict_handcrafted_pipeline_deferred_mismatch_non_rebuild_is_blocked(
+    tmp_path: Path,
+) -> None:
+    """A hand-written ``pipeline`` (non-rebuild) package with a ``deferred:true`` MISMATCH but
+    otherwise complete must surface the mismatch — ``verdict`` unmasks the deferred flag (the
+    class owes no rebuild) → BLOCKED, never a hidden GREEN.
+    """
+    anchors: list[dict[str, object]] = []
+    for i, name in enumerate(sorted(_MERGE_ANCHORS)):
+        value = str(6000 + i)
+        if name == "consensus_total":
+            anchors.append({"name": name, "expected": value, "actual": "999999", "deferred": True})
+        else:
+            anchors.append({"name": name, "expected": value, "actual": value})
+    out = _write_evidence(
+        tmp_path / "pipe_deferred.json",
+        {
+            "change_class": ["pipeline"],
+            "steps": [[label, "pass"] for label in _DEV_LOOP_STEPS],
+            "anchors": anchors,
+            "integrity": _AFFIRMATIVE_INTEGRITY,
+            "rebuild_pending": False,
+        },
+    )
+    result = _verdict(CliRunner(), out)
+    assert result.exit_code != 0, result.output
+    assert "BLOCKED" in result.output.upper()
+
+
+def test_verdict_handcrafted_complete_package_is_green(tmp_path: Path) -> None:
+    """A hand-written COMPLETE ``core`` package (all six steps PASS, affirmative, not pending)
+    fed straight to ``verdict`` is GREEN — the read-side completion is idempotent on a package
+    that is already complete, so the happy path is intact.
+    """
+    out = _write_evidence(
+        tmp_path / "complete.json",
+        {
+            "change_class": ["core"],
+            "steps": [[label, "pass"] for label in _DEV_LOOP_STEPS],
+            "anchors": [],
+            "integrity": _AFFIRMATIVE_INTEGRITY,
+            "rebuild_pending": False,
+        },
+    )
+    result = _verdict(CliRunner(), out)
+    assert result.exit_code == 0, result.output
+    assert "merge" in result.output.lower()
+
+
+def test_format_of_incomplete_handcrafted_package_shows_injected_unknowns(
+    tmp_path: Path,
+) -> None:
+    """``format`` of an incomplete hand-written ``pipeline`` package shows the injected
+    not-captured anchors AND the declared ``change_class`` — so the human review surface
+    reflects the completed package, not a misleadingly clean view.
+    """
+    out = _write_evidence(
+        tmp_path / "fmt.json",
+        {
+            "change_class": ["pipeline"],
+            "steps": [["pytest", "pass"]],
+            "anchors": [],
+            "integrity": _AFFIRMATIVE_INTEGRITY,
+            "rebuild_pending": False,
+        },
+    )
+    result = _format(CliRunner(), out)
+    assert result.exit_code == 0, result.output
+    # The declared change_class is visible for the human approval backstop (silent-3).
+    assert "pipeline" in result.output
+    # The required merge anchors were injected (not-captured) and appear in the block.
+    assert "consensus_total" in result.output
+    # A required dev-loop step the package omitted is shown as UNKNOWN.
+    assert "UNKNOWN" in result.output.upper()

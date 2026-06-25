@@ -12,12 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reduction) plus a `genome verify-gate {assemble,verdict,format}` CLI and the
   `/verify-and-merge` skill, so Human Gate 2 gains an owner-approved evidence-gated path
   (Claude runs the protocol, presents raw evidence, takes a typed approval, then
-  squash-merges) while the independent human run stays the standing fallback. The
-  `assemble` boundary enforces package completeness for the change class — required
-  dev-loop steps (the six canonical `verify.sh` labels) and real-data anchors the skill
-  omits inject as `UNKNOWN`, a schema class forces `rebuild_pending`, and an unknown
-  change-class label is rejected — so an incomplete package can never reduce to a false
-  GREEN. The squash-merge is audited via a new
+  squash-merges) while the independent human run stays the standing fallback. Package
+  completeness for the change class is enforced at **every** boundary — `assemble` AND
+  `verdict`/`format` (the skill gates on `verdict`'s exit code, so the read side must be
+  self-sufficiently fail-closed): required dev-loop steps (the six canonical `verify.sh`
+  labels) and real-data anchors the package omits inject as `UNKNOWN`, a schema class forces
+  `rebuild_pending`, a `deferred` flag on a non-rebuild class is unmasked, and an unknown
+  change-class label is rejected — so a hand-crafted or bypassed incomplete package can never
+  reduce to a false GREEN. The squash-merge is audited via a new
   two-row `write_merge_audit` (`external_call=1`, body-never-stored). Reconciles the
   independence framing in CLAUDE.md / verification.md / scope-run.md / finding-034 and
   appends DEC-0087..0090. (sub-project-A)

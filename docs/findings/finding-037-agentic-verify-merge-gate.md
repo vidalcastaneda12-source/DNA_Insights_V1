@@ -61,6 +61,21 @@ the skill faithful plumbing whose only gate is "the core exited non-zero → sto
   runs on a fresh checkout. The serialization seam is flat: `verify-gate assemble` builds the
   package from flat primitive CLI args (the skill never assembles nested JSON);
   `verify-gate verdict` / `format` read the resulting `evidence.json`.
+- **Completeness is enforced at every boundary, not only `assemble`.** Because the skill gates
+  on `verify-gate verdict`'s exit code, `verdict` (and `format`) re-derive completeness from
+  the package's `change_class` before reducing / rendering — every required dev-loop step or
+  real-data anchor the package omits is injected as `UNKNOWN`, a `deferred` flag on a
+  non-rebuild class is unmasked, and `rebuild_pending` is re-forced for a schema class. So a
+  hand-crafted or bypassed `evidence.json` fed straight to `verdict` cannot read GREEN; the
+  derivation is idempotent on a correctly-assembled package.
+- **`change_class` is a TRUSTED input.** Completeness is derived *from* the declared
+  `change_class`, but the class itself is not independently verifiable by the DB-free core —
+  the skill derives it from the `git diff` of the change, and the CLI cannot re-confirm it
+  without the repo/DB. An under-declaration (e.g. a `pipeline` change declared `core` to dodge
+  the merge anchors) is therefore not caught by the core. The backstops are: the formatter
+  prints `change_class` prominently in the raw evidence block, and the **typed `merge`-token
+  human review** is where a mis-declaration is meant to be caught — the operator reads the
+  declared class against the change before approving.
 
 ### The skill (`.claude/commands/verify-and-merge.md`)
 

@@ -152,37 +152,41 @@ def _apply_deferred_mask(
     )
 
 
-def _complete_package(
-    *,
-    change_class: frozenset[str],
-    steps: tuple[tuple[str, StepStatus], ...],
-    anchors: tuple[AnchorCheck, ...],
-    integrity: IntegrityFlags,
-    user_rebuild_pending: bool,
-) -> EvidencePackage:
-    """Fold the change class's required checks into the skill-supplied evidence (A1/A2/A3/A4).
+def _complete_package(pkg: EvidencePackage) -> EvidencePackage:
+    """Fold the change class's required checks into a package, fail-closed (A1/A2/A4).
 
     The completeness derivation — *which* steps and anchors the change class requires — is a
-    decidable function of ``change_class``, so it lives here at the package-building boundary
-    rather than in skill prose. :func:`assemble_check_set` validates the class against the
+    decidable function of ``pkg.change_class``, so it is enforced here at **every** boundary
+    that consumes a package: ``assemble`` (when building), and ``verdict`` / ``format`` (when
+    reading a possibly hand-crafted / bypassed ``evidence.json``). Because the skill gates on
+    ``verdict``'s exit code, ``verdict`` must be self-sufficiently fail-closed — a package that
+    never went through a correct ``assemble`` must still be completed before reduction, or an
+    incomplete package read GREEN. :func:`assemble_check_set` validates the class against the
     vocabulary (its :class:`ValueError` is surfaced as a non-zero CLI error by the caller).
 
-    * **A1 required steps + anchors:** every required step label / anchor name absent from the
-      skill-supplied set is injected as ``UNKNOWN`` (a dev-loop step that did not run) /
-      all-``None`` :class:`AnchorCheck` (a not-captured anchor) — absence reduces to
-      ``UNKNOWN``, never to an affirmative GREEN. The required steps are
-      :data:`~genome.verify_gate.model.CHANGE_CLASS_VOCAB`'s dev-loop tail (the 6 canonical
-      ``scripts/verify.sh`` labels): every change runs the full dev-loop, so a complete
-      package carries all 6. The skill can always satisfy this — a passing ``verify.sh`` →
-      all PASS; a failing run aborts (``set -euo pipefail``) → the failed step ``FAIL`` and
-      the steps that never ran ``UNKNOWN``.
-    * **A2 rebuild:** ``rebuild_pending`` is ``user_rebuild_pending OR rebuild_required`` — a
-      schema-containing class can never be assembled with ``rebuild_pending=False``.
-    * **A4 deferred mask:** see :func:`_apply_deferred_mask`.
-    """
-    checkset = assemble_check_set(change_class)
+    Operating on an :class:`EvidencePackage` (rather than the flat CLI primitives) keeps the
+    rules in one place — the read side and the build side share this exact logic.
 
-    masked_anchors = _apply_deferred_mask(anchors, checkset)
+    * **A1 required steps + anchors:** every required step label / anchor name absent from the
+      package is injected as ``UNKNOWN`` (a dev-loop step that did not run) / an all-``None``
+      :class:`AnchorCheck` (a not-captured anchor) — absence reduces to ``UNKNOWN``, never to
+      an affirmative GREEN. The required steps are the dev-loop tail (the 6 canonical
+      ``scripts/verify.sh`` labels): every change runs the full dev-loop, so a complete package
+      carries all 6. The skill can always satisfy this — a passing ``verify.sh`` → all PASS; a
+      failing run aborts (``set -euo pipefail``) → the failed step ``FAIL`` and the steps that
+      never ran ``UNKNOWN``.
+    * **A2 rebuild:** ``rebuild_pending`` is ``pkg.rebuild_pending OR rebuild_required`` — a
+      schema-containing class can never be reduced with ``rebuild_pending=False``.
+    * **A4 deferred mask:** see :func:`_apply_deferred_mask` — a ``deferred=true`` anchor on a
+      non-rebuild class is unmasked, so a captured mismatch on a bypassed package still surfaces.
+
+    Idempotent on an already-complete package: re-running it injects nothing, re-masks nothing
+    that wasn't already masked, and leaves ``rebuild_pending`` unchanged — so the normal
+    ``assemble`` → ``verdict`` flow and every existing test are unaffected.
+    """
+    checkset = assemble_check_set(pkg.change_class)
+
+    masked_anchors = _apply_deferred_mask(pkg.anchors, checkset)
     present_anchor_names = {a.name for a in masked_anchors}
     missing_anchors = tuple(
         AnchorCheck(name=name, expected=None, actual=None)
@@ -190,20 +194,36 @@ def _complete_package(
         if name not in present_anchor_names
     )
 
-    present_step_names = {name for name, _status in steps}
+    present_step_names = {name for name, _status in pkg.steps}
     missing_steps = tuple(
         (name, StepStatus.UNKNOWN)
         for name in checkset.required_steps
         if name not in present_step_names
     )
 
-    return EvidencePackage(
-        change_class=change_class,
-        steps=(*steps, *missing_steps),
+    return replace(
+        pkg,
+        steps=(*pkg.steps, *missing_steps),
         anchors=(*masked_anchors, *missing_anchors),
-        integrity=integrity,
-        rebuild_pending=user_rebuild_pending or checkset.rebuild_required,
+        rebuild_pending=pkg.rebuild_pending or checkset.rebuild_required,
     )
+
+
+def _load_and_complete_package(package: Path) -> EvidencePackage:
+    """Load an ``evidence.json`` and complete it for its change class (the read-side gate).
+
+    ``verdict`` and ``format`` both read a possibly hand-crafted / bypassed package, so both
+    re-derive completeness here before reducing / rendering — a package that never went through
+    a correct ``assemble`` is still completed (missing steps/anchors → ``UNKNOWN``, deferred
+    re-coupled on non-rebuild classes, ``rebuild_pending`` re-forced). An unknown change-class
+    label in the file surfaces as a clean non-zero ``BadParameter``, not a crash.
+    """
+    pkg = _load_package(package)
+    try:
+        return _complete_package(pkg)
+    except ValueError as exc:
+        msg = f"evidence package {package} declares an invalid change class: {exc}"
+        raise typer.BadParameter(msg) from exc
 
 
 @verify_gate_app.command("assemble")
@@ -296,24 +316,22 @@ def assemble_cmd(  # noqa: PLR0913 — one flat CLI flag per primitive evidence 
     not-captured, and a schema-containing class forces ``rebuild_pending`` — so an incomplete
     package reduces to ``UNKNOWN``, never a false ``GREEN``.
     """
-    steps = tuple(_parse_step(s) for s in step)
-    anchors = tuple(_parse_anchor(a) for a in (anchor or []))
-    integrity = IntegrityFlags(
-        changelog_present=changelog_present,
-        docs_check_clean=docs_check_clean,
-        weakened_or_removed_test=weakened_or_removed_test,
-        gate_fill_survivor=gate_fill_survivor,
-        test_count_before=test_count_before,
-        test_count_after=test_count_after,
+    raw = EvidencePackage(
+        change_class=frozenset(change_class),
+        steps=tuple(_parse_step(s) for s in step),
+        anchors=tuple(_parse_anchor(a) for a in (anchor or [])),
+        integrity=IntegrityFlags(
+            changelog_present=changelog_present,
+            docs_check_clean=docs_check_clean,
+            weakened_or_removed_test=weakened_or_removed_test,
+            gate_fill_survivor=gate_fill_survivor,
+            test_count_before=test_count_before,
+            test_count_after=test_count_after,
+        ),
+        rebuild_pending=rebuild_pending,
     )
     try:
-        pkg = _complete_package(
-            change_class=frozenset(change_class),
-            steps=steps,
-            anchors=anchors,
-            integrity=integrity,
-            user_rebuild_pending=rebuild_pending,
-        )
+        pkg = _complete_package(raw)
     except ValueError as exc:
         # An unknown change-class label (A3) — surface as a clean non-zero exit, not a crash.
         raise typer.BadParameter(str(exc), param_hint="--change-class") from exc
@@ -336,9 +354,12 @@ def verdict_cmd(
     """Reduce an evidence package and exit non-zero on BLOCKED or UNKNOWN.
 
     A clean ``GREEN`` exits 0 and prints the ``merge`` affordance; any other verdict prints
-    the blocking reason and exits non-zero — the signal the skill stops on (no merge).
+    the blocking reason and exits non-zero — the signal the skill stops on (no merge). The
+    package is **completed for its change class before reduction** (:func:`_complete_package`),
+    so a hand-crafted / bypassed / incomplete package fed straight to ``verdict`` cannot read
+    GREEN — this is the read-side fail-closed guarantee the skill's gate depends on.
     """
-    pkg = _load_package(package)
+    pkg = _load_and_complete_package(package)
     verdict = reduce_verdict(pkg)
     if verdict is Verdict.GREEN:
         typer.echo("verdict: GREEN")
@@ -366,6 +387,11 @@ def format_cmd(
         ),
     ],
 ) -> None:
-    """Print the raw, human-readable evidence block for one evidence package."""
-    pkg = _load_package(package)
+    """Print the raw, human-readable evidence block for one evidence package.
+
+    The package is completed for its change class before rendering, so the block the operator
+    reviews shows the injected ``UNKNOWN`` steps / not-captured anchors of an incomplete
+    package (and the declared ``change_class``), rather than a misleadingly clean view.
+    """
+    pkg = _load_and_complete_package(package)
     typer.echo(format_evidence(pkg))
