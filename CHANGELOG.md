@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Add the fast-follow drain loop (sub-project-B, finding-038): a bounded, fail-closed,
+  DB-free `genome.fast_follow` core that gives repo-sweep's backlog a consumer — a pure
+  `classify` reducer (extraction-fail-closed → literal `touched_paths` guard on
+  `docs/schemas/**`/`ddl/**` → stale-discard → guarded-class/anchor/over-cap EJECT → else
+  DRAIN, with the no-false-DRAIN safety invariant), a batcher with cross-invocation seen-set
+  dedup + explicit overflow, a stdout-only eject drafter, and a `genome fast-follow
+  {scan-assemble,triage,eject-draft}` CLI over a `candidates.json` JSON seam. Adds the
+  `/fast-follow` skill (two mandatory touchpoints: triage approval, then A's
+  `/verify-and-merge` per batch — never an autonomous merge or ROADMAP write), a distinct
+  `/fast-follow` drain-loop auto-offer line on `/verify-and-merge`'s close step, and appends
+  DEC-0091..0093. The guard vocabulary is independent of verify_gate (opposite polarity) with
+  a reconciliation test. (sub-project-B / PR #TBD)
 - Add the agentic verify-and-merge gate (sub-project-A, finding-037): a fail-closed,
   DB-free `genome.verify_gate` core (three-valued `Verdict` GREEN/BLOCKED/UNKNOWN, an
   exit-code `StepStatus` parser, fail-closed evidence records, an `UNKNOWN`-dominates
