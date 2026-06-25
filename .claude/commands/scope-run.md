@@ -58,6 +58,25 @@ get GATE-FILL / CHANGELOG nudges.
    warn; they don't block).
 3. The `risk_tier` selects depth for every downstream stage (table below).
 
+## Stage 0.5 — Split check
+
+Before planning the scope as a monolith, run the `scope-split` smart-cut split check (Sub
+Project B2 Phase 1, `finding-039`) over the Stage-0 manifest via `genome scope-split check
+--manifest -` (feeding the manifest on stdin), the detector behind the `/scope-split` skill.
+The `scope-split` detector is **manifest-primary + fail-closed** — atomic is the default, and a
+split is proposed only when a candidate cut survives every gate.
+
+- **Atomic** (`atomic — no split`) → proceed to Stage 1 unchanged. This is the common case
+  (a tight cluster like PR-3 / PR-5a is correctly indivisible).
+- **Clean split** → present the 🚦 **pre-plan micro-gate**: "PR-X is really these N ordered
+  PRs" — the ordered sub-scopes with each `origin_scope`, change classes, estimated footprint,
+  re-scored tier, and the cut-quality line. Ask VSC-User to **approve / edit / run-as-one**.
+  **Stop for the human.** Do not proceed to Stage 1 on your own; the split check is advisory
+  and never auto-runs a sub-scope or crosses a gate.
+
+This split check is advisory: it never writes ROADMAP (except via the explicit `genome
+scope-split write-roadmap` on approval) and never crosses a gate.
+
 ## Stage 1 — Plan
 
 By tier:

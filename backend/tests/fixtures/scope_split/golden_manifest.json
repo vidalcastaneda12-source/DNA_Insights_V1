@@ -1,0 +1,33 @@
+{
+  "scope_id": "B2-Phase1",
+  "title": "Sub Project B2 Phase 1 — smart-cut detection",
+  "change_class": ["cli", "tests"],
+  "depends_on": ["Sub-Project-A", "Sub-Project-B"],
+  "blast_radius": {
+    "imports_touched": [
+      "backend/src/genome/scope_split/__init__.py",
+      "backend/src/genome/scope_split/model.py",
+      "backend/src/genome/scope_split/graph.py",
+      "backend/src/genome/scope_split/splitter.py",
+      "backend/src/genome/scope_split/cli.py",
+      "backend/src/genome/cli.py"
+    ],
+    "tests_covering": [
+      "backend/tests/test_scope_split_model.py",
+      "backend/tests/test_scope_split_splitter.py"
+    ]
+  },
+  "applicable_anchors": [],
+  "out_of_scope_candidates": [
+    "genome.campaign orchestrator (Phase 2)",
+    "LSP call-graph adapter"
+  ],
+  "precedent": [
+    {"finding": "finding-038", "surprise": "testable classifier core vs untestable derivation step"},
+    {"finding": "finding-037", "surprise": "vocabulary independence on a safety path"}
+  ],
+  "freshness_flags": ["spec-references-non-existent-code", "roadmap-slot-absent"],
+  "open_questions": ["OQ-1 graph source", "OQ-2 manifest representation"],
+  "risk_tier": 2,
+  "risk_breakdown": {"C": 2, "B": 1, "P": 0, "A": 0, "S": 3, "floor": 0, "tier": 2}
+}

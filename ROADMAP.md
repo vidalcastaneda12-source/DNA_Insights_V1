@@ -197,6 +197,25 @@ operation-level provenance without schema changes, and the PyArrow / INSERT-SELE
 bulk-load pattern. (The remaining open pre-Phase-6 slots — PRs 7–13 — are cleanup that
 does not block Phase-6 entry.)
 
+## Sub Project B2 — scope-split (Phase 1)
+
+The smart-cut detector (`genome scope-split`, finding-039): read a Stage-0 dispatcher
+scope manifest and propose whether a scope is **separable** into independently-shippable
+sub-scopes, or is one indivisible unit (atomic). Manifest-primary cut policy with the
+git-grep import graph as a veto signal; fail-closed (a false split is the costliest mode,
+so the detector under-proposes by construction). Phase 1 is the detector only — no
+campaign runner, no auto-running of sub-scopes.
+
+- [ ] **B2-Phase1** — `genome.scope_split` smart-cut detector + `scope-split` sub-app
+  (check / dry-run / write-roadmap), the Stage-0.5 split-check micro-gate hook, and the
+  managed ROADMAP block below. DB-free core; placeholder sub-scope ids only.
+
+The block between the sentinels is **managed by `genome scope-split write-roadmap`** — do
+not hand-edit it; the writer replaces only the inter-sentinel region (append-only).
+
+<!-- B2-SUBSCOPES:BEGIN -->
+<!-- B2-SUBSCOPES:END -->
+
 ## Phase 6 — Analysis pipelines
 - Load `pgs_score_weights` (per-variant PGS weights, overlapping-only per locked decision #5) → PRS computation against PGS Catalog
 - PharmCAT integration → `derived_pgx_phenotypes`

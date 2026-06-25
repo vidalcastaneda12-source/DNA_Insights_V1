@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Add the scope-split smart-cut detector (sub-project-B2 Phase 1, finding-039): a fail-closed,
+  DB-free `genome.scope_split` core that reads a Stage-0 dispatcher scope manifest and proposes
+  whether a scope is separable into independently-shippable sub-scopes or is one indivisible
+  unit (atomic). The cut policy is manifest-primary (partition the footprint by `change_class`
+  boundary refined by `out_of_scope_candidates`) with a git-grep import graph as a veto only
+  (shared infra helpers dropped); the `propose_split` reducer fails closed to atomic on any
+  degenerate/undecidable input, with a relaxed tier term and a quality gate. Adds a `genome
+  scope-split {check,dry-run,write-roadmap}` CLI (manifest via path or stdin, structlog routed
+  to stderr so `--json` stdout stays clean), a pure append-only byte-idempotent ROADMAP
+  managed-block writer, the `/scope-split` skill, the `/scope-run` Stage-0.5 pre-plan
+  split-check micro-gate hook, and appends DEC-0094. The change-class vocabulary is reconciled
+  to the dispatcher C-map (not verify_gate's) with a reconciliation test. Detector only — no
+  campaign runner, no auto-running of sub-scopes. (sub-project-B2 / PR-B2-Phase1)
 - Add the fast-follow drain loop (sub-project-B, finding-038): a bounded, fail-closed,
   DB-free `genome.fast_follow` core that gives repo-sweep's backlog a consumer — a pure
   `classify` reducer (extraction-fail-closed → literal `touched_paths` guard on

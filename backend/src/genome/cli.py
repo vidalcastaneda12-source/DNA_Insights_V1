@@ -42,6 +42,7 @@ from genome.ingest import Source, ingest_file
 from genome.ingest.liftover import LiftoverEngine
 from genome.merge import merge_all
 from genome.privacy.external_client import is_external_enabled, write_config_change_audit
+from genome.scope_split import scope_split_app
 from genome.verify_gate import verify_gate_app
 
 _VALID_INGEST_SOURCES: tuple[str, ...] = tuple(
@@ -83,6 +84,9 @@ app.add_typer(verify_gate_app, name="verify-gate")
 # fast_follow is eagerly registered; the DB-free guarantee is carried by the package-local
 # clean-subprocess test (test_fast_follow_no_db_import.py), not by lazy import.
 app.add_typer(fast_follow_app, name="fast-follow")
+# scope_split is eagerly registered; the DB-free guarantee is carried by the package-local
+# clean-subprocess test (test_scope_split_no_db_import.py), not by lazy import.
+app.add_typer(scope_split_app, name="scope-split")
 imputation_app.add_typer(panel_app, name="panel")
 
 
