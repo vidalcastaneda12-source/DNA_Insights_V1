@@ -116,3 +116,9 @@ negotiable" via a pure append (no in-place flip of a prior row), following the
 pure-append-reversal precedent set by `DEC-0086`. The relaxation is additive — it introduces
 an alternative evidence-gated path while preserving the independent human run as a standing
 fallback — so no prior ledger row is superseded.
+
+## Follow-on
+
+- [`finding-038`](finding-038-fast-follow-drain-loop.md) (Sub Project B — the fast-follow
+  drain loop) reuses this gate as its per-batch merge backstop and extends the
+  `/verify-and-merge` close step with a fast-follow drain auto-offer.

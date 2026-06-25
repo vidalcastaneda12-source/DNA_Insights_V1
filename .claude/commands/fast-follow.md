@@ -4,9 +4,10 @@ plan, take a triage approval, then drain the DRAINs one batch at a time — each
 merged only through Sub Project A's `/verify-and-merge` gate. Argument: an optional scan
 scope hint (e.g. a path or `repo-sweep`); defaults to a full residual-backlog scan.
 
-This is the consumer for repo-sweep's backlog: repo-sweep is a backlog *producer* with no
-consumer, so today the drain is a manual ROADMAP step. This skill is the bounded,
-fail-closed triage loop around the unit-tested `genome.fast_follow` core. It never merges
+This is the consumer for repo-sweep's backlog: before Sub Project B, repo-sweep was a backlog
+*producer* with no consumer and the drain was a manual ROADMAP step (e.g. PR 8). This skill
+replaces that with the bounded, fail-closed triage loop around the unit-tested
+`genome.fast_follow` core. It never merges
 on its own and never writes ROADMAP — drains go through A's gate, ejects are drafted for a
 human to paste into `/scope-run`.
 

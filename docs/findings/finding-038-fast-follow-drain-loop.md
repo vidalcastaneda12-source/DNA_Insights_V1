@@ -16,6 +16,14 @@ provenance anchor for the `genome.fast_follow` core, the `/fast-follow` skill, t
 `DEC-0091 … DEC-0093`. The synthesized plan artifact is transient (plans get pruned —
 see `DEC-0084`); this finding is where the design rationale lives.
 
+## Related findings
+
+- [`finding-037`](finding-037-agentic-verify-merge-gate.md) (Sub Project A — the agentic
+  `/verify-and-merge` gate). B reuses A's gate as its touchpoint-2 per-batch backstop, and
+  B's auto-offer hook extends A's `/verify-and-merge` close step. A is a hard dependency.
+- [`finding-034`](finding-034-agent-team-plan-phase.md) (the per-scope agent team) — the team
+  that planned, built, and reviewed Sub Project B.
+
 ## What changed
 
 `repo-sweep` is a backlog **producer** with no consumer: the drain of its Tier-0 /
