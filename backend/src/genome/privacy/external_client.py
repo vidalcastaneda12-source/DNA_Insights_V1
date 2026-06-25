@@ -12,9 +12,13 @@ Every external network call this app performs flows through here. The client:
   raise :class:`ExternalCallError`.
 
 The client is intentionally generic. Phase 4 used it for the (now-removed)
-TopMed flow and currently sees use only for the Phase 4 reference-panel
-downloads (Beagle JAR, PLINK genetic map, 1000G Phase 3 panel VCFs); Phase 5
-will use it for MyVariant.info, PubMed, and any other external lookups.
+TopMed flow and for the Phase 4 reference-panel downloads (Beagle JAR, PLINK
+genetic map, 1000G Phase 3 panel VCFs); Phase 5 will use it for MyVariant.info,
+PubMed, and any other external lookups. This module also hosts the two-row
+``gh``-merge audit (:func:`write_merge_audit`, Sub Project A / ``finding-037``):
+``gh pr merge`` contacts ``api.github.com``, so it is an external call audited
+here with the same hash-not-body discipline (it does not use the HTTP client
+itself — it shares only the ``audit_log`` insert helper).
 """
 
 from __future__ import annotations
@@ -135,8 +139,8 @@ def _insert_audit_row(  # noqa: PLR0913 — schema fields are not collapsible
     audited external paths: the audited HTTP client AND the ``gh``-merge audit
     (:func:`write_merge_audit`). A ``gh pr merge`` contacts ``api.github.com``,
     so the squash-merge leaves the device and is an external call exactly like
-    an HTTP request (CLAUDE.md decision #9). Non-network audit rows (config
-    changes, snapshots, etc.) still use a sibling helper rather than passing
+    an HTTP request (CLAUDE.md decision #9). Non-network audit rows (e.g. config
+    changes) should use a sibling helper rather than passing
     ``external_call=False``, so the schema's privacy intent stays obvious at the
     call site.
     """
@@ -215,7 +219,7 @@ def write_merge_audit(  # noqa: PLR0913 — every parameter is meaningful merge-
     error: str | None = None,
     profile_id: int | None = None,
 ) -> int:
-    """Record one row of the two-row agentic-merge audit pair in ``audit_log`` (Sub A §4.4).
+    """Record one row of the two-row agentic-merge audit pair in ``audit_log`` (``finding-037``).
 
     Call this twice per agentic squash-merge: once with ``phase='intent'`` *before*
     ``gh pr merge``, once with ``phase='result'`` *after* (``status='success'`` /

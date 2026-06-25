@@ -1,4 +1,4 @@
-"""Render an evidence package as the raw, human-readable evidence block (plan §4.5).
+"""Render an evidence package as the raw, human-readable evidence block (``finding-037``).
 
 ``format_evidence`` turns an :class:`~genome.verify_gate.model.EvidencePackage` into the
 plain-text block the operator reads before typing an approval token — the verification

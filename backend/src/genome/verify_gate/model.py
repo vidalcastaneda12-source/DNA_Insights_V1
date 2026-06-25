@@ -1,4 +1,4 @@
-"""Frozen vocabulary + data model for the agentic verify-and-merge gate (Sub Project A).
+"""Frozen vocabulary + data model for the agentic verify-and-merge gate (``finding-037``).
 
 This module is the source of truth for the gate's two closed verdict axes
 (:class:`Verdict`, :class:`StepStatus`), the change-class vocabulary, and the frozen
@@ -97,10 +97,10 @@ class Verdict(enum.Enum):
 class StepStatus(enum.Enum):
     """Outcome of one verification step, keyed on its process **exit code** (plan §4.2).
 
-    ``0`` → :attr:`PASS`, any positive code → :attr:`FAIL`, a missing / non-numeric code →
-    :attr:`UNKNOWN`. The status is never inferred from a stdout substring (a step that
-    prints ``FAILED`` but exits ``0`` is a :attr:`PASS`); an unrecognized signal is surfaced
-    as :attr:`UNKNOWN`, never dropped.
+    ``0`` → :attr:`PASS`, any non-zero code → :attr:`FAIL` (including negative
+    signal-kill codes), a missing exit code (``None``) → :attr:`UNKNOWN`. The status is never
+    inferred from a stdout substring (a step that prints ``FAILED`` but exits ``0`` is a
+    :attr:`PASS`); a missing signal is surfaced as :attr:`UNKNOWN`, never dropped.
     """
 
     PASS = "pass"  # noqa: S105 — a pass/fail step status, not a credential
@@ -292,11 +292,11 @@ class CheckSet:
 def parse_step(name: str, exit_code: int | None) -> StepStatus:
     """Map a verification step's process exit code to a :class:`StepStatus` (plan §4.2).
 
-    ``0`` → :attr:`StepStatus.PASS`, any positive code → :attr:`StepStatus.FAIL`, ``None``
-    (step did not run / no numeric code) → :attr:`StepStatus.UNKNOWN`. Keyed on the exit code
-    only — never on a stdout substring — so a step that prints ``FAILED`` but exits ``0`` is
-    a PASS. ``name`` is carried for the diagnostic message only and does not affect the
-    mapping.
+    ``0`` → :attr:`StepStatus.PASS`, any non-zero code → :attr:`StepStatus.FAIL` (including
+    negative signal-kill codes), ``None`` (step did not run / no numeric code) →
+    :attr:`StepStatus.UNKNOWN`. Keyed on the exit code only — never on a stdout substring — so
+    a step that prints ``FAILED`` but exits ``0`` is a PASS. ``name`` is carried for the
+    diagnostic message only and does not affect the mapping.
     """
     # ``name`` is intentionally not consulted — the mapping is exit-code-only.
     _ = name

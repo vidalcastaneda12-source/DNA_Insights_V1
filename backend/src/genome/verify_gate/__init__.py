@@ -1,4 +1,4 @@
-"""Agentic verify-and-merge gate — the ``genome verify-gate`` surface (Sub Project A).
+"""Agentic verify-and-merge gate — the ``genome verify-gate`` surface (``finding-037``).
 
 A fail-closed, three-valued, unit-tested core that carries every decidable verification
 check off the bash skill and into Python: a closed :class:`Verdict` (``GREEN`` / ``BLOCKED``

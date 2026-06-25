@@ -647,3 +647,35 @@ def test_write_merge_audit_result_write_failure_propagates(
     # the failure is observable, the prior merge fact is preserved — NOT gated/un-merged).
     assert len(_audit_rows()) == 1
     assert json.loads(str(_audit_rows()[0][3]))["phase"] == "intent"
+
+
+def test_write_merge_audit_failure_result_stores_truncated_error(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """Stage-3 D-coverage: a ``phase='result'`` row with an ``error=`` stores the error in
+    ``operation_details`` (so a failed merge is diagnosable from the log), truncated to a
+    bounded length, and still never leaks a body token or stores anything but the hash.
+    """
+    init_databases()
+    long_error = "boom " * 300  # 1500 chars — must be truncated by the helper
+    write_merge_audit(
+        pr_number=_PR_NUMBER,
+        head_sha=_HEAD_SHA,
+        base_ref=_BASE_REF,
+        phase="result",
+        status="failure",
+        error=long_error,
+    )
+    rows = _audit_rows()
+    assert len(rows) == 1
+    details = json.loads(str(rows[0][3]))
+    assert details["phase"] == "result"
+    assert details["status"] == "failure"
+    assert "error" in details
+    # Truncated (bounded), and a prefix of the supplied error.
+    assert len(details["error"]) <= 500
+    assert long_error.startswith(details["error"])
+    # Still hash-only + no body token leak.
+    assert _is_64_hex(rows[0][6])
+    for token in _FORBIDDEN_BODY_TOKENS:
+        assert token not in str(rows[0][3])

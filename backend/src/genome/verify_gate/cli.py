@@ -1,4 +1,4 @@
-"""Typer subcommands for ``genome verify-gate`` (plan §4.5 / R1).
+"""Typer subcommands for ``genome verify-gate`` (``finding-037``; plan §4.5 / R1).
 
 Three commands, the serialization seam between the bash skill and the fail-closed core:
 
@@ -19,6 +19,7 @@ itself live in the **skill**, never here — the CLI's only job is data → verd
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Annotated
 
@@ -27,10 +28,12 @@ import typer
 from genome.verify_gate.formatter import format_evidence
 from genome.verify_gate.model import (
     AnchorCheck,
+    CheckSet,
     EvidencePackage,
     IntegrityFlags,
     StepStatus,
     Verdict,
+    assemble_check_set,
 )
 from genome.verify_gate.verdict import reduce_verdict
 
@@ -131,6 +134,67 @@ def _load_package(package: Path) -> EvidencePackage:
         raise typer.BadParameter(msg) from exc
 
 
+def _apply_deferred_mask(
+    anchors: tuple[AnchorCheck, ...], checkset: CheckSet
+) -> tuple[AnchorCheck, ...]:
+    """Derive each anchor's ``deferred`` from the change class, not the skill's say-so (A4).
+
+    A ``deferred=true`` anchor is excluded from the verdict's match check, so accepting it on
+    a change class that owes **no** rebuild would let the skill silently drop a captured
+    mismatch. We honor the deferred flag only when the class is rebuild-owing
+    (``checkset.rebuild_required``); otherwise we force ``deferred=False`` so any captured
+    value is held to the full comparison.
+    """
+    if checkset.rebuild_required:
+        return anchors
+    return tuple(
+        anchor if not anchor.deferred else replace(anchor, deferred=False) for anchor in anchors
+    )
+
+
+def _complete_package(
+    *,
+    change_class: frozenset[str],
+    steps: tuple[tuple[str, StepStatus], ...],
+    anchors: tuple[AnchorCheck, ...],
+    integrity: IntegrityFlags,
+    user_rebuild_pending: bool,
+) -> EvidencePackage:
+    """Fold the change class's required checks into the skill-supplied evidence (A1/A2/A3/A4).
+
+    The completeness derivation — *which* steps and anchors the change class requires — is a
+    decidable function of ``change_class``, so it lives here at the package-building boundary
+    rather than in skill prose. :func:`assemble_check_set` validates the class against the
+    vocabulary (its :class:`ValueError` is surfaced as a non-zero CLI error by the caller).
+
+    * **A1 required anchors:** every required anchor name absent from the skill-supplied set
+      is injected as an all-``None`` :class:`AnchorCheck` (a not-captured anchor) — absence
+      reduces to ``UNKNOWN``, never to an affirmative GREEN. (The required **steps** are not
+      auto-injected: the skill is the authority on which verification steps ran, and the
+      reducer already treats a zero-step package as UNKNOWN — A5.)
+    * **A2 rebuild:** ``rebuild_pending`` is ``user_rebuild_pending OR rebuild_required`` — a
+      schema-containing class can never be assembled with ``rebuild_pending=False``.
+    * **A4 deferred mask:** see :func:`_apply_deferred_mask`.
+    """
+    checkset = assemble_check_set(change_class)
+
+    masked_anchors = _apply_deferred_mask(anchors, checkset)
+    present_anchor_names = {a.name for a in masked_anchors}
+    missing_anchors = tuple(
+        AnchorCheck(name=name, expected=None, actual=None)
+        for name in checkset.required_anchors
+        if name not in present_anchor_names
+    )
+
+    return EvidencePackage(
+        change_class=change_class,
+        steps=steps,
+        anchors=(*masked_anchors, *missing_anchors),
+        integrity=integrity,
+        rebuild_pending=user_rebuild_pending or checkset.rebuild_required,
+    )
+
+
 @verify_gate_app.command("assemble")
 def assemble_cmd(  # noqa: PLR0913 — one flat CLI flag per primitive evidence input
     *,
@@ -215,24 +279,33 @@ def assemble_cmd(  # noqa: PLR0913 — one flat CLI flag per primitive evidence 
     """Build an EvidencePackage from flat args and write it to ``evidence.json``.
 
     The skill passes only flat primitive strings; the frozen dataclasses are constructed
-    here (mypy-checked) so bash never assembles nested JSON.
+    here (mypy-checked) so bash never assembles nested JSON. Package **completeness** for the
+    change class is enforced here (:func:`_complete_package`): a class's required dev-loop
+    steps and real-data anchors that the skill did not supply are injected as ``UNKNOWN`` /
+    not-captured, and a schema-containing class forces ``rebuild_pending`` — so an incomplete
+    package reduces to ``UNKNOWN``, never a false ``GREEN``.
     """
     steps = tuple(_parse_step(s) for s in step)
     anchors = tuple(_parse_anchor(a) for a in (anchor or []))
-    pkg = EvidencePackage(
-        change_class=frozenset(change_class),
-        steps=steps,
-        anchors=anchors,
-        integrity=IntegrityFlags(
-            changelog_present=changelog_present,
-            docs_check_clean=docs_check_clean,
-            weakened_or_removed_test=weakened_or_removed_test,
-            gate_fill_survivor=gate_fill_survivor,
-            test_count_before=test_count_before,
-            test_count_after=test_count_after,
-        ),
-        rebuild_pending=rebuild_pending,
+    integrity = IntegrityFlags(
+        changelog_present=changelog_present,
+        docs_check_clean=docs_check_clean,
+        weakened_or_removed_test=weakened_or_removed_test,
+        gate_fill_survivor=gate_fill_survivor,
+        test_count_before=test_count_before,
+        test_count_after=test_count_after,
     )
+    try:
+        pkg = _complete_package(
+            change_class=frozenset(change_class),
+            steps=steps,
+            anchors=anchors,
+            integrity=integrity,
+            user_rebuild_pending=rebuild_pending,
+        )
+    except ValueError as exc:
+        # An unknown change-class label (A3) — surface as a clean non-zero exit, not a crash.
+        raise typer.BadParameter(str(exc), param_hint="--change-class") from exc
     out.write_text(json.dumps(pkg.to_json(), indent=2, sort_keys=True), encoding="utf-8")
     typer.echo(f"wrote evidence package: {out}")
 

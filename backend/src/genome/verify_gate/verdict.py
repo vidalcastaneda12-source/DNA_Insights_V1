@@ -1,4 +1,4 @@
-"""The fail-closed verdict reduction for the agentic verify-and-merge gate (plan §4.3).
+"""The fail-closed verdict reduction for the agentic verify-and-merge gate (``finding-037``).
 
 Reduces an :class:`~genome.verify_gate.model.EvidencePackage` to a single three-valued
 :class:`~genome.verify_gate.model.Verdict`. This is where every decidable check is graded,
@@ -69,9 +69,12 @@ def reduce_verdict(pkg: EvidencePackage) -> Verdict:
     """
     integrity = pkg.integrity
 
-    # Undecidable signals → UNKNOWN (dominates everything below).
+    # Undecidable signals → UNKNOWN (dominates everything below). A package with zero steps
+    # ran no verification at all — a real evidence package always ran ≥1 step — so it is
+    # undecidable, never an affirmative pass (A5 belt-and-suspenders for the completeness fix).
     any_unknown = (
-        any(status is StepStatus.UNKNOWN for _name, status in pkg.steps)
+        not pkg.steps
+        or any(status is StepStatus.UNKNOWN for _name, status in pkg.steps)
         or any(_anchor_is_unknown(a) for a in pkg.anchors)
         or _count_is_unknown(integrity)
         or pkg.rebuild_pending
