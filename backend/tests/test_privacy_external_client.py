@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import httpx
 import pytest
@@ -22,6 +22,7 @@ from genome.privacy.external_client import (
     ExternalClient,
     is_external_enabled,
     write_config_change_audit,
+    write_merge_audit,
 )
 
 if TYPE_CHECKING:
@@ -454,3 +455,195 @@ def test_write_config_change_audit_records_local_change(
         "old_value": "false",
         "new_value": "true",
     }
+
+
+# ===========================================================================
+# write_merge_audit — the two-row agentic-merge audit (Sub Project A).
+#
+# Plan-blind spec source: synthesized-plan §4.4 + GATE-1 decision #2
+# (external_call=1; reuse _insert_audit_row(action_type='write',
+# resource_type='pull_request', external_endpoint='github',
+# external_payload_hash=sha256(stable payload))), §5 test list item 6
+# (two-row / intent-survives / never-stores-body / action_type∈enum /
+# result-write-failure propagates), and the FROZEN INTERFACE CONTRACT
+# (write_merge_audit keyword-only signature). Decision #9 (audited external
+# call: external_call=1, hash-not-body) + "never store the body" govern.
+#
+# These reuse the file's own _audit_rows() helper + the isolated_settings
+# fixture + init_databases() (the FTS5 notes_fts DDL runs at init — probed
+# OK). RED on NotImplementedError (write_merge_audit is a stub) is correct.
+#
+# Pre-mortem coupling (premortem-digest skeptic-2 #riskiest-3 + R2): the two-
+# row + intent-survives + propagates tests pin the predicted surprise
+# "single-row leaves a phantom merge / gating blocks on a transient lock" —
+# the contract is records-and-PROCEEDS (a write error is OBSERVABLE, NOT
+# gates/un-merges the prior intent).
+# ===========================================================================
+
+# A fixed synthetic merge target (no real PR / no secret). Kept as explicitly-typed
+# scalars (not a dict splat) so mypy --strict preserves the precise keyword types.
+_PR_NUMBER: int = 6
+_HEAD_SHA: str = "0123456789abcdef0123456789abcdef01234567"
+_BASE_REF: str = "main"
+# Strings that must NEVER appear in any stored operation_details (the body /
+# gh argv / PR title — only the hash of the payload may be persisted).
+_FORBIDDEN_BODY_TOKENS = (
+    "gh pr merge",
+    "--squash",
+    "Sub Project A",  # a plausible PR title
+    "gh ",
+)
+
+
+def _is_64_hex(value: object) -> bool:
+    return (
+        isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+    )
+
+
+def _merge_audit(
+    phase: Literal["intent", "result"],
+    status: Literal["success", "failure"] | None = None,
+) -> int:
+    """Call ``write_merge_audit`` for the fixed synthetic target (typed-keyword wrapper)."""
+    return write_merge_audit(
+        pr_number=_PR_NUMBER,
+        head_sha=_HEAD_SHA,
+        base_ref=_BASE_REF,
+        phase=phase,
+        status=status,
+    )
+
+
+def test_write_merge_audit_writes_two_rows_sharing_payload_hash(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """from: plan §4.4 + GATE-1 #2 + §5 item 6 (two-row).
+
+    An intent row before the merge and a result row after — exactly two rows, both tagged
+    external (external_call=1), action_type='write', resource_type='pull_request',
+    external_endpoint='github', SHARING the same payload hash. row0 phase='intent',
+    row1 phase='result'. This is the two-row shape mirrored from ``_audited_attempt``.
+    """
+    init_databases()
+    _merge_audit("intent")
+    _merge_audit("result", status="success")
+
+    rows = _audit_rows()
+    assert len(rows) == 2
+    intent, result = rows
+    # Both rows: external + write + pull_request + github endpoint.
+    for row in (intent, result):
+        action_type, resource_type, _resource_id, _details, external_call, endpoint, _hash = row
+        assert action_type == "write"
+        assert resource_type == "pull_request"
+        assert external_call == 1
+        assert endpoint == "github"
+    # Both rows share one payload hash (the stable {pr, head_sha, base, squash} digest).
+    assert intent[6] == result[6]
+    assert _is_64_hex(intent[6])
+    # The phases are ordered intent → result.
+    assert json.loads(str(intent[3]))["phase"] == "intent"
+    assert json.loads(str(result[3]))["phase"] == "result"
+    assert json.loads(str(result[3]))["status"] == "success"
+
+
+def test_write_merge_audit_intent_row_survives_without_result(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """from: plan §4.4 ("crashes mid-flight still leaves the intent row") + §5 item 6
+    (intent-survives).
+
+    When only the intent row is written (the result never follows — e.g. the process died
+    between intent and the post-merge result write), exactly one row survives, and it is the
+    intent row. The merge audit must never silently lose the fact that a merge was attempted.
+    """
+    init_databases()
+    _merge_audit("intent")
+
+    rows = _audit_rows()
+    assert len(rows) == 1
+    assert json.loads(str(rows[0][3]))["phase"] == "intent"
+    assert rows[0][4] == 1  # external_call
+    assert rows[0][0] == "write"  # action_type
+
+
+def test_write_merge_audit_never_stores_body(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """from: decision #9 + "never store the body" + §5 item 6 (never-stores-body).
+
+    The payload hash is a 64-hex sha256, and NO row's operation_details contains the merge
+    body, the ``gh`` argv, or the PR title — only the hash of the payload may be persisted
+    (CLAUDE.md "Never store the body of an external request — only the hash").
+    """
+    init_databases()
+    _merge_audit("intent")
+    _merge_audit("result", status="success")
+
+    rows = _audit_rows()
+    for row in rows:
+        payload_hash = row[6]
+        assert _is_64_hex(payload_hash), f"payload hash not 64-hex sha256: {payload_hash!r}"
+        details_text = str(row[3])
+        for token in _FORBIDDEN_BODY_TOKENS:
+            assert token not in details_text, (
+                f"operation_details leaked a body/argv/title token {token!r}: {details_text!r}"
+            )
+
+
+def test_write_merge_audit_action_type_is_write_and_passes_check(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """from: plan §4.4 (action_type='write' forced — the enum has no 'merge') + §5 item 6
+    (action_type∈enum).
+
+    The audit_log.action_type CHECK enum (ddl) has no 'merge', so the merge audit uses
+    'write'. The INSERT must SUCCEED (no CHECK-constraint violation) and the stored
+    action_type is 'write'. (If the body had passed action_type='merge', the INSERT would
+    raise an IntegrityError — this proves it does not.)
+    """
+    init_databases()
+    log_id = _merge_audit("intent")
+    # The helper returns the inserted log_id (mirrors write_config_change_audit's >0 contract).
+    assert log_id > 0
+    rows = _audit_rows()
+    assert len(rows) == 1
+    assert rows[0][0] == "write"
+
+
+def test_write_merge_audit_result_write_failure_propagates(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """from: plan §4.4 + §5 item 6 (result-write-failure propagates — OBSERVABLE, NOT gating).
+
+    The contract is "a write error is OBSERVABLE", NOT "it gates/un-merges the prior intent".
+    Monkeypatch the named collaborator ``_insert_audit_row`` to raise, then call
+    ``write_merge_audit(phase='result', ...)`` — the error must RE-RAISE (propagate), so a
+    failed result-row write is never swallowed. (The prior intent row, written by a real
+    earlier call, legitimately remains — the result-write failure does NOT roll it back / un-
+    merge; this test asserts only that the failure is surfaced, not that anything is gated.)
+    """
+    init_databases()
+    # A genuine intent row first (a real merge that already happened upstream).
+    _merge_audit("intent")
+    assert len(_audit_rows()) == 1
+
+    sentinel = "result-row INSERT boom"
+
+    def _boom(*_args: object, **_kwargs: object) -> int:
+        raise RuntimeError(sentinel)
+
+    # Patch the collaborator named in the frozen contract (interface-level, not body logic).
+    monkeypatch.setattr(
+        "genome.privacy.external_client._insert_audit_row",
+        _boom,
+    )
+    with pytest.raises(RuntimeError, match=sentinel):
+        _merge_audit("result", status="success")
+
+    # The intent row is not rolled back by the result-write failure (records-and-proceeds:
+    # the failure is observable, the prior merge fact is preserved — NOT gated/un-merged).
+    assert len(_audit_rows()) == 1
+    assert json.loads(str(_audit_rows()[0][3]))["phase"] == "intent"

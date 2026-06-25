@@ -2,7 +2,12 @@
 
 This document is the canonical merge gate for changes to this repository.
 It is run by VSC-User (the human operator) in the integrated terminal,
-independently of any tests VSC-Claude executed during implementation.
+independently of any tests VSC-Claude executed during implementation —
+or, on the owner-approved **evidence-gated** path (Sub Project A,
+`finding-037`), run by Claude through the fail-closed `genome.verify_gate`
+core, which presents the raw evidence for a typed approval before merging.
+Either way the commands below are the protocol; the independent human run
+remains the standing fallback.
 
 ## Purpose
 
@@ -23,6 +28,20 @@ commands; PRs that touch the schema add the rebuild step; PRs that
 touch the pipeline add the real-data verification step. Optional
 steps are explicitly out of contract — if a PR's change class is
 covered by the core commands alone, that is the full protocol.
+
+**Evidence-gated path (Sub Project A — `finding-037`).** Alongside the
+operator's independent run, there is now an owner-approved
+**evidence-gated** path: Claude runs this full protocol plus the
+real-data anchor captures through the fail-closed `genome.verify_gate`
+core, presents the **raw** evidence, takes a typed approval token, and
+then squash-merges and closes (`.claude/commands/verify-and-merge.md`).
+The evidence-gated path does not replace this runbook — it runs exactly
+these commands and grades them in a unit-tested core that fails closed
+(an undecidable or stale signal reduces to `UNKNOWN`/`BLOCKED`, never a
+fabricated pass). The operator's **independent** run described above
+remains the standing fallback and the one-line full-independence revert:
+at any time VSC-User may run this protocol from a fresh shell and merge
+by hand, which is the original gate this document specifies.
 
 ## Core commands
 
@@ -158,10 +177,12 @@ identifiers documented in CLAUDE.md "Real-data observations":
 
 Drift in any of these numbers against the same input corpus is a
 regression signal, not noise. The numbers are recorded as stable
-identifiers in CLAUDE.md precisely so that an independent
-verification run can compare against a known answer rather than
-re-deriving the expectation from the same code that produced the
-output.
+identifiers in CLAUDE.md precisely so that a verification run — the
+operator's independent run, or the evidence-gated `genome.verify_gate`
+anchor capture (`finding-037`), which surfaces a stale/absent DB as
+`UNKNOWN` rather than a fabricated match — can compare against a known
+answer rather than re-deriving the expectation from the same code that
+produced the output.
 
 PRs that touch annotation loaders should additionally confirm the
 real-data drift identifiers locked in `annotations.md` for the

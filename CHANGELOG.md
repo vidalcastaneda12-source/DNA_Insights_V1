@@ -6,9 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-- Prune the implemented `decision-tracking-leak-fix.md` plan artifact: the decision-tracking
-  ledger it planned has shipped (finding-036), so it is no longer the live/unimplemented plan the
-  PR #93 prune deliberately retained. (cleanup)
+- Add the agentic verify-and-merge gate (sub-project-A, finding-037): a fail-closed,
+  DB-free `genome.verify_gate` core (three-valued `Verdict` GREEN/BLOCKED/UNKNOWN, an
+  exit-code `StepStatus` parser, fail-closed evidence records, an `UNKNOWN`-dominates
+  reduction) plus a `genome verify-gate {assemble,verdict,format}` CLI and the
+  `/verify-and-merge` skill, so Human Gate 2 gains an owner-approved evidence-gated path
+  (Claude runs the protocol, presents raw evidence, takes a typed approval, then
+  squash-merges) while the independent human run stays the standing fallback. The
+  squash-merge is audited via a new two-row `write_merge_audit` (`external_call=1`,
+  body-never-stored). Reconciles the independence framing in CLAUDE.md / verification.md /
+  scope-run.md / finding-034 and appends DEC-0087..0090. (sub-project-A)
 - Enforce the decision-tracking gate (`genome docs check`, finding-036) automatically: a tracked
   git pre-commit hook (`scripts/git-hooks/pre-commit` + `scripts/install-hooks.sh`), a step in
   `scripts/verify.sh`, and a `docs-check` GitHub Action on every PR (the repo's first CI). Also

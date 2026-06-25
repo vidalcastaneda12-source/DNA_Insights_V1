@@ -133,7 +133,18 @@ predicted surprises, schema-rebuild steps if `change_class ⊇ schema`). Run
 confirms the anchors-to-watch on real data, and merges (or bounces to Stage 2).
 Stop. The team does not merge.
 
-## Stage 5 — Close (after VSC-User merges)
+**Evidence-gated merge (Sub Project A — `finding-037`).** Once the
+`/verify-and-merge` skill (`.claude/commands/verify-and-merge.md`) is in place, a
+**future** scope may take the owner-approved evidence-gated path instead of the
+manual run above: Claude runs the same protocol through the fail-closed
+`genome.verify_gate` core, presents the raw evidence, takes a typed approval, then
+squash-merges and closes. The independent human run stays the standing fallback, so
+"the team does not merge" holds until that typed approval is given. **Temporal split:**
+the Sub-A PR that introduces the skill lands through **this** existing Gate 2 (the
+operator merges it by hand); the skill governs the merge of subsequent scopes, not its
+own introduction.
+
+## Stage 5 — Close (after VSC-User merges, or after the evidence-gated merge)
 
 1. `knowledge-curator` re-locks the anchors **VSC-User confirmed at the gate**
    into `CLAUDE.md` / `verification.md` / the finding's bedrock table, flips the

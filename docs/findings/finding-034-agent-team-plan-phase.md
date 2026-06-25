@@ -1,7 +1,7 @@
 ---
 type: decision
 status: active
-actors: [ClaudeCodeDevelopment]
+actors: [VSC-User, ClaudeCodeDevelopment]
 date: 2026-06-19
 supersedes: []
 superseded_by: []
@@ -104,6 +104,21 @@ precisely because it runs **outside the loop that produced the change**. An agen
 team is still that loop. So the team produces the *pre-gate package*; the human gates
 remain independent. The Plan phase therefore ends at a human decision, not at an
 auto-approval.
+
+> **Amendment (Sub Project A, 2026-06-25 — `finding-037`).** The merge gate gained an
+> owner-approved **evidence-gated** path: Claude may run the full verification protocol
+> through a fail-closed, unit-tested core (`genome.verify_gate`), present the **raw**
+> evidence, take a typed approval, and then squash-merge. This does **not** repeal the
+> rule above — it sharpens *where* the independence has to live. The danger an
+> in-loop merge introduces is a **false-GREEN**; the response is to move every decidable
+> check into the fail-closed core (three-valued `Verdict`, exit-code parser, fail-closed
+> defaults, `UNKNOWN`-dominates precedence) so the skill is faithful plumbing whose only
+> gate is "the core exited non-zero → stop", and to keep the **independent human run as
+> the standing fallback**. The principle as stated remains correct for (a) that human
+> Gate-2 fallback and (b) every other stage of this team, which still ends at an
+> out-of-loop human decision. Only the merge step gained the evidence-gated alternative;
+> see [`finding-037`](finding-037-agentic-verify-merge-gate.md) for the full design,
+> `DEC-0087 … DEC-0090`, and the two-row merge audit.
 
 ## The per-scope team (the larger frame)
 
