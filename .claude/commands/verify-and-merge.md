@@ -23,15 +23,19 @@ it; it adds an owner-approved path where Claude performs the merge.
 1. **Preflight.** `git diff --name-only` against the merge base → derive the
    `change_class` (core / schema / pipeline / annotation; multi-label is fine). Assemble
    the check set conceptually via the change class.
-2. **Run the protocol and record each step's exit code.** `scripts/verify.sh` runs the
-   always-run dev-loop tail (`uv sync`, `pytest`, `ruff check`, `ruff format --check`,
-   `mypy --strict backend/src`, `genome docs check`) under `set -euo pipefail`, so it
-   **aborts at the first failing step** and prints `FAILED at <label>`. Map that to step
-   statuses **by exit code, not stdout text**: a non-zero `verify.sh` exit means the labelled
-   failing step is `FAIL` and every step that never ran is `UNKNOWN`. If you need a precise
-   per-step status for *all* steps (e.g. to see whether a later step would also fail), run the
-   steps individually and record each one's exit code; do not try to read six pass/fail
-   results out of a single aborted run.
+2. **Run the protocol and emit one `--step` per canonical dev-loop label.** The six canonical
+   `scripts/verify.sh` labels are the single source of truth (`assemble_check_set` requires
+   exactly this set): `uv sync`, `pytest`, `ruff check`, `ruff format --check`,
+   `mypy --strict backend/src`, `genome docs check`. Pass `assemble` one
+   `--step <label>:<exit-code>` for **each** of the six — `:0` (PASS) for each step that
+   passed, the failing step's real non-zero code (FAIL), and any step that never ran
+   `UNKNOWN`. Status is by **exit code, not stdout text**. Because `verify.sh` runs under
+   `set -euo pipefail` it **aborts at the first failing step** and prints `FAILED at <label>`:
+   from a single aborted run, mark the labelled step FAIL and every later (never-run) step
+   UNKNOWN. If you need a precise status for *all six* (e.g. to see whether a later step would
+   also fail), run the steps individually and record each one's exit code. Omitting a label is
+   not an option — a missing required step is injected as `UNKNOWN` by the core and blocks the
+   gate, so emit all six.
 3. **Bounded auto-fix (N=2, mechanical only).** A formatting-only or trivially-mechanical
    failure may be auto-fixed and the step re-run, at most twice. Anything that is an
    always-hard-stop (a real test failure, a type error, a schema-rebuild need, a logic

@@ -74,15 +74,30 @@ def _assert_clean_exit(result: Result, code: int) -> None:
 
 
 def _affirmative_assemble_args(out: Path, *, change_class: str = "core") -> list[str]:
-    """Flat ``assemble`` args for a GREEN-eligible N/A-path package (no ``--anchor``)."""
+    """Flat ``assemble`` args for a GREEN-eligible N/A-path package (no ``--anchor``).
+
+    Supplies the **six canonical ``scripts/verify.sh`` dev-loop labels** each PASS — a
+    *realistic complete* package (finding-013), since ``assemble_check_set`` requires the full
+    dev-loop tail for every change class. (Reconciled from the earlier 2-label
+    ``pytest``/``ruff`` shorthand when step-completeness enforcement landed — Stage-3 cycle 2:
+    a realism strengthening; the affirmative case stays GREEN and no assertion changed.)
+    """
     return [
         "assemble",
         "--change-class",
         change_class,
         "--step",
+        "uv sync:0",
+        "--step",
         "pytest:0",
         "--step",
-        "ruff:0",
+        "ruff check:0",
+        "--step",
+        "ruff format --check:0",
+        "--step",
+        "mypy --strict backend/src:0",
+        "--step",
+        "genome docs check:0",
         "--changelog-present",
         "--docs-check-clean",
         "--no-weakened-or-removed-test",

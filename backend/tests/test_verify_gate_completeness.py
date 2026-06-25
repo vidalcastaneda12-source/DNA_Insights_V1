@@ -35,6 +35,7 @@ from typer.testing import CliRunner
 
 from genome.verify_gate.cli import _load_package, _parse_step, verify_gate_app
 from genome.verify_gate.model import (
+    _DEV_LOOP_STEPS,
     _INDEX_ANCHORS,
     _MERGE_ANCHORS,
     CHANGE_CLASS_VOCAB,
@@ -165,6 +166,88 @@ def test_pipeline_with_partial_anchors_is_unknown(tmp_path: Path) -> None:
     assert _assemble(runner, args).exit_code == 0
     result = _verdict(runner, out)
     assert result.exit_code != 0, result.output
+
+
+# ── A1 (steps): a missing required dev-loop step → UNKNOWN ────────────────────
+
+
+def test_core_package_missing_a_required_dev_loop_step_is_unknown(tmp_path: Path) -> None:
+    """A ``core`` package that supplies SOME dev-loop steps but omits a required one
+    (``mypy --strict backend/src``) must NOT be GREEN — the missing step injects as UNKNOWN,
+    so ``verdict`` exits non-zero. This is the step half of the completeness fix (Stage-3
+    cycle 2), symmetric with the missing-anchor case.
+    """
+    runner = CliRunner()
+    out = tmp_path / "evidence.json"
+    # All six canonical labels EXCEPT `mypy --strict backend/src`.
+    partial = [s for s in _ALL_STEPS_PASS if not s.startswith("mypy")]
+    assert "mypy --strict backend/src" in _DEV_LOOP_STEPS  # the omitted label is genuinely required
+    step_args: list[str] = []
+    for s in partial:
+        step_args += ["--step", s]
+    args = [
+        "assemble",
+        "--change-class",
+        "core",
+        *step_args,
+        *_affirmative_integrity_args(),
+        "--out",
+        str(out),
+    ]
+    assert _assemble(runner, args).exit_code == 0
+    result = _verdict(runner, out)
+    assert result.exit_code != 0, result.output
+    assert "merge" not in result.output.lower()
+    assert "UNKNOWN" in result.output.upper()
+
+
+def test_core_package_with_all_six_dev_loop_steps_is_green(tmp_path: Path) -> None:
+    """The reconciled affirmative path: a ``core`` package supplying all six canonical
+    ``verify.sh`` labels at PASS (a realistic complete package — finding-013) → GREEN. This
+    proves the step-completeness enforcement does not block the legitimate happy path.
+    """
+    runner = CliRunner()
+    out = tmp_path / "evidence.json"
+    args = [
+        "assemble",
+        "--change-class",
+        "core",
+        *_steps_args(),  # all six _ALL_STEPS_PASS labels
+        *_affirmative_integrity_args(),
+        "--out",
+        str(out),
+    ]
+    assert _assemble(runner, args).exit_code == 0
+    result = _verdict(runner, out)
+    assert result.exit_code == 0, result.output
+    assert "merge" in result.output.lower()
+
+
+def test_core_package_with_a_failed_dev_loop_step_is_blocked(tmp_path: Path) -> None:
+    """A ``core`` package where one of the six canonical steps FAILED (non-zero exit) →
+    BLOCKED (a decided failure), with the other five PASS. Mirrors a `verify.sh` run that
+    aborted at, e.g., `pytest`.
+    """
+    runner = CliRunner()
+    out = tmp_path / "evidence.json"
+    step_args: list[str] = []
+    for s in _ALL_STEPS_PASS:
+        # pytest failed (exit 1); everything before it passed, nothing after ran — but for a
+        # BLOCKED assertion we keep the rest PASS so the FAIL is the sole non-green signal.
+        step_args += ["--step", "pytest:1" if s.startswith("pytest:") else s]
+    args = [
+        "assemble",
+        "--change-class",
+        "core",
+        *step_args,
+        *_affirmative_integrity_args(),
+        "--out",
+        str(out),
+    ]
+    assert _assemble(runner, args).exit_code == 0
+    result = _verdict(runner, out)
+    assert result.exit_code != 0, result.output
+    assert "BLOCKED" in result.output.upper()
 
 
 # ── Happy path: a COMPLETE pipeline package → GREEN (the fix didn't break it) ──

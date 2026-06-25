@@ -167,11 +167,15 @@ def _complete_package(
     rather than in skill prose. :func:`assemble_check_set` validates the class against the
     vocabulary (its :class:`ValueError` is surfaced as a non-zero CLI error by the caller).
 
-    * **A1 required anchors:** every required anchor name absent from the skill-supplied set
-      is injected as an all-``None`` :class:`AnchorCheck` (a not-captured anchor) — absence
-      reduces to ``UNKNOWN``, never to an affirmative GREEN. (The required **steps** are not
-      auto-injected: the skill is the authority on which verification steps ran, and the
-      reducer already treats a zero-step package as UNKNOWN — A5.)
+    * **A1 required steps + anchors:** every required step label / anchor name absent from the
+      skill-supplied set is injected as ``UNKNOWN`` (a dev-loop step that did not run) /
+      all-``None`` :class:`AnchorCheck` (a not-captured anchor) — absence reduces to
+      ``UNKNOWN``, never to an affirmative GREEN. The required steps are
+      :data:`~genome.verify_gate.model.CHANGE_CLASS_VOCAB`'s dev-loop tail (the 6 canonical
+      ``scripts/verify.sh`` labels): every change runs the full dev-loop, so a complete
+      package carries all 6. The skill can always satisfy this — a passing ``verify.sh`` →
+      all PASS; a failing run aborts (``set -euo pipefail``) → the failed step ``FAIL`` and
+      the steps that never ran ``UNKNOWN``.
     * **A2 rebuild:** ``rebuild_pending`` is ``user_rebuild_pending OR rebuild_required`` — a
       schema-containing class can never be assembled with ``rebuild_pending=False``.
     * **A4 deferred mask:** see :func:`_apply_deferred_mask`.
@@ -186,9 +190,16 @@ def _complete_package(
         if name not in present_anchor_names
     )
 
+    present_step_names = {name for name, _status in steps}
+    missing_steps = tuple(
+        (name, StepStatus.UNKNOWN)
+        for name in checkset.required_steps
+        if name not in present_step_names
+    )
+
     return EvidencePackage(
         change_class=change_class,
-        steps=steps,
+        steps=(*steps, *missing_steps),
         anchors=(*masked_anchors, *missing_anchors),
         integrity=integrity,
         rebuild_pending=user_rebuild_pending or checkset.rebuild_required,
