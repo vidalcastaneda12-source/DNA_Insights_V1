@@ -12,9 +12,13 @@ Every external network call this app performs flows through here. The client:
   raise :class:`ExternalCallError`.
 
 The client is intentionally generic. Phase 4 used it for the (now-removed)
-TopMed flow and currently sees use only for the Phase 4 reference-panel
-downloads (Beagle JAR, PLINK genetic map, 1000G Phase 3 panel VCFs); Phase 5
-will use it for MyVariant.info, PubMed, and any other external lookups.
+TopMed flow and for the Phase 4 reference-panel downloads (Beagle JAR, PLINK
+genetic map, 1000G Phase 3 panel VCFs); Phase 5 will use it for MyVariant.info,
+PubMed, and any other external lookups. This module also hosts the two-row
+``gh``-merge audit (:func:`write_merge_audit`, Sub Project A / ``finding-037``):
+``gh pr merge`` contacts ``api.github.com``, so it is an external call audited
+here with the same hash-not-body discipline (it does not use the HTTP client
+itself — it shares only the ``audit_log`` insert helper).
 """
 
 from __future__ import annotations
@@ -132,9 +136,13 @@ def _insert_audit_row(  # noqa: PLR0913 — schema fields are not collapsible
     """Insert one row into ``audit_log`` and return its ``log_id``.
 
     ``external_call`` is always ``1`` here — this helper is reserved for the
-    audited HTTP path. Non-network audit rows (config changes, snapshots, etc.)
-    should use a sibling helper rather than passing ``external_call=False``,
-    so the schema's privacy intent stays obvious at the call site.
+    audited external paths: the audited HTTP client AND the ``gh``-merge audit
+    (:func:`write_merge_audit`). A ``gh pr merge`` contacts ``api.github.com``,
+    so the squash-merge leaves the device and is an external call exactly like
+    an HTTP request (CLAUDE.md decision #9). Non-network audit rows (e.g. config
+    changes) should use a sibling helper rather than passing
+    ``external_call=False``, so the schema's privacy intent stays obvious at the
+    call site.
     """
     cur = conn.execute(
         """
@@ -199,6 +207,64 @@ def write_config_change_audit(
         msg = "audit_log insert returned no lastrowid"
         raise RuntimeError(msg)
     return int(log_id)
+
+
+def write_merge_audit(  # noqa: PLR0913 — every parameter is meaningful merge-audit metadata
+    *,
+    pr_number: int,
+    head_sha: str,
+    base_ref: str,
+    phase: Literal["intent", "result"],
+    status: Literal["success", "failure"] | None = None,
+    error: str | None = None,
+    profile_id: int | None = None,
+) -> int:
+    """Record one row of the two-row agentic-merge audit pair in ``audit_log`` (``finding-037``).
+
+    Call this twice per agentic squash-merge: once with ``phase='intent'`` *before*
+    ``gh pr merge``, once with ``phase='result'`` *after* (``status='success'`` /
+    ``'failure'``). Both rows share one stable ``sha256`` of the merge identity
+    (``{pr, head_sha, base, squash}``), so a log reader groups the pair by hash — mirroring
+    :func:`_audited_attempt`'s intent/result pattern. Each row uses ``external_call=1``
+    (via :func:`_insert_audit_row`): a ``gh pr merge`` contacts ``api.github.com``, so the
+    merge leaves the device (CLAUDE.md decision #9). ``action_type='write'`` because the
+    ``audit_log`` enum has no ``'merge'`` (ddl group 5); ``resource_type='pull_request'``,
+    ``external_endpoint='github'``.
+
+    The request body is **never** stored — only its hash. ``operation_details`` carries the
+    ``phase`` (and ``status`` / ``error`` when present), never the ``gh`` argv or PR title.
+
+    Records-and-proceeds: this records the merge fact and returns the new ``log_id``; it does
+    **not** gate the merge. A failed result-row write propagates (observable) but does not roll
+    back the prior intent row / un-merge.
+    """
+    payload_hash = _hash_bytes(
+        json.dumps(
+            {"pr": pr_number, "head_sha": head_sha, "base": base_ref, "squash": True},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+    )
+
+    details: dict[str, Any] = {"phase": phase}
+    if status is not None:
+        details["status"] = status
+    if error is not None:
+        details["error"] = error[:500]
+
+    from genome.db.sqlite_conn import sqlcipher_connection  # noqa: PLC0415
+
+    with sqlcipher_connection() as conn:
+        return _insert_audit_row(
+            conn,
+            action_type="write",
+            resource_type="pull_request",
+            resource_id=str(pr_number),
+            operation_details=details,
+            external_endpoint="github",
+            external_payload_hash=payload_hash,
+            profile_id=profile_id,
+        )
 
 
 @contextmanager
@@ -511,4 +577,5 @@ __all__ = [
     "HttpMethod",
     "is_external_enabled",
     "write_config_change_audit",
+    "write_merge_audit",
 ]

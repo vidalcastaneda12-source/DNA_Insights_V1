@@ -41,6 +41,7 @@ from genome.ingest import Source, ingest_file
 from genome.ingest.liftover import LiftoverEngine
 from genome.merge import merge_all
 from genome.privacy.external_client import is_external_enabled, write_config_change_audit
+from genome.verify_gate import verify_gate_app
 
 _VALID_INGEST_SOURCES: tuple[str, ...] = tuple(
     s for s in get_args(Source) if s not in {"topmed_imputed", "beagle_imputed"}
@@ -77,6 +78,7 @@ app.add_typer(imputation_app, name="imputation")
 app.add_typer(config_app, name="config")
 app.add_typer(annotate_app, name="annotate")
 app.add_typer(docs_app, name="docs")
+app.add_typer(verify_gate_app, name="verify-gate")
 imputation_app.add_typer(panel_app, name="panel")
 
 

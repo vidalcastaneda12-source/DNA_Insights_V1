@@ -49,7 +49,7 @@ Every implementation session produces:
 - An open PR, or a new commit to an existing PR where appropriate.
 - An end-of-session handoff via `/handoff` (`.claude/commands/handoff.md`).
 
-VSC-User runs the canonical verification independently against the pushed branch — see `docs/runbooks/verification.md`. That independence is the gate that catches selective test runs, test mutation, and number-interpretation slippage. It is not optional and is not negotiable.
+VSC-User runs the canonical verification independently against the pushed branch — see `docs/runbooks/verification.md`. That independence is the gate that catches selective test runs, test mutation, and number-interpretation slippage. The independent human run is always available and is the standing fallback. As of Sub Project A (`finding-037`) there is also an owner-approved **evidence-gated** path: Claude runs the same protocol through the fail-closed `genome.verify_gate` core, presents the raw evidence, takes a typed approval, then squash-merges (`.claude/commands/verify-and-merge.md`). The fail-closed core is what preserves the guarantee there — an undecidable or stale signal reduces to `UNKNOWN`/`BLOCKED`, never a fabricated pass.
 
 ## Architecture — locked decisions
 
@@ -174,7 +174,9 @@ VSC-User runs the canonical verification independently against the pushed branch
 - Frontend (later phases): `cd frontend && pnpm dev`
 
 The merge-gate verification protocol — what VSC-User runs independently
-of the dev-loop commands above before merging a branch — lives in
+of the dev-loop commands above before merging a branch, or what the
+owner-approved evidence-gated path runs through `genome.verify_gate`
+(`finding-037`, `.claude/commands/verify-and-merge.md`) — lives in
 [`docs/runbooks/verification.md`](docs/runbooks/verification.md). The
 commands above remain the quick reference during implementation; the
 runbook is the canonical gate.
