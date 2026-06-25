@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Prune the implemented `decision-tracking-leak-fix.md` plan artifact: the decision-tracking
+  ledger it planned has shipped (finding-036), so it is no longer the live/unimplemented plan the
+  PR #93 prune deliberately retained. (cleanup)
 - Enforce the decision-tracking gate (`genome docs check`, finding-036) automatically: a tracked
   git pre-commit hook (`scripts/git-hooks/pre-commit` + `scripts/install-hooks.sh`), a step in
   `scripts/verify.sh`, and a `docs-check` GitHub Action on every PR (the repo's first CI). Also
