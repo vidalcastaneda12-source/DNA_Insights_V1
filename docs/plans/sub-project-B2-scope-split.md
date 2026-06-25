@@ -1,6 +1,6 @@
 # Sub Project B2 — Scope-Split (smart-cut + orchestrated)
 
-**Status:** Design approved (brainstorming), ready for an implementation plan.
+**Status:** Phase 1 (smart-cut detector + Stage-0.5 micro-gate) implemented and merged (PR #106, 2026-06-25); durable record: finding-039. Phase 2 (genome.campaign orchestrator) deferred pending Sub Project C. This plan artifact is transient (see DEC-0084).
 **Date:** 2026-06-24.
 **Source:** Brainstorming session on bolstering `/scope-run`.
 **Scope:** The **intake** dual of the fast-follow loop — split a too-big scope into ordered
