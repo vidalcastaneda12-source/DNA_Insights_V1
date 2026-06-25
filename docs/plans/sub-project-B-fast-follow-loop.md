@@ -1,6 +1,6 @@
 # Sub Project B — Fast-Follow Loop (`/fast-follow`)
 
-**Status:** Design approved (brainstorming), ready for an implementation plan.
+**Status:** Implemented and merged (PR #104, 2026-06-25). Durable record: finding-038. This plan artifact is transient (see DEC-0084).
 **Date:** 2026-06-24.
 **Source:** Brainstorming session on bolstering `/scope-run`.
 **Scope:** This is the **fast-follow drain loop** half of **Sub Project B** of the four-part
