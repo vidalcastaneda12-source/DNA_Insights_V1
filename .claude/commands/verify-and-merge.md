@@ -65,7 +65,11 @@ it; it adds an owner-approved path where Claude performs the merge.
 9. **Close.** Delete the merged branch. **Delegate** the re-lock of the operator-confirmed
    anchors into `CLAUDE.md` / `verification.md` / the finding's bedrock table to the
    Stage-5 `knowledge-curator` as a fast-follow **reviewable doc change** (human-confirmed
-   numbers only, never a direct push).
+   numbers only, never a direct push). After close, auto-scan the residual backlog and
+   **offer a `/fast-follow` drain-loop scan** of it (Sub Project B, `finding-038`) — this is
+   an **offer only**: it never drains, never merges, and never acts without the
+   `/fast-follow` triage-approval touchpoint (touchpoint 1). Distinct from the
+   knowledge-curator doc re-lock above, which is a separate "fast-follow" sense.
 
 ## Temporal note
 

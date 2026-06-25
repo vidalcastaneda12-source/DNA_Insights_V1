@@ -17,6 +17,7 @@ from genome.config import get_logging_settings, get_settings
 from genome.db.duckdb_conn import duckdb_connection
 from genome.db.init_schema import init_databases
 from genome.docs import docs_app
+from genome.fast_follow import fast_follow_app
 from genome.imputation import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_DCONF_THRESHOLD,
@@ -79,6 +80,9 @@ app.add_typer(config_app, name="config")
 app.add_typer(annotate_app, name="annotate")
 app.add_typer(docs_app, name="docs")
 app.add_typer(verify_gate_app, name="verify-gate")
+# fast_follow is eagerly registered; the DB-free guarantee is carried by the package-local
+# clean-subprocess test (test_fast_follow_no_db_import.py), not by lazy import.
+app.add_typer(fast_follow_app, name="fast-follow")
 imputation_app.add_typer(panel_app, name="panel")
 
 
