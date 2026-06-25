@@ -89,4 +89,5 @@ Regenerate the index below with `genome docs build-index`; validate with `genome
 | finding-036 | decision | active |  |  |
 | finding-037 | decision | active |  |  |
 | finding-038 | decision | active |  |  |
+| finding-039 | decision | active |  |  |
 <!-- END findings-index -->
