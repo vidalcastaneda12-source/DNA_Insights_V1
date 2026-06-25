@@ -18,7 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   managed-block writer, the `/scope-split` skill, the `/scope-run` Stage-0.5 pre-plan
   split-check micro-gate hook, and appends DEC-0094. The change-class vocabulary is reconciled
   to the dispatcher C-map (not verify_gate's) with a reconciliation test. Detector only — no
-  campaign runner, no auto-running of sub-scopes. (sub-project-B2 / PR-B2-Phase1)
+  campaign runner, no auto-running of sub-scopes. Stage-3 review hardened the coupling veto's
+  fail-closed posture: the import scan now counts indented imports (was `^`-anchored, blind to
+  non-top-level coupling → false-split risk), unresolvable footprint modules and git-scan
+  failures reduce to atomic rather than splitting-on-unmeasured-coupling or crashing.
+  (sub-project-B2 / PR-B2-Phase1)
 - Add the fast-follow drain loop (sub-project-B, finding-038): a bounded, fail-closed,
   DB-free `genome.fast_follow` core that gives repo-sweep's backlog a consumer — a pure
   `classify` reducer (extraction-fail-closed → literal `touched_paths` guard on
