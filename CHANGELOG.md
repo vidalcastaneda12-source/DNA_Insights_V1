@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/verify-and-merge` per batch — never an autonomous merge or ROADMAP write), a distinct
   `/fast-follow` drain-loop auto-offer line on `/verify-and-merge`'s close step, and appends
   DEC-0091..0093. The guard vocabulary is independent of verify_gate (opposite polarity) with
-  a reconciliation test. (sub-project-B / PR #TBD)
+  a reconciliation test. (sub-project-B / PR #104)
 - Add the agentic verify-and-merge gate (sub-project-A, finding-037): a fail-closed,
   DB-free `genome.verify_gate` core (three-valued `Verdict` GREEN/BLOCKED/UNKNOWN, an
   exit-code `StepStatus` parser, fail-closed evidence records, an `UNKNOWN`-dominates
