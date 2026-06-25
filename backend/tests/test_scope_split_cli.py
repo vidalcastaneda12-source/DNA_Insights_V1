@@ -226,6 +226,22 @@ def test_write_roadmap_absent_parent_slot_is_bad_parameter(tmp_path: Path) -> No
     assert roadmap.read_text(encoding="utf-8") == before
 
 
+def test_check_bad_engine_is_non_zero_exit() -> None:
+    """from: FIX-LIST ptest-7 / W1 (--engine typed as the CouplingEngine literal so Typer rejects
+    an invalid value at the boundary; the redundant manual guard + type:ignore were dropped).
+
+    A bogus ``--engine`` value fails closed with a non-zero exit and never reaches propose_split.
+    (Guards W1: the literal-typed option must still reject bad input cleanly.)
+    """
+    result = CliRunner().invoke(
+        scope_split_app,
+        ["check", "--manifest", "-", "--engine", "bogus"],
+        input=json.dumps(_atomic_manifest()),
+    )
+    assert result.exit_code != 0, result.output
+    assert not isinstance(result.exception, NotImplementedError), result.exception
+
+
 def test_dry_run_writes_no_roadmap(tmp_path: Path) -> None:
     """from: FROZEN-INTERFACE dry-run ("writes no ROADMAP") + SYNTHESIZED-PLAN §5 ("dry-run
     writes nothing").

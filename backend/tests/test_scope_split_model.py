@@ -270,3 +270,135 @@ def test_scope_s_schema_floor_lands_at_tier_two() -> None:
     # then precedent_surprise (default 0).
     tier = est_risk_tier(("schema",), (), 0, 0)
     assert tier == 2
+
+
+# ── B2: SplitResult __post_init__ rejects the illegal two-shape states ─────────
+
+
+def test_split_result_atomic_with_sub_scopes_is_rejected() -> None:
+    """from: FIX-LIST B2 (type-3: SplitResult admitted the illegal state atomic=True +
+    non-empty sub_scopes/cut_quality — a latent serialization lie against the atomic-blob
+    to_json contract). Fail-closed culture.
+
+    An ``atomic`` result carrying sub-scopes is an illegal state → ValueError at construction.
+    """
+    sub = SubScope(
+        sub_scope_id="x-s1",
+        origin_scope="x",
+        change_class=("schema",),
+        est_imports_touched=2,
+        applicable_anchors=(),
+        est_risk_tier=2,
+        depends_on=(),
+        rationale="schema slice",
+    )
+    with pytest.raises(ValueError, match="atomic"):
+        SplitResult(atomic=True, reason="atomic", sub_scopes=(sub,))
+
+
+def test_split_result_atomic_with_cut_quality_is_rejected() -> None:
+    """from: FIX-LIST B2 — an atomic result carrying ``cut_quality`` is illegal."""
+    cq = CutQuality(
+        cut_cost=0.1,
+        max_tier_before=2,
+        max_tier_after=2,
+        min_subscope_shrink=0.5,
+        clean=True,
+    )
+    with pytest.raises(ValueError, match="atomic"):
+        SplitResult(atomic=True, reason="atomic", cut_quality=cq)
+
+
+def test_split_result_non_atomic_without_sub_scopes_is_rejected() -> None:
+    """from: FIX-LIST B2 — a non-atomic (split) result with zero sub-scopes is not a split."""
+    with pytest.raises(ValueError, match="at least one sub-scope"):
+        SplitResult(atomic=False, reason="split")
+
+
+def test_split_result_legal_shapes_construct() -> None:
+    """from: FIX-LIST B2 — the two legal shapes still construct freely (the guard is not a wall)."""
+    atomic = SplitResult(atomic=True, reason="not separable")
+    assert atomic.atomic is True
+    sub = SubScope(
+        sub_scope_id="x-s1",
+        origin_scope="x",
+        change_class=("schema",),
+        est_imports_touched=2,
+        applicable_anchors=(),
+        est_risk_tier=2,
+        depends_on=(),
+        rationale="schema slice",
+    )
+    split = SplitResult(atomic=False, reason="split", sub_scopes=(sub,), order=("x-s1",))
+    assert split.atomic is False
+
+
+# ── W2: from_json validates change_class vocab + footprint-name charset ────────
+
+
+def test_from_json_rejects_unknown_change_class_label() -> None:
+    """from: FIX-LIST W2 (type-2: from_json accepted unknown change_class labels, silently
+    scored 0 by the C-map). The closed dispatcher vocab is the partition signal — an unknown
+    label is a malformed manifest, not a 0-cost class.
+
+    An unknown change_class label fails closed with ValueError at the JSON ingress.
+    """
+    with pytest.raises(ValueError, match="unknown"):
+        ScopeManifestInput.from_json(
+            {
+                "scope_id": "x",
+                "change_class": ["cli", "not-a-real-class"],
+                "blast_radius": {"imports_touched": ["genome.x.cli"]},
+            }
+        )
+
+
+def test_from_json_rejects_pathspec_magic_footprint_name() -> None:
+    """from: FIX-LIST W2 / phi-1 (unvalidated module-name strings reached the git pathspec).
+
+    A footprint entry with a leading ``-`` (option injection) or pathspec magic must be rejected
+    before it can reach a ``git grep`` pathspec.
+    """
+    with pytest.raises(ValueError, match="safe"):
+        ScopeManifestInput.from_json(
+            {
+                "scope_id": "x",
+                "change_class": ["cli"],
+                "blast_radius": {"imports_touched": ["--output=/etc/passwd"]},
+            }
+        )
+    with pytest.raises(ValueError, match="safe"):
+        ScopeManifestInput.from_json(
+            {
+                "scope_id": "x",
+                "change_class": ["cli"],
+                "blast_radius": {"imports_touched": [":(exclude)secret"]},
+            }
+        )
+
+
+def test_from_json_accepts_valid_dotted_and_path_footprint_names() -> None:
+    """from: FIX-LIST W2 — valid dotted-module AND repo-relative path entries pass the charset."""
+    manifest = ScopeManifestInput.from_json(
+        {
+            "scope_id": "x",
+            "change_class": ["cli"],
+            "blast_radius": {
+                "imports_touched": [
+                    "genome.scope_split.model",
+                    "backend/src/genome/scope_split/cli.py",
+                ]
+            },
+        }
+    )
+    assert len(manifest.imports_touched) == 2
+
+
+def test_direct_construction_skips_footprint_validation() -> None:
+    """from: FIX-LIST W2 ("Keep direct construction (tests) free").
+
+    The charset guard lives on the JSON ingress only; direct dataclass construction (the test
+    seam) is deliberately unvalidated.
+    """
+    m = ScopeManifestInput(scope_id="x", imports_touched=("--anything-goes-here",))
+    assert m.imports_touched == ("--anything-goes-here",)

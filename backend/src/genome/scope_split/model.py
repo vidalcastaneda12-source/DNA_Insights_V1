@@ -24,13 +24,13 @@ Two vocabulary decisions are load-bearing:
   re-implemented locally so the no-DB guard stays GREEN-from-freeze.
 
 The pure constructors / serializers (:meth:`ScopeManifestInput.from_json`,
-:meth:`SplitResult.to_json`, the narrowing helpers, the S-formula) are **implemented** at
-interface-freeze so their tests are GREEN-from-freeze (mech #7). The behavioral splitter
-(``genome.scope_split.splitter``) is the only thing stubbed.
+:meth:`SplitResult.to_json`, the narrowing helpers, the S-formula) and the behavioral splitter
+(``genome.scope_split.splitter``) are all **implemented** (``finding-039``).
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -164,12 +164,21 @@ class ScopeManifestInput:
             msg = "manifest is missing required field 'change_class'"
             raise ValueError(msg)
         change_class = tuple(_as_str_list(data.get("change_class")))
+        unknown = [label for label in change_class if label not in CHANGE_CLASS_VOCAB]
+        if unknown:
+            msg = (
+                f"manifest change_class has unknown label(s) {unknown!r}; expected a subset of "
+                f"{sorted(CHANGE_CLASS_VOCAB)!r}"
+            )
+            raise ValueError(msg)
 
         blast = _as_mapping(data.get("blast_radius"))
         if "imports_touched" not in blast:
             msg = "manifest is missing required field 'blast_radius.imports_touched'"
             raise ValueError(msg)
         imports_touched = tuple(_as_str_list(blast.get("imports_touched")))
+        for entry in imports_touched:
+            _validate_footprint_name(entry)
         tests_covering = tuple(_as_str_list(blast.get("tests_covering")))
 
         risk_breakdown = _as_mapping(data.get("risk_breakdown"))
@@ -316,6 +325,26 @@ class SplitResult:
     cut_quality: CutQuality | None = None
     """The cut-quality metrics (``None`` when atomic)."""
 
+    def __post_init__(self) -> None:
+        """Reject the illegal states the two-shape contract forbids (B2; fail-closed culture).
+
+        An ``atomic`` result must be empty (no sub-scopes, no order, no cut quality) — the
+        atomic-blob :meth:`to_json` contract emits exactly ``{"atomic": true, "reason": str}``, so
+        carrying sub-scopes on an atomic result is a latent serialization lie. A non-atomic result
+        must carry at least one sub-scope (a split with zero sub-scopes is not a split). Either
+        violation is a constructor bug → :class:`ValueError` (raised once at construction; frozen).
+        """
+        if self.atomic and (self.sub_scopes or self.order or self.cut_quality is not None):
+            msg = (
+                "atomic SplitResult must be empty: sub_scopes/order/cut_quality must be unset "
+                f"(got {len(self.sub_scopes)} sub_scopes, {len(self.order)} order entries, "
+                f"cut_quality={'set' if self.cut_quality is not None else 'None'})"
+            )
+            raise ValueError(msg)
+        if not self.atomic and not self.sub_scopes:
+            msg = "non-atomic SplitResult must carry at least one sub-scope"
+            raise ValueError(msg)
+
     def to_json(self) -> dict[str, object]:
         """Serialize to a JSON-ready mapping (two-branch, mech #3).
 
@@ -422,6 +451,33 @@ def est_risk_tier(
     floor = 2 if (structural or len(applicable_anchors) >= 1) else 0
     s = scope_S(change_class, imports_touched, precedent_surprise)
     return max(floor, tier_from_S(s))
+
+
+# ── Footprint-name validation (the git-pathspec safety guard, W2 / phi-1) ─────
+
+#: A footprint module name (dotted module OR repo-relative source path) must match this safe
+#: charset before it can reach the ``git grep`` pathspec. Letters, digits, ``_``, ``.``, ``/``,
+#: ``-`` only — and the first character may not be ``-`` (a leading dash is option-injection) or
+#: any pathspec-magic character (``:`` introduces a ``:(magic)`` pathspec). Anchored end-to-end.
+_FOOTPRINT_NAME_RE = re.compile(r"^[A-Za-z0-9_.][A-Za-z0-9_./-]*$")
+
+
+def _validate_footprint_name(name: str) -> None:
+    """Reject a footprint name that is unsafe to hand to a ``git grep`` pathspec (W2 / phi-1).
+
+    A footprint entry is either a dotted module (``genome.scope_split.model``) or a repo-relative
+    path (``backend/src/genome/scope_split/model.py``). Anything outside :data:`_FOOTPRINT_NAME_RE`
+    — an empty string, a leading ``-`` (option injection), a ``:`` (pathspec magic), whitespace, a
+    shell metacharacter — raises :class:`ValueError` at the :meth:`ScopeManifestInput.from_json`
+    boundary, so an unvalidated string never reaches the subprocess. Direct construction (the test
+    seam) is deliberately left free of this check (the contract validates the JSON ingress only).
+    """
+    if not _FOOTPRINT_NAME_RE.match(name):
+        msg = (
+            f"manifest imports_touched entry {name!r} is not a safe dotted-module or "
+            f"repo-relative path (allowed charset [A-Za-z0-9_./-], no leading '-' or ':')"
+        )
+        raise ValueError(msg)
 
 
 # ── Strict JSON narrowing (no ``Any`` leak across the serialization seam) ─────

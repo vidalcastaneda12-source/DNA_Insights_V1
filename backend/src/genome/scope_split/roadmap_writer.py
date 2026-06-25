@@ -1,18 +1,17 @@
-"""Append-only ROADMAP managed-block writer for scope-split (``finding-039``; plan §4 §7).
+"""Managed-region ROADMAP block writer for scope-split (``finding-039``; plan §4 §7).
 
-``append_roadmap_block`` is a **pure string transform**: given the current ROADMAP text and a
-rendered block, it replaces only the region between the
-``<!-- B2-SUBSCOPES:BEGIN -->`` / ``<!-- B2-SUBSCOPES:END -->`` sentinels, leaving every
+``append_roadmap_block`` is a **pure string transform** — a managed-region replace, not a blind
+append: given the current ROADMAP text and a rendered block, it replaces only the region between
+the ``<!-- B2-SUBSCOPES:BEGIN -->`` / ``<!-- B2-SUBSCOPES:END -->`` sentinels, leaving every
 hand-authored line untouched. The CLI does the read / call / write-if-changed around it
 (mirroring how :mod:`genome.fast_follow.persistence` keeps I/O out of the pure core); the
 transform itself is byte-idempotent (mech #9) so a re-run with the same block is a no-op.
 
-A ROADMAP missing the managed slot or the sentinels raises rather than appending blindly — the
+A ROADMAP missing the managed slot or the sentinels raises rather than writing blindly — the
 clobber guard (plan failure-ordering (b)).
 
-**No** :mod:`genome.db` import. The transform body is **stubbed** at interface-freeze
-(``raise NotImplementedError``); the three constants are real (the sentinels the parser keys on
-and the default path).
+**No** :mod:`genome.db` import. The transform body is **implemented** (``finding-039``); the
+three constants are real (the sentinels the parser keys on and the default path).
 """
 
 from __future__ import annotations
@@ -31,7 +30,7 @@ DEFAULT_ROADMAP_PATH: Path = Path("ROADMAP.md")
 
 
 def append_roadmap_block(roadmap_text: str, block: str, *, origin_scope: str) -> str:
-    """Splice ``block`` into the ROADMAP managed region — a pure, idempotent transform (plan §4).
+    """Splice ``block`` into the ROADMAP managed region — a managed-region replace, idempotent (§4).
 
     Replaces the text between :data:`BLOCK_BEGIN` and :data:`BLOCK_END` with ``block``, normalized
     to a canonical inter-sentinel form so the result is byte-idempotent regardless of the parent's

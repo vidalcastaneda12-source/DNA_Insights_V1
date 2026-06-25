@@ -9,9 +9,8 @@ its sentinels.
 **No** :mod:`genome.db` import. **No anchor magnitudes hard-coded in this module's source**
 (plan §6): every number in the output originates from the result at runtime.
 
-This file is a **stub** for the interface-freeze step: every render body raises
-:class:`NotImplementedError` so plan-blind tests are honestly RED. The two literal constants are
-real (the sentinel / header the doc-consistency + dry-run tests key on).
+Both render bodies are **implemented** (``finding-039``). The two literal constants are real
+(the sentinel / header the doc-consistency + dry-run tests key on).
 """
 
 from __future__ import annotations
@@ -83,8 +82,8 @@ def format_roadmap_block(
     """Render the split as the ROADMAP managed-block body (plan §4).
 
     The string :mod:`genome.scope_split.roadmap_writer` splices between its
-    ``<!-- B2-SUBSCOPES:BEGIN -->`` / ``:END`` sentinels: an append-only block of one ``- [ ]``
-    slot per sub-scope in topo order, each recording its ``origin_scope`` (provenance,
+    ``<!-- B2-SUBSCOPES:BEGIN -->`` / ``:END`` sentinels (a managed-region replace, idempotent):
+    one ``- [ ]`` slot per sub-scope in topo order, each recording its ``origin_scope`` (provenance,
     locked decision #8 — taken from the sub-scope, which always equals ``origin_scope``). Atomic →
     the empty string (nothing to write).
     """

@@ -17,15 +17,25 @@ test->spec provenance noted per test for the Stage-3 test-integrity lens.
 
 from __future__ import annotations
 
+import re
+import subprocess
+from typing import TYPE_CHECKING
+
 import pytest
 
+from genome.scope_split import graph as graph_mod
 from genome.scope_split.graph import (
     CouplingGraph,
     CouplingGraphBuilder,
     GitGrepCouplingBuilder,
     StaticCouplingBuilder,
+    _import_pattern,
+    _path_to_module,
     make_coupling_builder,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 # ── CouplingGraph.weakly_connected_components (pure, GREEN) ────────────────────
 
@@ -169,3 +179,183 @@ def test_git_grep_builder_build_returns_graph_over_requested_modules() -> None:
     graph = builder.build(modules)
     assert isinstance(graph, CouplingGraph)
     assert graph.nodes == frozenset(modules)
+
+
+# ── B1 regression: file-path manifest must still yield a real import edge ──────
+
+
+def test_git_grep_builder_file_path_manifest_yields_weight_one_edge() -> None:
+    """from: FIX-LIST B1 (the coupling veto was DEAD on real file-path manifests — the import
+    regex was built from the FILE-PATH string, never matching a real ``import genome.x.y`` line).
+
+    The Stage-0 dispatcher manifest carries footprint entries as repo-relative FILE PATHS, not
+    dotted module names. ``splitter.py`` imports ``model``, so a build over the two file paths MUST
+    surface that as a weight-1.0 undirected edge — proof the veto sees real coupling. Before the
+    B1 fix this returned ``frozenset()`` (a dead veto). This guards the fix from regressing.
+    """
+    builder = GitGrepCouplingBuilder(repo_root=".")
+    paths = (
+        "backend/src/genome/scope_split/splitter.py",
+        "backend/src/genome/scope_split/model.py",
+    )
+    graph = builder.build(paths)
+    assert graph.edges, "file-path manifest produced no edge — the coupling veto is dead (B1)"
+    a, b = sorted(paths)
+    assert (a, b, 1.0) in graph.edges
+
+
+def test_path_to_module_inverts_module_to_path() -> None:
+    """from: FIX-LIST B1 (path→module normalization for the import regex).
+
+    A repo-relative ``backend/src`` path maps to its dotted module name; a name that is already
+    dotted passes through unchanged (the manifest may carry either shape).
+    """
+    assert _path_to_module("backend/src/genome/scope_split/model.py") == "genome.scope_split.model"
+    assert _path_to_module("genome.scope_split.model") == "genome.scope_split.model"
+
+
+# ── W6: the three import forms the _import_pattern alternation must match ──────
+
+
+def test_import_pattern_matches_all_three_import_forms() -> None:
+    """from: FIX-LIST W6 (ptest-6: the 3 import forms in ``_import_pattern`` were untested).
+
+    The pattern is built from a DOTTED module name (post-B1) and must match ``import x.y``,
+    ``from x.y import Z``, and the relative ``from .y import Z`` — but NOT an unrelated line. This
+    also guards B1 from regressing (a pattern built from a file path would match none of these).
+    """
+    pattern = re.compile(_import_pattern("genome.scope_split.model"))
+    assert pattern.search("import genome.scope_split.model")
+    assert pattern.search("from genome.scope_split.model import ScopeManifestInput")
+    assert pattern.search("from .model import ScopeManifestInput")
+    assert not pattern.search("import genome.scope_split.graph")
+    assert not pattern.search("# a comment mentioning genome.scope_split.model in prose")
+
+
+# ── type-4: CouplingGraph canonicalizes reversed-edge duplicates ──────────────
+
+
+def test_coupling_graph_canonicalizes_reversed_edge_duplicate() -> None:
+    """from: FIX-LIST type-4 (a reversed-edge duplicate could double-count cut_cost).
+
+    ``(b, a, w)`` is the same undirected edge as ``(a, b, w)``. Construction must collapse the
+    two to one canonical ``a < b`` triple with summed weight, so ``cut_cost`` cannot
+    double-count the severed weight.
+    """
+    g = CouplingGraph(
+        nodes=frozenset({"a", "b"}),
+        edges=frozenset({("a", "b", 0.5), ("b", "a", 0.5)}),
+    )
+    assert g.edges == frozenset({("a", "b", 1.0)})
+    # The single canonical edge severs to exactly 1.0 (not 2.0/2.0 double-count artifact).
+    assert g.cut_cost((frozenset({"a"}), frozenset({"b"}))) == pytest.approx(1.0)
+
+
+def test_coupling_graph_drops_self_loop() -> None:
+    """from: FIX-LIST type-4 (canonical-ordering normalization).
+
+    A self-loop (``a == b``) cannot be severed by any partition; construction drops it.
+    """
+    g = CouplingGraph(nodes=frozenset({"a", "b"}), edges=frozenset({("a", "a", 0.9)}))
+    assert g.edges == frozenset()
+
+
+# ── GitGrepCouplingBuilder returncode handling (mech #1) ──────────────────────
+
+
+class _FakeCompleted:
+    """A minimal stand-in for ``subprocess.CompletedProcess`` for the monkeypatched runs."""
+
+    def __init__(self, *, returncode: int, stdout: str = "", stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_git_grep_returncode_two_raises_runtime_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """from: FIX-LIST B5 (ptest-3: returncode>=2 → RuntimeError was untested) + mech #1.
+
+    A ``git grep`` returncode of 2 (a real error, not "no matches") must raise a RuntimeError that
+    references the returncode — never a silently-swallowed zero count.
+    """
+
+    def _fake_run(_argv: Sequence[str], **_kwargs: object) -> _FakeCompleted:
+        return _FakeCompleted(returncode=2, stderr="fatal: bad revision")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    builder = GitGrepCouplingBuilder(repo_root=".")
+    with pytest.raises(RuntimeError, match="2"):
+        builder.build(("genome.a", "genome.b"))
+
+
+def test_git_grep_returncode_one_is_zero_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    """from: FIX-LIST ptest-4 (returncode=1 → 0-count) + mech #1 ("1 = ran, no matches").
+
+    Returncode 1 means ``git grep`` ran and found no matches — an isolated node, not an error:
+    the build returns a graph with the nodes but no edges.
+    """
+
+    def _fake_run(_argv: Sequence[str], **_kwargs: object) -> _FakeCompleted:
+        return _FakeCompleted(returncode=1)
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    builder = GitGrepCouplingBuilder(repo_root=".")
+    graph = builder.build(("genome.a", "genome.b"))
+    assert graph.nodes == frozenset({"genome.a", "genome.b"})
+    assert graph.edges == frozenset()
+
+
+def test_git_grep_returncode_zero_match_yields_edge(monkeypatch: pytest.MonkeyPatch) -> None:
+    """from: FIX-LIST ptest-9 (returncode=0 match → edge weight) + mech #1.
+
+    Returncode 0 with a ``path:count`` line is a match: the directed counts sum into one
+    undirected edge whose weight is the total match count.
+    """
+
+    def _fake_run(_argv: Sequence[str], **_kwargs: object) -> _FakeCompleted:
+        return _FakeCompleted(returncode=0, stdout="some/path.py:3\n")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    builder = GitGrepCouplingBuilder(repo_root=".")
+    graph = builder.build(("genome.a", "genome.b"))
+    # Both directions match (3 each) → one undirected edge with summed weight 6.0.
+    assert graph.edges == frozenset({("genome.a", "genome.b", 6.0)})
+
+
+def test_git_grep_nonexistent_path_does_not_raise(monkeypatch: pytest.MonkeyPatch) -> None:
+    """from: FIX-LIST NEW-1 (the ``--`` was BEFORE the pattern → ``git grep`` parsed a
+    NONEXISTENT path as a revision → returncode 128 → RuntimeError → crash; a manifest naming a
+    not-yet-created module is a DOCUMENTED input, so the SAFETY INVARIANT requires fail-closed,
+    never crash). FIX: ``--`` AFTER the pattern → a nonexistent path is a clean no-match
+    (returncode 1 → 0 count → isolated node).
+
+    The live ``git grep`` builder over a footprint that includes a REAL module and a NONEXISTENT
+    module path must return a CouplingGraph (the nonexistent module an isolated node, no edge to
+    it) and must NOT raise. Uses ``check=False`` real ``git grep`` (no monkeypatch of subprocess)
+    to exercise the actual argv ordering that NEW-1 fixed.
+    """
+    monkeypatch.setattr(graph_mod.shutil, "which", lambda _name: "/usr/bin/git")
+    builder = GitGrepCouplingBuilder(repo_root=".")
+    real = "backend/src/genome/scope_split/model.py"
+    ghost = "backend/src/genome/scope_split/does_not_exist_yet.py"
+    graph = builder.build((real, ghost))
+    assert isinstance(graph, CouplingGraph)
+    assert graph.nodes == frozenset({real, ghost})
+    # The nonexistent module is isolated: no edge mentions it.
+    assert all(ghost not in (a, b) for (a, b, _w) in graph.edges)
+
+
+def test_git_grep_missing_git_binary_raises_runtime_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """from: FIX-LIST W3 (silent-2: missing ``git`` binary → uncaught FileNotFoundError).
+
+    When ``git`` is not on PATH the build fails closed with a clean RuntimeError naming git, not a
+    raw FileNotFoundError traceback.
+    """
+    monkeypatch.setattr(graph_mod.shutil, "which", lambda _name: None)
+    builder = GitGrepCouplingBuilder(repo_root=".")
+    with pytest.raises(RuntimeError, match="git"):
+        builder.build(("genome.a", "genome.b"))

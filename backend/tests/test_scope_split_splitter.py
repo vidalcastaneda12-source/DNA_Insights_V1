@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import pytest
 
-from genome.scope_split.graph import StaticCouplingBuilder
+from genome.scope_split.graph import StaticCouplingBuilder, make_coupling_builder
 from genome.scope_split.model import (
     MAX_CUT_COST,
     MAX_RESPLIT_DEPTH,
@@ -31,6 +31,7 @@ from genome.scope_split.model import (
     SCHEMA_FIRST_ORDER,
     ScopeManifestInput,
     SplitResult,
+    est_risk_tier,
 )
 from genome.scope_split.splitter import propose_split
 
@@ -96,21 +97,18 @@ def test_single_change_class_group_is_atomic() -> None:
 # ── table case (b): 2 separable groups + no high-coupling edge → split ─────────
 
 
-def test_two_separable_groups_no_high_edge_splits_into_two() -> None:
+def test_two_separable_groups_light_bridge_splits_into_two() -> None:
     """from: DECISION 1 (manifest-primary: schema/ddl vs cli vs tests are separable AND
-    ordered) + reduction steps 2-5 + table case (b) ("2 separable change_class groups + no
-    severing high-coupling edge → atomic False, 2 sub_scopes").
+    ordered) + reduction steps 2-5 + FIX-LIST NEW-2 (the veto must DISCRIMINATE: a LIGHT
+    inter-cluster bridge amid heavy intra-cluster edges → cut SURVIVES → 2 sub_scopes).
 
-    Two manifest change_class boundaries (schema vs cli) with only a LOW (severable) inter-
-    cluster edge survive the coupling veto and the quality gate → a non-atomic 2-sub-scope
-    split. (RED-until-filled.)
+    Two manifest change_class boundaries (schema vs cli), each internally HEAVY (so the total
+    coupling weight is dominated by intra-cluster edges), joined by a single LIGHT bridge. The
+    whole-partition severed fraction is ``_LOW / (2*_HIGH + _LOW)`` ≈ 0.06, well under
+    MAX_CUT_COST (0.25), so ``cut_cost(partition) <= MAX_CUT_COST`` → the veto permits the cut →
+    a non-atomic 2-sub-scope split. This is the light-survives half of the NEW-2 discrimination
+    proof (the heavy-vetoes half is ``test_heavy_cross_bridge_vetoes_the_cut_to_atomic``).
     """
-    # Two tight, fully-decoupled real slices: a schema slice (ddl/*) internally connected, and a
-    # cli slice (paths containing 'cli') internally connected, with NO inter-cluster edge — the
-    # textbook separable shape. Each slice is one weakly-connected component; the change_class
-    # boundary (schema vs cli) is the manifest-primary partition (DECISION 1). No OOSC → exactly
-    # 2 candidate clusters. Splitting strictly shrinks summed est work (each 2-module slice < the
-    # 4-module parent).
     schema_nodes = ("ddl/group_x.sql", "ddl/group_y.sql")
     cli_nodes = ("genome/x/cli.py", "genome/x/cli_commands.py")
     m = _manifest(
@@ -124,6 +122,8 @@ def test_two_separable_groups_no_high_edge_splits_into_two() -> None:
             {
                 ("ddl/group_x.sql", "ddl/group_y.sql", _HIGH),
                 ("genome/x/cli.py", "genome/x/cli_commands.py", _HIGH),
+                # One LIGHT cross-cluster bridge amid the heavy intra edges.
+                ("ddl/group_x.sql", "genome/x/cli.py", _LOW),
             }
         ),
     )
@@ -174,28 +174,40 @@ def test_dependency_chain_orders_schema_first() -> None:
 # ── table case (d): high-coupling edge severed → veto → atomic ────────────────
 
 
-def test_high_coupling_edge_vetoes_the_cut_to_atomic() -> None:
-    """from: DECISION 1 (coupling VETO: "a cut survives only if no severed edge exceeds the
-    coupling threshold") + reduction step 3 ("severed inter-cluster edge weight > MAX_CUT_COST →
-    veto … collapse to <MIN_CLUSTERS → atomic 'coupling vetoes the cut — PR-3/PR-5a rule'") +
+def test_heavy_cross_bridge_vetoes_the_cut_to_atomic() -> None:
+    """from: DECISION 1 (coupling VETO: a cut is permitted only when it does not sever too much
+    coupling) + FIX-LIST NEW-2 (the veto gates on the WHOLE-PARTITION fraction
+    ``cut_cost(partition) > MAX_CUT_COST``; the heavy-vetoes half of the discrimination proof) +
     table case (d).
 
-    Two manifest groups that the import graph couples HEAVILY (edge weight > MAX_CUT_COST) must
-    NOT land in different sub-scopes: the veto fuses them below MIN_CLUSTERS → atomic.
-    (RED-until-filled.)
+    Two manifest groups (schema vs cli) with realistic intra-cluster edges, but DOMINATED by a
+    heavy cross-cluster bridge: the severed fraction is ``_HIGH / (_LOW + _LOW + _HIGH)`` ≈ 0.75,
+    far above MAX_CUT_COST (0.25), so ``cut_cost(partition) > MAX_CUT_COST`` → the veto fires →
+    atomic. (Contrast ``test_two_separable_groups_light_bridge_splits_into_two``: same shapes,
+    light vs heavy bridge → opposite verdict — the veto DISCRIMINATES.)
     """
+    schema_nodes = ("ddl/group_x.sql", "ddl/group_y.sql")
+    cli_nodes = ("genome/x/cli.py", "genome/x/cli_commands.py")
     m = _manifest(
         scope_id="PR-W",
         change_class=("schema", "cli"),
-        imports_touched=("ddl.group_x", "genome.x.cli"),
-        out_of_scope_candidates=("naively the cli slice looks separable",),
+        imports_touched=schema_nodes + cli_nodes,
     )
     builder = _builder(
-        nodes=frozenset({"ddl.group_x", "genome.x.cli"}),
-        edges=frozenset({("ddl.group_x", "genome.x.cli", _HIGH)}),
+        nodes=frozenset(schema_nodes + cli_nodes),
+        edges=frozenset(
+            {
+                # LIGHT intra-cluster edges …
+                ("ddl/group_x.sql", "ddl/group_y.sql", _LOW),
+                ("genome/x/cli.py", "genome/x/cli_commands.py", _LOW),
+                # … dominated by a HEAVY cross-cluster bridge → severed fraction > 0.25.
+                ("ddl/group_x.sql", "genome/x/cli.py", _HIGH),
+            }
+        ),
     )
     result = propose_split(m, builder)
     assert result.atomic is True
+    assert "coupling" in result.reason.lower()
 
 
 # ── table case (e): split that doesn't shrink total work → atomic ─────────────
@@ -378,6 +390,154 @@ def test_degenerate_inputs_never_produce_a_non_atomic_split(
     assert result.atomic is True, f"{label}: degenerate input produced a non-atomic split"
     assert result.sub_scopes == ()
     assert result.cut_quality is None
+
+
+# ── B4: SHARED_HELPER_FANIN infra-drop isolates the cut ───────────────────────
+
+
+def test_infra_helper_drop_lets_the_cut_survive() -> None:
+    """from: FIX-LIST B4 (ptest-1: the SHARED_HELPER_FANIN infra-drop was not isolated by any
+    test) + DECISION 1 ("Drop shared infra-helpers from the graph … a shared dependency does not
+    fuse otherwise-independent clusters").
+
+    A shared module with fan-in >= SHARED_HELPER_FANIN (3) is dropped from the veto graph. Here it
+    has HIGH-weight edges spanning BOTH the schema cluster and the cli cluster. WITHOUT the drop
+    those inter-cluster edges fuse the two clusters → atomic; WITH the drop (fan-in 3) the shared
+    node and its edges vanish, no heavy inter-cluster edge remains, and the 2-cluster cut survives.
+    """
+    schema_nodes = ("ddl.a", "ddl.shared")
+    cli_nodes = ("genome.x.cli", "genome.x.cli2")
+    m = _manifest(
+        scope_id="PR-INFRA",
+        change_class=("schema", "cli"),
+        imports_touched=schema_nodes + cli_nodes,
+    )
+    # ddl.shared couples to a node in EACH cluster + one more → fan-in 3 → infra → dropped.
+    builder = _builder(
+        nodes=frozenset(schema_nodes + cli_nodes),
+        edges=frozenset(
+            {
+                ("ddl.a", "ddl.shared", _HIGH),
+                ("ddl.shared", "genome.x.cli", _HIGH),
+                ("ddl.shared", "genome.x.cli2", _HIGH),
+            }
+        ),
+    )
+    result = propose_split(m, builder)
+    assert result.atomic is False, "infra-drop should let the cut survive (B4)"
+    assert len(result.sub_scopes) == 2
+
+
+def test_non_infra_shared_node_below_fanin_still_fuses() -> None:
+    """from: FIX-LIST B4 (the contrast that proves the drop is load-bearing) + DECISION 1
+    (SHARED_HELPER_FANIN = 3 is the infra threshold).
+
+    The same heavy inter-cluster edge, but the shared node has fan-in 2 (< SHARED_HELPER_FANIN),
+    so it is NOT infra and is NOT dropped. The heavy edge therefore fuses the two clusters below
+    MIN_CLUSTERS → atomic. This isolates the drop: only fan-in >= 3 saves the cut.
+    """
+    schema_nodes = ("ddl.a", "ddl.shared")
+    cli_nodes = ("genome.x.cli", "genome.x.cli2")
+    m = _manifest(
+        scope_id="PR-FUSE",
+        change_class=("schema", "cli"),
+        imports_touched=schema_nodes + cli_nodes,
+    )
+    # ddl.shared couples to only 2 peers → fan-in 2 → NOT infra → kept → heavy edge fuses.
+    builder = _builder(
+        nodes=frozenset(schema_nodes + cli_nodes),
+        edges=frozenset(
+            {
+                ("ddl.a", "ddl.shared", _HIGH),
+                ("ddl.shared", "genome.x.cli", _HIGH),
+            }
+        ),
+    )
+    result = propose_split(m, builder)
+    assert result.atomic is True
+
+
+# ── B3: the min_subscope_shrink quality-gate branch (step 5) ──────────────────
+
+
+def test_quality_gate_rejects_insufficient_shrink() -> None:
+    """from: FIX-LIST B3 (ptest-2: the min_subscope_shrink < MIN quality-gate branch at step 5
+    was NEVER reached — every prior no-shrink case exited earlier at the partition step) +
+    DECISION 1 quality gate ("every sub-scope shrink >= MIN_SUBSCOPE_SHRINK").
+
+    Two declared change classes (schema, cli) over 10 modules: 9 key to schema, 1 to cli. The
+    partition yields 2 clusters (so step 3 passes), no heavy edge survives the veto (step 4
+    passes), the topo order is acyclic (step 5 passes) — but the schema cluster is 9/10 = 0.90 of
+    the parent, so its shrink is 0.10 < MIN_SUBSCOPE_SHRINK (0.34) → the quality gate fires and
+    returns atomic, naming the shrink metric. This is the previously-dead step-5 branch.
+    """
+    schema_nodes = tuple(f"ddl.group_{i}" for i in range(9))
+    cli_nodes = ("genome.x.cli",)
+    m = _manifest(
+        scope_id="PR-SHRINK",
+        change_class=("schema", "cli"),
+        imports_touched=schema_nodes + cli_nodes,
+    )
+    result = propose_split(m, _empty_builder())
+    assert result.atomic is True
+    # The quality-gate branch — not the partition / veto branch — is what fired.
+    assert "shrink" in result.reason.lower()
+
+
+# ── W5: the max_tier_after <= max_tier_before term (DEFENSIVE — structurally unreachable) ──
+
+
+def test_subscope_tier_never_exceeds_recomputed_parent_tier() -> None:
+    """from: FIX-LIST W5 (ptest-5: the max_tier_after > max_tier_before branch was untested) +
+    DECISION 1 ("REMOVE the hard max_tier_after < max_tier_before term … structurally
+    unsatisfiable against the dispatcher's max-not-min tier floors").
+
+    NON-ISSUE re-classification (implementer judgment, escalated in the report): with the parent
+    tier recomputed over the union of all clusters (``_parent_tier``), every sub-cluster is a
+    subset of the parent in change-class / footprint / anchors, so its re-scored tier can NEVER
+    exceed the parent's. The ``max_tier_after > max_tier_before`` branch is therefore structurally
+    unreachable (a brute scan over every class combination / size confirms zero violations) — the
+    same family as ptest-8. Rather than contort an impossible input, this test pins the underlying
+    monotonicity invariant the branch defends, and the branch carries ``# pragma: no cover -
+    structurally unreachable (defensive)``.
+
+    The invariant: for any single-class subset cluster (smaller footprint, ⊆ anchors), its
+    ``est_risk_tier`` is ≤ the parent tier computed over the union.
+    """
+    parent_change = ("schema", "cli", "tests")
+    parent_anchors = ()  # schema present → structural floor already applies to parent
+    parent_size = 12
+    parent_tier = est_risk_tier(parent_change, parent_anchors, parent_size)
+    for cluster_class in parent_change:
+        for cluster_size in range(1, parent_size):
+            cluster_anchors = parent_anchors if cluster_class in {"schema", "ddl"} else ()
+            cluster_tier = est_risk_tier((cluster_class,), cluster_anchors, cluster_size)
+            assert cluster_tier <= parent_tier, (
+                f"{cluster_class}/{cluster_size} re-scored to {cluster_tier} > parent {parent_tier}"
+            )
+
+
+def test_propose_split_nonexistent_module_returns_result_never_raises() -> None:
+    """from: FIX-LIST NEW-1 (a planning manifest naming NOT-YET-CREATED modules is a documented
+    input — golden-fixture freshness_flag 'spec-references-non-existent-code'; the old ``--``
+    placement made the live git-grep builder crash with RuntimeError on such a path, violating
+    the SAFETY INVARIANT 'uncertainty → atomic, never crash').
+
+    Driven through the PUBLIC propose_split with the REAL git-grep builder over a manifest whose
+    footprint includes a nonexistent module path. The result MUST be a SplitResult (atomic or
+    split per the rest of the reduction) and propose_split MUST NOT raise RuntimeError.
+    """
+    m = _manifest(
+        scope_id="PR-GHOST",
+        change_class=("schema", "cli"),
+        imports_touched=(
+            "backend/src/genome/scope_split/model.py",
+            "backend/src/genome/scope_split/does_not_exist_yet.py",
+        ),
+    )
+    builder = make_coupling_builder("git-grep")
+    result = propose_split(m, builder)  # must not raise
+    assert isinstance(result, SplitResult)
 
 
 def test_min_clusters_constant_is_two() -> None:

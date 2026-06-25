@@ -8,19 +8,21 @@ fail-closed splitter core:
 * ``scope-split dry-run`` — scan + propose only: creates nothing, writes no ROADMAP, runs no
   ``/scope-run``. Prints the literal ``would create N sub-scopes`` or ``atomic — no split``.
 * ``scope-split write-roadmap`` — read / pure-transform / write-if-changed the ROADMAP managed
-  block (append-only). Atomic → echoes the sentinel, writes nothing.
+  block (managed-region replace, idempotent). Atomic → echoes the sentinel, writes nothing.
 
 Every command's ``--manifest`` accepts a filesystem path **or** ``-`` (stdin), since
-``/scope-run`` threads the manifest as in-prompt JSON, never a file (arch-1 seam).
+``/scope-run`` threads the manifest as in-prompt JSON, never a file (arch-1 seam). ``--engine``
+is typed as the :data:`~genome.scope_split.graph.CouplingEngine` literal, so Typer rejects an
+invalid value at the boundary with a clean non-zero exit.
 
 **No** :mod:`genome.db` import. This module (and everything it pulls in) imports no
 :mod:`genome.db`, so the splitter core stays runnable on a fresh checkout (plan §3); the
 ``genome`` root CLI registers this sub-app eagerly, with the DB-free guarantee carried by the
 package-local clean-subprocess test, not lazy import.
 
-This file is a **stub** for the interface-freeze step: every command body raises
-:class:`NotImplementedError` so plan-blind tests are honestly RED (never ``ImportError``). The
-helper signatures + ``--manifest`` parsing seam are the frozen contract.
+All three command bodies are **implemented** (``finding-039``): they read the manifest, run
+:func:`~genome.scope_split.splitter.propose_split`, and print / splice the proposal. The helper
+signatures + ``--manifest`` parsing seam are the frozen contract.
 """
 
 from __future__ import annotations
@@ -88,9 +90,11 @@ _ManifestOption = Annotated[
 ]
 
 #: The ``--engine`` option type, shared by ``check`` / ``dry-run``. Selects the coupling-graph
-#: builder; ``static`` is the no-scan test seam.
+#: builder; ``static`` is the no-scan test seam. Typed as the :data:`CouplingEngine` literal so
+#: Typer rejects an invalid value at the boundary (non-zero exit) and ``_make_builder`` needs no
+#: redundant guard or ``# type: ignore`` (W1).
 _EngineOption = Annotated[
-    str,
+    CouplingEngine,
     typer.Option(
         "--engine",
         help="Coupling-graph engine: 'auto' (default) | 'git-grep' | 'static'.",
@@ -136,17 +140,15 @@ def _load_manifest(manifest: str) -> ScopeManifestInput:
         raise typer.BadParameter(msg) from exc
 
 
-def _make_builder(engine: str) -> CouplingGraphBuilder:
-    """Build the coupling-graph builder for ``engine`` or raise a clean ``typer.BadParameter``.
+def _make_builder(engine: CouplingEngine) -> CouplingGraphBuilder:
+    """Build the coupling-graph builder for ``engine`` via :func:`make_coupling_builder`.
 
-    Narrows the free-text ``--engine`` value through :func:`make_coupling_builder`; an unknown
-    engine raises a non-zero ``typer.BadParameter`` rather than an uncaught crash.
+    ``engine`` is already narrowed to the :data:`CouplingEngine` literal by Typer at the CLI
+    boundary (an invalid ``--engine`` value exits non-zero before this is reached), so no manual
+    unknown-engine guard is needed here (W1) — :func:`make_coupling_builder` still raises
+    :class:`ValueError` on any value outside the literal as a defense-in-depth fallback.
     """
-    if engine not in ("auto", "git-grep", "static"):
-        msg = f"unknown engine {engine!r}; expected 'auto', 'git-grep', or 'static'"
-        raise typer.BadParameter(msg)
-    selected: CouplingEngine = engine  # type: ignore[assignment]
-    return make_coupling_builder(selected)
+    return make_coupling_builder(engine)
 
 
 @scope_split_app.command("check")
@@ -216,7 +218,7 @@ def write_roadmap_cmd(
         typer.Option("--roadmap", help="Path to the ROADMAP.md to splice the managed block into."),
     ] = Path("ROADMAP.md"),
 ) -> None:
-    """Splice the proposed sub-scopes into the ROADMAP managed block (append-only; plan §4).
+    """Splice the proposed sub-scopes into the ROADMAP managed block (managed-region replace; §4).
 
     Reads the ROADMAP, runs the pure :func:`append_roadmap_block` transform, and writes only when
     the text changed (byte-idempotent). Atomic → echoes the sentinel and writes nothing; a

@@ -12,7 +12,7 @@ import each other heavily. This module holds:
 * :class:`StaticCouplingBuilder` — the **test seam**: a no-scan builder over explicit
   nodes+edges, fully implemented (mech #7).
 * :class:`GitGrepCouplingBuilder` — the real engine that shells out to ``git grep`` to derive
-  import edges. Its :meth:`build` is **stubbed** (behavioral; filled later).
+  import edges (implemented; see ``finding-039``).
 * :func:`make_coupling_builder` — the engine-selection factory mirroring ``make_liftover``.
 
 **No** :mod:`genome.db` import. ``python -c "import genome.scope_split.graph"`` must run on a
@@ -23,6 +23,7 @@ clean-subprocess test.
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 from dataclasses import dataclass
 from typing import Literal, Protocol, runtime_checkable
@@ -52,6 +53,26 @@ class CouplingGraph:
     """The footprint module names (the graph vertices)."""
     edges: frozenset[tuple[str, str, float]]
     """Undirected weighted edges as ``(a, b, weight)`` with ``a < b`` canonical ordering."""
+
+    def __post_init__(self) -> None:
+        """Normalize every edge to canonical ``a < b`` ordering, summing reversed duplicates.
+
+        The graph is undirected, so ``(b, a, w)`` is the same edge as ``(a, b, w)``. Without
+        canonicalization a reversed-edge duplicate would be counted twice by :meth:`cut_cost`
+        (double-counting the severed weight) and would survive as two distinct frozenset members.
+        This collapses each edge to its ``min < max`` endpoint order and adds the weights of any
+        two triples that name the same unordered pair (type-4 fix). A self-loop (``a == b``) is
+        dropped — it cannot be severed by any partition. Runs once at construction (frozen).
+        """
+        merged: dict[tuple[str, str], float] = {}
+        for raw_a, raw_b, weight in self.edges:
+            if raw_a == raw_b:
+                continue
+            a, b = sorted((raw_a, raw_b))
+            merged[a, b] = merged.get((a, b), 0.0) + weight
+        canonical = frozenset((a, b, weight) for (a, b), weight in merged.items())
+        if canonical != self.edges:
+            object.__setattr__(self, "edges", canonical)
 
     def weakly_connected_components(self) -> tuple[frozenset[str], ...]:
         """Return the connected components as a tuple of node sets (pure; union-find).
@@ -173,8 +194,9 @@ class GitGrepCouplingBuilder:
     fan-in. Keeping the engine raw makes its output testable against an on-disk fixture without
     smuggling policy into the scan.
 
-    The ``git grep`` invocation uses a fixed-literal argv (``# noqa: S603, S607``); a returncode
-    of 0 (matched) or 1 (ran, no matches → isolated) is success, ≥2 is an error → raise (mech #1).
+    The ``git grep`` invocation uses a fixed-literal argv (``# noqa: S603`` on the
+    :func:`subprocess.run` call); a returncode of 0 (matched) or 1 (ran, no matches → isolated) is
+    success, ≥2 is an error → raise (mech #1).
     """
 
     repo_root: str = "."
@@ -186,7 +208,13 @@ class GitGrepCouplingBuilder:
         Nodes are exactly the requested ``modules``. For each ordered pair, count how many import
         sites of one module appear in the other's file via ``git grep -c`` over the three import
         forms; sum both directions into one undirected ``(a, b, weight)`` edge with ``a < b``.
+
+        A missing ``git`` binary fails closed with a clean :class:`RuntimeError` (W3) rather than
+        an uncaught :class:`FileNotFoundError` traceback.
         """
+        if shutil.which("git") is None:
+            msg = "git not found on PATH (GitGrepCouplingBuilder requires git)"
+            raise RuntimeError(msg)
         nodes = frozenset(modules)
         weights: dict[tuple[str, str], float] = {}
         for importer in modules:
@@ -206,11 +234,20 @@ class GitGrepCouplingBuilder:
 
         Builds an extended-regex alternation over the three import forms (absolute ``import x.y``,
         ``from x.y import``, and relative ``from .leaf import``) and runs
-        ``git grep -c -E -- <pattern> <path>``. Returncode 0/1 = ran (1 = no matches → 0); ≥2 =
-        error → :class:`RuntimeError` (mech #1).
+        ``git grep -c -E <pattern> -- <path>``. The ``--`` separates the pattern from the
+        pathspec so a **nonexistent** path is parsed as a pathspec (clean no-match → returncode 1
+        → 0 count → fail-closed isolated node), not as an ambiguous revision (which the ``--``
+        BEFORE the pattern would cause → returncode 128 → crash). Returncode 0/1 = ran
+        (1 = no matches → 0); ≥2 = error → :class:`RuntimeError` (mech #1).
+
+        ``importer`` is mapped to its **on-disk file path** (the ``git grep`` pathspec) while
+        ``imported`` is mapped to its **dotted module name** (the import-regex subject) — the two
+        live in different namespaces (the source-tree path vs. the ``import``-statement spelling),
+        so a file-path manifest still produces a pattern that matches a real ``import genome.x.y``
+        line (the coupling-veto B1 fix).
         """
         path = _module_to_path(importer)
-        pattern = _import_pattern(imported)
+        pattern = _import_pattern(_path_to_module(imported))
         argv = [
             "git",
             "-C",
@@ -218,8 +255,8 @@ class GitGrepCouplingBuilder:
             "grep",
             "-c",
             "-E",
-            "--",
             pattern,
+            "--",
             path,
         ]
         completed = subprocess.run(  # noqa: S603 - fixed-literal git argv (mech #1/#2)
@@ -250,6 +287,23 @@ def _module_to_path(module: str) -> str:
     return "backend/src/" + module.replace(".", "/") + ".py"
 
 
+def _path_to_module(name: str) -> str:
+    """Map a repo-relative source path to its dotted module name (the inverse of
+    :func:`_module_to_path`).
+
+    ``backend/src/genome/scope_split/model.py`` → ``genome.scope_split.model``: strip a leading
+    ``backend/src/`` (the package root), drop a trailing ``.py``, and replace ``/`` with ``.``. A
+    name that already looks dotted (no ``/`` and no ``.py`` suffix) is passed through unchanged, so
+    a manifest may carry either shape. This is what feeds the import-match regex — the dotted name
+    is the spelling a real ``import genome.x.y`` / ``from genome.x.y import`` line actually uses
+    (without it the coupling veto matches nothing on a file-path manifest — the B1 fix).
+    """
+    if "/" not in name and not name.endswith(".py"):
+        return name
+    stripped = name.removeprefix("backend/src/").removesuffix(".py")
+    return stripped.replace("/", ".")
+
+
 def _import_pattern(imported: str) -> str:
     """An extended-regex alternation matching the three import forms of ``imported``.
 
@@ -268,6 +322,7 @@ def _grep_count_line(line: str) -> int:
     try:
         return int(text)
     except ValueError:
+        logger.warning("scope_split.grep_count.unparsable_line", line=line)
         return 0
 
 

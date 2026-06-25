@@ -6,26 +6,29 @@ coupling-graph builder) to a :class:`~genome.scope_split.model.SplitResult`. It 
 the dominant outcome: the splitter proposes a split **only** when a candidate cut survives every
 gate; any uncertainty fails closed to atomic.
 
-This is where the manifest-primary cut policy (DECISION 1) lives — the REVISED reduction order:
+This is where the manifest-primary cut policy (DECISION 1) lives. The reduction order below is the
+order the code actually evaluates the guards (the re-split cap is checked **first** so a recursive
+call short-circuits cheaply, before any partition work):
 
+#. **Re-split cap** — ``depth >= MAX_RESPLIT_DEPTH`` → atomic (checked first).
 #. **Extraction guard** — empty ``change_class`` AND empty ``imports_touched`` → atomic.
 #. **Primary partition** — group the footprint by ``change_class`` boundary refined by
    ``out_of_scope_candidates`` into candidate clusters; fewer than
    :data:`~genome.scope_split.model.MIN_CLUSTERS` → atomic ("not separable by manifest").
-#. **Coupling veto** — build the graph (infra helpers dropped); a cut severing an inter-cluster
-   edge above :data:`~genome.scope_split.model.MAX_CUT_COST` is vetoed (clusters fused). If the
-   vetoes collapse below :data:`~genome.scope_split.model.MIN_CLUSTERS` → atomic (the
-   PR-3 / PR-5a tight-cluster rule).
+#. **Coupling veto** — build the graph (infra helpers dropped); if the proposed partition severs
+   more than :data:`~genome.scope_split.model.MAX_CUT_COST` of the *total* (non-infra) coupling
+   weight — i.e. ``graph.cut_cost(partition) > MAX_CUT_COST`` — the cut is too entangled and is
+   vetoed → atomic (the PR-3 / PR-5a tight-cluster rule).
 #. **Topo-order** — rank by :data:`~genome.scope_split.model.SCHEMA_FIRST_ORDER` + ``depends_on``;
    a cycle → atomic.
 #. **Quality gate** — atomic UNLESS every sub-scope shrink ≥
    :data:`~genome.scope_split.model.MIN_SUBSCOPE_SHRINK` AND ``max_tier_after <= max_tier_before``
    AND total work strictly shrinks; the failing metric is named in the reason.
-#. **Re-split cap** — ``depth >= MAX_RESPLIT_DEPTH`` → atomic.
 #. **Build sub-scopes** — re-score each cluster's tier via the local S-formula, tag
    ``origin_scope``, assign placeholder ids ``<origin>-s1..sN`` in topo order.
 
-SAFETY INVARIANT: a non-atomic result is returned **only** when a cut passed steps 2-6; any
+SAFETY INVARIANT: a non-atomic result is returned **only** when an input clears every guard above
+(the re-split cap, the extraction guard, the partition / veto / topo / quality gates); any
 degenerate / undecidable input fails closed to atomic. This is the test-enforced property.
 
 **No** :mod:`genome.db` import. The helpers below are flat (each returns ``SplitResult | None``
@@ -103,38 +106,39 @@ def propose_split(  # noqa: PLR0911 - flat fail-closed reducer: one return per a
     recursion at :data:`~genome.scope_split.model.MAX_RESPLIT_DEPTH`.
 
     SAFETY INVARIANT: every degenerate / undecidable branch below returns :func:`_atomic`; a
-    non-atomic result is produced only past steps 2-6.
+    non-atomic result is produced only when the input clears every guard (re-split cap, extraction
+    guard, partition, coupling veto, topo order, quality gate).
     """
-    # Step 6 (re-split cap) is checked first so a recursive call short-circuits cheaply.
+    # Step 1 — re-split cap (checked first so a recursive call short-circuits cheaply).
     if depth >= MAX_RESPLIT_DEPTH:
         logger.info("scope_split.propose.atomic", scope=manifest.scope_id, reason="resplit-cap")
         return _atomic(f"re-split cap reached (depth {depth} >= {MAX_RESPLIT_DEPTH})")
 
-    # Step 1 — extraction guard.
+    # Step 2 — extraction guard.
     guard = _extraction_guard(manifest)
     if guard is not None:
         logger.info("scope_split.propose.atomic", scope=manifest.scope_id, reason="extraction")
         return guard
 
-    # Step 2 — primary partition by manifest signals.
+    # Step 3 — primary partition by manifest signals.
     clusters = _primary_partition(manifest)
     if len(clusters) < MIN_CLUSTERS:
         logger.info("scope_split.propose.atomic", scope=manifest.scope_id, reason="not-separable")
         return _atomic("not separable by manifest (fewer than 2 candidate clusters)")
 
-    # Step 3 — coupling veto (infra helpers dropped inside the builder use).
-    clusters = _apply_coupling_veto(manifest, clusters, builder)
-    if len(clusters) < MIN_CLUSTERS:
+    # Step 4 — coupling veto (infra helpers dropped inside the veto graph).
+    veto = _coupling_veto(manifest, clusters, builder)
+    if veto is not None:
         logger.info("scope_split.propose.atomic", scope=manifest.scope_id, reason="coupling-veto")
-        return _atomic("coupling vetoes the cut — PR-3/PR-5a rule (tight cross-cluster coupling)")
+        return veto
 
-    # Step 4 — topo order; a cycle is undecidable → atomic.
+    # Step 5 — topo order; a cycle is undecidable → atomic.
     order = _topo_order(manifest, clusters)
     if order is None:
         logger.info("scope_split.propose.atomic", scope=manifest.scope_id, reason="cycle")
         return _atomic("dependency cycle across clusters (topo order undecidable)")
 
-    # Step 5 — quality gate.
+    # Step 6 — quality gate.
     gate = _quality_gate(manifest, clusters, builder)
     if gate is not None:
         logger.info("scope_split.propose.atomic", scope=manifest.scope_id, reason="quality-gate")
@@ -151,7 +155,7 @@ def propose_split(  # noqa: PLR0911 - flat fail-closed reducer: one return per a
 
 
 def _extraction_guard(manifest: ScopeManifestInput) -> SplitResult | None:
-    """Step 1 — empty ``change_class`` AND empty ``imports_touched`` → atomic; else ``None``.
+    """Step 2 — empty ``change_class`` AND empty ``imports_touched`` → atomic; else ``None``.
 
     Returns the atomic :class:`~genome.scope_split.model.SplitResult` when the scope has nothing
     to partition, or ``None`` to continue.
@@ -196,7 +200,7 @@ def _module_change_class(manifest: ScopeManifestInput, module: str) -> str:
 
 
 def _primary_partition(manifest: ScopeManifestInput) -> tuple[tuple[str, ...], ...]:
-    """Step 2 — partition the footprint into candidate clusters by manifest signals.
+    """Step 3 — partition the footprint into candidate clusters by manifest signals.
 
     Groups ``imports_touched`` by the per-module change class (:func:`_module_change_class`),
     refined so each ``out_of_scope_candidates`` entry that names a footprint module is split into
@@ -258,60 +262,37 @@ def _veto_graph(manifest: ScopeManifestInput, builder: CouplingGraphBuilder) -> 
     return CouplingGraph(nodes=kept_nodes, edges=kept_edges)
 
 
-def _heavy_inter_cluster_pairs(
+def _as_partition(clusters: tuple[tuple[str, ...], ...]) -> tuple[frozenset[str], ...]:
+    """Express the candidate clusters as a partition of node sets (the ``cut_cost`` argument)."""
+    return tuple(frozenset(cluster) for cluster in clusters)
+
+
+def _coupling_veto(
     manifest: ScopeManifestInput,
     clusters: tuple[tuple[str, ...], ...],
     builder: CouplingGraphBuilder,
-) -> list[tuple[int, int]]:
-    """The cluster-index pairs joined by an over-threshold inter-cluster coupling edge.
+) -> SplitResult | None:
+    """Step 4 — veto the cut when it severs too large a fraction of coupling (DECISION 1).
 
-    Builds the (infra-dropped) veto graph and returns each ``(cluster_i, cluster_j)`` pair whose
-    connecting edge weight exceeds :data:`MAX_CUT_COST` — the pairs the veto must fuse.
+    Builds the (infra-dropped) veto graph — the :data:`SHARED_HELPER_FANIN` drop runs *inside*
+    :func:`_veto_graph`, BEFORE this fraction is measured, so a shared star hub cannot inflate the
+    severed weight — then computes the **whole-partition** severed fraction via the existing
+    :meth:`CouplingGraph.cut_cost`. When that fraction exceeds :data:`MAX_CUT_COST` the proposed
+    cut is too entangled to split and is vetoed → an atomic :class:`SplitResult` naming the severed
+    fraction (the PR-3 / PR-5a tight-cluster rule). Otherwise returns ``None`` to continue.
+
+    This makes :data:`MAX_CUT_COST` a meaningful fraction (a cut severing >25% of the non-infra
+    coupling is rejected) and makes :attr:`CutQuality.cut_cost` the actual gate value (the same
+    number is recomputed for the cut-quality record on the surviving path).
     """
     graph = _veto_graph(manifest, builder)
-    placement: dict[str, int] = {}
-    for index, cluster in enumerate(clusters):
-        for module in cluster:
-            placement[module] = index
-
-    pairs: list[tuple[int, int]] = []
-    for a, b, weight in graph.edges:
-        ca, cb = placement.get(a), placement.get(b)
-        if ca is None or cb is None or ca == cb:
-            continue
-        if weight > MAX_CUT_COST:
-            pairs.append((ca, cb))
-    return pairs
-
-
-def _apply_coupling_veto(
-    manifest: ScopeManifestInput,
-    clusters: tuple[tuple[str, ...], ...],
-    builder: CouplingGraphBuilder,
-) -> tuple[tuple[str, ...], ...]:
-    """Step 3 — fuse any two clusters severed by an over-threshold coupling edge (DECISION 1).
-
-    Merges any pair of clusters joined by an inter-cluster edge whose weight exceeds
-    :data:`MAX_CUT_COST` (via union-find over cluster indices). A cut survives only when no severed
-    edge is that heavy. Returns the post-veto clusters (fewer when a fuse fired).
-    """
-    parent = list(range(len(clusters)))
-
-    def find(i: int) -> int:
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-
-    for ca, cb in _heavy_inter_cluster_pairs(manifest, clusters, builder):
-        ri, rj = find(ca), find(cb)
-        if ri != rj:
-            parent[max(ri, rj)] = min(ri, rj)
-
-    fused: dict[int, list[str]] = {}
-    for index, cluster in enumerate(clusters):
-        fused.setdefault(find(index), []).extend(cluster)
-    return tuple(tuple(sorted(members)) for _root, members in sorted(fused.items()))
+    cut_cost = graph.cut_cost(_as_partition(clusters))
+    if cut_cost > MAX_CUT_COST:
+        return _atomic(
+            f"coupling vetoes the cut — PR-3/PR-5a rule (severs {cut_cost:.1%} of coupling "
+            f"> {MAX_CUT_COST:.0%})",
+        )
+    return None
 
 
 def _cluster_class(manifest: ScopeManifestInput, cluster: tuple[str, ...]) -> str:
@@ -327,7 +308,7 @@ def _topo_order(
     manifest: ScopeManifestInput,
     clusters: tuple[tuple[str, ...], ...],
 ) -> tuple[int, ...] | None:
-    """Step 4 — order the clusters schema-first + by ``depends_on``; cycle → ``None``.
+    """Step 5 — order the clusters schema-first + by ``depends_on``; cycle → ``None``.
 
     Ranks clusters by their earliest change class in :data:`SCHEMA_FIRST_ORDER`. A self-cycle
     (the scope depends on itself) or a ``depends_on`` edge between two clusters' modules that
@@ -366,7 +347,7 @@ def _quality_gate(
     clusters: tuple[tuple[str, ...], ...],
     builder: CouplingGraphBuilder,
 ) -> SplitResult | None:
-    """Step 5 — accept the cut only if it shrinks, holds tier, and total work strictly shrinks.
+    """Step 6 — accept the cut only if it shrinks, holds tier, and total work strictly shrinks.
 
     Returns an atomic :class:`~genome.scope_split.model.SplitResult` (failing metric in the
     reason) when any term fails, or ``None`` to continue. The three terms (DECISION 1):
@@ -401,13 +382,22 @@ def _quality_gate(
         )
         for c in clusters
     )
-    if max_tier_after > max_tier_before:
+    # DEFENSIVE: with the parent tier recomputed over the union (`_parent_tier`), every sub-cluster
+    # is a subset of the parent in class / footprint / anchors, so its re-scored tier can never
+    # exceed the parent's — this branch is structurally unreachable in practice (a brute scan over
+    # every class combo / size confirms it). Kept as a fail-closed guard so a future tier-formula
+    # change that breaks the subset monotonicity still fails closed to atomic rather than splitting.
+    if max_tier_after > max_tier_before:  # pragma: no cover - structurally unreachable (defensive)
         return _atomic(
             f"quality gate: max_tier_after {max_tier_after} > max_tier_before {max_tier_before}",
         )
 
+    # DEFENSIVE: clusters partition the parent footprint (every module lands in exactly one
+    # cluster), so the cluster sizes sum to exactly the parent size — this branch is structurally
+    # unreachable. Kept as a fail-closed guard against a future partition change that duplicates
+    # a module into two clusters (which would inflate total work).
     total_after = sum(len(c) for c in clusters)
-    if total_after > parent_size:
+    if total_after > parent_size:  # pragma: no cover - structurally unreachable (defensive)
         return _atomic(
             f"quality gate: split duplicates work ({total_after} > {parent_size})",
         )
@@ -486,9 +476,7 @@ def _build_sub_scopes(
         previous_id = sub_id
 
     parent_size = len(manifest.imports_touched)
-    cut_cost = _veto_graph(manifest, builder).cut_cost(
-        tuple(frozenset(c) for c in clusters),
-    )
+    cut_cost = _veto_graph(manifest, builder).cut_cost(_as_partition(clusters))
     max_tier_after = max(s.est_risk_tier for s in sub_scopes)
     min_shrink = 1.0 - (max(len(c) for c in clusters) / parent_size)
     cut_quality = CutQuality(
