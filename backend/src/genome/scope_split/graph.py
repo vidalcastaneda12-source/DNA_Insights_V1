@@ -26,6 +26,7 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal, Protocol, runtime_checkable
 
 import structlog
@@ -53,6 +54,13 @@ class CouplingGraph:
     """The footprint module names (the graph vertices)."""
     edges: frozenset[tuple[str, str, float]]
     """Undirected weighted edges as ``(a, b, weight)`` with ``a < b`` canonical ordering."""
+    unresolved: frozenset[str] = frozenset()
+    """Footprint modules whose on-disk source file was not found, so their coupling could NOT be
+    measured (a typo, a not-yet-created module, or a name that did not map to a real file). Distinct
+    from a resolved module with genuinely zero imports: an unresolved node means the coupling signal
+    is *incomplete*, which the splitter's veto treats as undecidable → fail-closed atomic (it must
+    not equate "coupling not measured" with "no coupling → safe to split"). Empty for synthetic
+    builders (every node is resolved by construction)."""
 
     def __post_init__(self) -> None:
         """Normalize every edge to canonical ``a < b`` ordering, summing reversed duplicates.
@@ -216,6 +224,12 @@ class GitGrepCouplingBuilder:
             msg = "git not found on PATH (GitGrepCouplingBuilder requires git)"
             raise RuntimeError(msg)
         nodes = frozenset(modules)
+        # A footprint module whose on-disk source file is absent (a typo, or a not-yet-created
+        # module at plan time) cannot have its coupling measured — git grep over a missing path
+        # returns the same "no match" as a real file with no imports. Track these as *unresolved*
+        # so the veto fails closed (undecidable → atomic) rather than reading the unmeasured zero
+        # as "no coupling → safe to split" (review: silent-1 / the false-split-on-zero blocker).
+        unresolved = frozenset(m for m in modules if not self._module_file_exists(m))
         weights: dict[tuple[str, str], float] = {}
         for importer in modules:
             for imported in modules:
@@ -227,7 +241,11 @@ class GitGrepCouplingBuilder:
                 a, b = sorted((importer, imported))
                 weights[a, b] = weights.get((a, b), 0.0) + float(count)
         edges = frozenset((a, b, weight) for (a, b), weight in weights.items())
-        return CouplingGraph(nodes=nodes, edges=edges)
+        return CouplingGraph(nodes=nodes, edges=edges, unresolved=unresolved)
+
+    def _module_file_exists(self, module: str) -> bool:
+        """``True`` when ``module`` maps to a real source file under :attr:`repo_root`."""
+        return (Path(self.repo_root) / _module_to_path(module)).is_file()
 
     def _count_imports(self, importer: str, imported: str) -> int:
         """Count import sites of ``imported`` inside ``importer``'s on-disk file via ``git grep``.
@@ -310,10 +328,24 @@ def _import_pattern(imported: str) -> str:
     Matches ``import <dotted>`` (absolute), ``from <dotted> import`` (absolute from-import), and
     ``from .<leaf> import`` (relative from-import using the module's last dotted segment). The
     dotted name's dots are escaped so they match literally.
+
+    Each form is anchored at ``^[[:space:]]*`` (not a bare ``^``) so an INDENTED import — inside a
+    function, a ``try/except``, a ``TYPE_CHECKING`` guard, or a lazy ``# noqa: PLC0415`` import —
+    is counted. A bare ``^`` silently misses every non-top-level import and undercounts coupling,
+    which biases ``cut_cost`` low → the unsafe false-split direction (review: the scanner could not
+    even see this package's own indented ``from .graph import`` lines). The absolute ``import``
+    form additionally requires a non-identifier boundary after ``<dotted>`` so ``import x.model``
+    does not also match ``import x.model_other`` (review: trailing-boundary over-count).
     """
+    indent = "^[[:space:]]*"
     dotted = re.escape(imported)
     leaf = re.escape(imported.rsplit(".", 1)[-1])
-    return f"(^import {dotted})|(^from {dotted} import )|(^from \\.{leaf} import )"
+    boundary = "([^A-Za-z0-9_.]|$)"
+    return (
+        f"({indent}import {dotted}{boundary})"
+        f"|({indent}from {dotted} import )"
+        f"|({indent}from \\.{leaf} import )"
+    )
 
 
 def _grep_count_line(line: str) -> int:

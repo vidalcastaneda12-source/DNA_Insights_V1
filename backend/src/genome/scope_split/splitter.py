@@ -126,26 +126,44 @@ def propose_split(  # noqa: PLR0911 - flat fail-closed reducer: one return per a
         logger.info("scope_split.propose.atomic", scope=manifest.scope_id, reason="not-separable")
         return _atomic("not separable by manifest (fewer than 2 candidate clusters)")
 
-    # Step 4 — coupling veto (infra helpers dropped inside the veto graph).
-    veto = _coupling_veto(manifest, clusters, builder)
-    if veto is not None:
-        logger.info("scope_split.propose.atomic", scope=manifest.scope_id, reason="coupling-veto")
-        return veto
+    # Steps 4-7 touch the coupling builder (the git-grep scan). A scan failure (e.g. git returns
+    # >=2 — not a repo, a locked index) raises RuntimeError; the fail-closed contract says an
+    # unmeasurable coupling signal reduces to atomic, NEVER a crash (review: silent-2). Catch it
+    # at this boundary and reduce to atomic.
+    try:
+        # Step 4 — coupling veto (infra helpers dropped inside the veto graph).
+        veto = _coupling_veto(manifest, clusters, builder)
+        if veto is not None:
+            logger.info(
+                "scope_split.propose.atomic", scope=manifest.scope_id, reason="coupling-veto"
+            )
+            return veto
 
-    # Step 5 — topo order; a cycle is undecidable → atomic.
-    order = _topo_order(manifest, clusters)
-    if order is None:
-        logger.info("scope_split.propose.atomic", scope=manifest.scope_id, reason="cycle")
-        return _atomic("dependency cycle across clusters (topo order undecidable)")
+        # Step 5 — topo order; a cycle is undecidable → atomic.
+        order = _topo_order(manifest, clusters)
+        if order is None:
+            logger.info("scope_split.propose.atomic", scope=manifest.scope_id, reason="cycle")
+            return _atomic("dependency cycle across clusters (topo order undecidable)")
 
-    # Step 6 — quality gate.
-    gate = _quality_gate(manifest, clusters, builder)
-    if gate is not None:
-        logger.info("scope_split.propose.atomic", scope=manifest.scope_id, reason="quality-gate")
-        return gate
+        # Step 6 — quality gate.
+        gate = _quality_gate(manifest, clusters, builder)
+        if gate is not None:
+            logger.info(
+                "scope_split.propose.atomic", scope=manifest.scope_id, reason="quality-gate"
+            )
+            return gate
 
-    # Step 7 — assemble the non-atomic result.
-    result = _build_sub_scopes(manifest, clusters, order, builder)
+        # Step 7 — assemble the non-atomic result.
+        result = _build_sub_scopes(manifest, clusters, order, builder)
+    except RuntimeError as exc:
+        logger.warning(
+            "scope_split.propose.atomic",
+            scope=manifest.scope_id,
+            reason="coupling-scan-failed",
+            error=str(exc),
+        )
+        return _atomic("coupling scan failed — fail-closed atomic (coupling could not be measured)")
+
     logger.info(
         "scope_split.propose.split",
         scope=manifest.scope_id,
@@ -259,7 +277,9 @@ def _veto_graph(manifest: ScopeManifestInput, builder: CouplingGraphBuilder) -> 
     kept_edges = frozenset(
         (a, b, w) for (a, b, w) in raw.edges if a not in infra and b not in infra
     )
-    return CouplingGraph(nodes=kept_nodes, edges=kept_edges)
+    # Carry the unresolved set through the infra-drop — it is a property of the scan's coverage,
+    # not of any edge, so it must survive into the veto's fail-closed check.
+    return CouplingGraph(nodes=kept_nodes, edges=kept_edges, unresolved=raw.unresolved)
 
 
 def _as_partition(clusters: tuple[tuple[str, ...], ...]) -> tuple[frozenset[str], ...]:
@@ -286,6 +306,15 @@ def _coupling_veto(
     number is recomputed for the cut-quality record on the surviving path).
     """
     graph = _veto_graph(manifest, builder)
+    # Fail closed on an INCOMPLETE coupling signal: if any footprint module could not be resolved
+    # to a real source file, its coupling was never measured, so a measured-low cut_cost cannot be
+    # trusted to mean "clean cut". Treat unresolved coupling as undecidable → atomic, never split
+    # (review: silent-1 — the veto must not read "coupling not measured" as "safe to split").
+    if graph.unresolved:
+        return _atomic(
+            f"coupling unmeasurable — {len(graph.unresolved)} footprint module(s) did not resolve "
+            "to a source file → fail-closed atomic",
+        )
     cut_cost = graph.cut_cost(_as_partition(clusters))
     if cut_cost > MAX_CUT_COST:
         return _atomic(

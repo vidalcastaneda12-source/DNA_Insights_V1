@@ -26,6 +26,7 @@ import structlog
 from typer.testing import CliRunner
 
 from genome.scope_split.cli import scope_split_app
+from genome.scope_split.formatter import ATOMIC_SENTINEL
 from genome.scope_split.roadmap_writer import BLOCK_BEGIN, BLOCK_END
 
 if TYPE_CHECKING:
@@ -260,3 +261,21 @@ def test_dry_run_writes_no_roadmap(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     assert not isinstance(result.exception, NotImplementedError), result.exception
     assert roadmap.read_text(encoding="utf-8") == before
+
+
+def test_write_roadmap_atomic_scope_echoes_sentinel_and_writes_nothing(tmp_path: Path) -> None:
+    """from: review ptest-3 — write-roadmap on an ATOMIC result must echo the atomic sentinel and
+    leave the ROADMAP file byte-unchanged (the 'atomic → sentinel, write nothing' contract clause).
+    """
+    roadmap = tmp_path / "ROADMAP.md"
+    original = _roadmap_with_markers()
+    roadmap.write_text(original, encoding="utf-8")
+
+    result = CliRunner().invoke(
+        scope_split_app,
+        ["write-roadmap", "--manifest", "-", "--engine", "static", "--roadmap", str(roadmap)],
+        input=json.dumps(_atomic_manifest()),
+    )
+    assert result.exit_code == 0, result.output
+    assert ATOMIC_SENTINEL in result.output
+    assert roadmap.read_text(encoding="utf-8") == original, "atomic scope must not touch ROADMAP"

@@ -21,9 +21,18 @@ test->spec provenance noted per test for the Stage-3 test-integrity lens.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 
-from genome.scope_split.graph import StaticCouplingBuilder, make_coupling_builder
+from genome.scope_split.graph import (
+    GitGrepCouplingBuilder,
+    StaticCouplingBuilder,
+    make_coupling_builder,
+)
+
+if TYPE_CHECKING:
+    from pathlib import Path
 from genome.scope_split.model import (
     MAX_CUT_COST,
     MAX_RESPLIT_DEPTH,
@@ -332,12 +341,22 @@ def _degenerate_cases() -> list[tuple[str, ScopeManifestInput, StaticCouplingBui
         )
     )
 
-    # 6. high-coupling edge → veto collapses below MIN_CLUSTERS (step 3)
+    # 6. two REAL clusters (schema vs cli) joined by a HIGH cross-cluster bridge → the coupling
+    #    veto (step 4) fires → atomic. (Review test-2: the prior fixture used 'a'/'b', which both
+    #    fall to the residual class → one cluster → it exited at the partition gate and NEVER
+    #    reached the veto, so the veto's fail-closed path had zero property coverage. These
+    #    name-keyed modules form two clusters so the veto is genuinely exercised here.)
     cases.append(
         (
             "high-coupling-veto",
-            _manifest(change_class=("schema", "cli"), imports_touched=("a", "b")),
-            _builder(nodes=frozenset({"a", "b"}), edges=frozenset({("a", "b", _HIGH)})),
+            _manifest(
+                change_class=("schema", "cli"),
+                imports_touched=("ddl/group_x.sql", "genome/x/cli.py"),
+            ),
+            _builder(
+                nodes=frozenset({"ddl/group_x.sql", "genome/x/cli.py"}),
+                edges=frozenset({("ddl/group_x.sql", "genome/x/cli.py", _HIGH)}),
+            ),
             0,
         )
     )
@@ -376,14 +395,14 @@ def test_degenerate_inputs_never_produce_a_non_atomic_split(
     builder: StaticCouplingBuilder,
     depth: int,
 ) -> None:
-    """from: IMPL-CONTRACT SAFETY INVARIANT ("any degenerate/undecidable input → atomic;
-    the fail-closed exhaustive property test still holds") + SYNTHESIZED-PLAN §5/§6
-    ("splitter exhaustive fail-closed: 0 degenerate inputs non-atomic").
+    """from: IMPL-CONTRACT SAFETY INVARIANT ("any degenerate/undecidable input → atomic").
 
-    The single most important invariant of the whole feature (failure-ordering (a): a false
-    split is the costliest mode). For EVERY enumerated degenerate input the result is atomic,
-    carries no sub_scopes, and has no cut_quality. (RED-until-filled — asserts the atomic
-    BEHAVIOR, not a stub raise.)
+    Representative per-reduction-step fail-closed coverage (one case per guard: extraction,
+    partition-collapse, empty/zero-edge graph, depends_on cycle, coupling veto, no-shrink, and the
+    re-split cap) — NOT a cross-product enumeration (review test-1: the prior docstring overclaimed
+    "exhaustive"). The single most important invariant of the feature (a false split is the
+    costliest mode): for every case the result is atomic, carries no sub_scopes, and has no
+    cut_quality.
     """
     assert label  # the parametrize id documents which degeneracy is exercised
     result = propose_split(manifest, builder, depth=depth)
@@ -546,3 +565,65 @@ def test_min_clusters_constant_is_two() -> None:
     property test's premise).
     """
     assert MIN_CLUSTERS == 2
+
+
+# ── Review fixes: the coupling veto must FAIL CLOSED on a non-discriminating signal ───────────
+
+
+def test_unresolved_footprint_modules_force_atomic() -> None:
+    """from: review silent-1 — modules that do not resolve to a real source file leave coupling
+    UNMEASURED; the veto must treat that as undecidable → atomic, never read the unmeasured zero
+    as 'no coupling → safe to split' (the false-split blocker). Drives the real git-grep engine.
+    """
+    # Two name-keyed clusters (schema via ddl, cli) so the partition produces >=2 clusters and the
+    # reducer reaches the veto — but neither path exists on disk, so coupling is unmeasurable.
+    m = _manifest(
+        change_class=("schema", "cli"),
+        imports_touched=("ddl/does_not_exist_x.sql", "genome/nope/cli.py"),
+    )
+    result = propose_split(m, GitGrepCouplingBuilder(repo_root="."))
+    assert result.atomic is True
+    assert "unmeasurable" in result.reason
+
+
+def test_git_scan_failure_reduces_to_atomic_not_crash(tmp_path: Path) -> None:
+    """from: review silent-2 — a git error (rc>=2, e.g. not-a-repo) raises RuntimeError from the
+    builder; propose_split must catch it at the coupling boundary and reduce to atomic, NEVER a
+    crash (the fail-closed contract: an unmeasurable signal → atomic).
+    """
+    m = _manifest(
+        change_class=("schema", "cli"),
+        imports_touched=("genome.a.schema", "genome.b.cli"),
+    )
+    # An empty tmp dir is not a git repo → git grep returns 128 → RuntimeError inside the builder.
+    result = propose_split(m, GitGrepCouplingBuilder(repo_root=str(tmp_path)))
+    assert result.atomic is True
+    assert "fail-closed" in result.reason
+
+
+def test_veto_survives_at_exact_threshold_boundary() -> None:
+    """from: review ptest-1 — the veto guard is strict `cut_cost > MAX_CUT_COST`, so a cut whose
+    severed fraction is EXACTLY MAX_CUT_COST must SURVIVE (not be vetoed). Pins the boundary a
+    `>=` typo would silently break. Weights: intra 1.5+1.5, cross 1.0 → severed/total = 1/4 = 0.25.
+    """
+    schema_nodes = ("ddl/group_x.sql", "ddl/group_y.sql")
+    cli_nodes = ("genome/x/cli.py", "genome/x/cli_commands.py")
+    m = _manifest(
+        scope_id="PR-BND",
+        change_class=("schema", "cli"),
+        imports_touched=schema_nodes + cli_nodes,
+    )
+    builder = _builder(
+        nodes=frozenset(schema_nodes + cli_nodes),
+        edges=frozenset(
+            {
+                ("ddl/group_x.sql", "ddl/group_y.sql", 1.5),
+                ("genome/x/cli.py", "genome/x/cli_commands.py", 1.5),
+                ("ddl/group_x.sql", "genome/x/cli.py", 1.0),  # severed: 1.0 / 4.0 = exactly 0.25
+            }
+        ),
+    )
+    result = propose_split(m, builder)
+    assert result.atomic is False, "a cut at exactly MAX_CUT_COST must survive the veto"
+    assert result.cut_quality is not None
+    assert result.cut_quality.cut_cost == pytest.approx(MAX_CUT_COST)

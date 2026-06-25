@@ -201,7 +201,14 @@ def test_git_grep_builder_file_path_manifest_yields_weight_one_edge() -> None:
     graph = builder.build(paths)
     assert graph.edges, "file-path manifest produced no edge — the coupling veto is dead (B1)"
     a, b = sorted(paths)
-    assert (a, b, 1.0) in graph.edges
+    # The indented-import fix (review: the ^-anchor missed non-top-level imports) means every
+    # import site of model in splitter is now counted, so the weight is >= 1.0 (was pinned at the
+    # single top-level import before). The load-bearing assertion is that real coupling is SEEN.
+    edge = next((e for e in graph.edges if e[0] == a and e[1] == b), None)
+    assert edge is not None, "splitter↔model coupling not surfaced"
+    assert edge[2] >= 1.0
+    # And both real files resolve, so the scan is complete (no unresolved → veto can trust it).
+    assert graph.unresolved == frozenset()
 
 
 def test_path_to_module_inverts_module_to_path() -> None:
@@ -224,11 +231,20 @@ def test_import_pattern_matches_all_three_import_forms() -> None:
     ``from x.y import Z``, and the relative ``from .y import Z`` — but NOT an unrelated line. This
     also guards B1 from regressing (a pattern built from a file path would match none of these).
     """
-    pattern = re.compile(_import_pattern("genome.scope_split.model"))
+    # The pattern targets git grep's POSIX ERE (`[[:space:]]` for the indent prefix); Python's re
+    # does not understand the POSIX class, so translate it to `\s` for this in-process proxy. The
+    # real engine is exercised end-to-end by the git-grep builder tests above.
+    pattern = re.compile(_import_pattern("genome.scope_split.model").replace("[[:space:]]", r"\s"))
     assert pattern.search("import genome.scope_split.model")
     assert pattern.search("from genome.scope_split.model import ScopeManifestInput")
     assert pattern.search("from .model import ScopeManifestInput")
+    # Indented imports (inside a function / TYPE_CHECKING / try) must match — the ^-anchor bug that
+    # made the scanner blind to non-top-level coupling (review: the false-split blocker).
+    assert pattern.search("    import genome.scope_split.model")
+    assert pattern.search("        from genome.scope_split.model import X")
     assert not pattern.search("import genome.scope_split.graph")
+    # The absolute form requires a trailing boundary so a name-prefix sibling is not over-counted.
+    assert not pattern.search("import genome.scope_split.model_other")
     assert not pattern.search("# a comment mentioning genome.scope_split.model in prose")
 
 

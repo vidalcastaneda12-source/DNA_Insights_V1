@@ -216,7 +216,7 @@ def write_roadmap_cmd(
     roadmap: Annotated[
         Path,
         typer.Option("--roadmap", help="Path to the ROADMAP.md to splice the managed block into."),
-    ] = Path("ROADMAP.md"),
+    ] = DEFAULT_ROADMAP_PATH,
 ) -> None:
     """Splice the proposed sub-scopes into the ROADMAP managed block (managed-region replace; §4).
 
@@ -234,7 +234,7 @@ def write_roadmap_cmd(
         logger.info("scope_split.cli.write_roadmap.atomic", scope=parsed.scope_id)
         return
 
-    roadmap_path = roadmap if roadmap is not None else DEFAULT_ROADMAP_PATH
+    roadmap_path = roadmap
     try:
         current = roadmap_path.read_text(encoding="utf-8")
     except OSError as exc:
