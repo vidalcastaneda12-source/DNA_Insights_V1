@@ -21,6 +21,7 @@ re-surface into a batch — the loop cannot run forever.
 
 from __future__ import annotations
 
+from genome.fast_follow.classifier import classify
 from genome.fast_follow.loop import group_drains, loop_done, plan_next_batch
 from genome.fast_follow.model import (
     MAX_BATCHES,
@@ -221,3 +222,45 @@ def test_group_drains_is_deterministic_for_independent_items() -> None:
     # Every drained item appears exactly once across the groups (no loss, no duplication).
     flattened = [t for group in g1 for t in group]
     assert sorted(t.candidate_id for t in flattened) == sorted(t.candidate_id for t in drains)
+
+
+# ── Ejects must not starve the drain lane (review: correctness-sweep #3) ───────
+
+
+def test_ejects_do_not_consume_the_drain_budget() -> None:
+    """from: review sweep-3 — the per-batch MAX_ITEMS cap bounds DRAINs only.
+
+    MAX_ITEMS ejects ahead of 3 drains must NOT push those drains into overflow: ejects are
+    cheap ROADMAP drafts, not drain work, so they don't consume the drain budget.
+    """
+    ejects = [_eject_candidate(f"e{i}") for i in range(MAX_ITEMS)]
+    drains = [_drain_candidate(f"d{i}") for i in range(3)]
+    plan = plan_next_batch(ejects + drains, seen=set(), batches_done=0)
+    planned_drains = [t for t in plan.triaged if t.classification is Classification.DRAIN]
+    assert len(planned_drains) == 3
+    assert len(plan.overflow) == 0
+
+
+def test_only_drains_overflow_not_ejects() -> None:
+    """from: review sweep-3 — overflow is DRAIN-only; ejects are always planned, not overflowed."""
+    candidates = [_drain_candidate(f"d{i}") for i in range(MAX_ITEMS + 2)]
+    candidates += [_eject_candidate(f"e{i}") for i in range(5)]
+    plan = plan_next_batch(candidates, seen=set(), batches_done=0)
+    assert all(t.classification is Classification.DRAIN for t in plan.overflow)
+    planned_ejects = [t for t in plan.triaged if t.classification is Classification.EJECT]
+    assert len(planned_ejects) == 5
+
+
+# ── loop_done / group_drains edge cases (review: ptest-4, ptest-5) ────────────
+
+
+def test_loop_done_empty_remaining_is_dry() -> None:
+    """from: review ptest-4 — loop_done([]) (drain lane empty) → 'dry'."""
+    assert loop_done([]) == "dry"
+
+
+def test_group_drains_no_drain_verdicts_is_empty_tuple() -> None:
+    """from: review ptest-5 — group_drains over an all-EJECT triaged sequence → ()."""
+    eject_triages = tuple(classify(_eject_candidate(f"e{i}")) for i in range(3))
+    assert all(t.classification is Classification.EJECT for t in eject_triages)
+    assert group_drains(eject_triages) == ()

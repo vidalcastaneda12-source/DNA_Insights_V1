@@ -110,9 +110,12 @@ def test_dry_run_smoke_two_drain_one_eject(tmp_path: Path) -> None:
     lowered = result.output.lower()
     # The dry-run affordance (§6 literal).
     assert "would drain" in lowered, result.output
-    # 2 DRAIN / 1 EJECT / 0 DISCARD — the §6 expected output. Asserted on the rendered plan:
-    # both drainable ids surface under the drain affordance, the schema id is ejected.
-    assert "would drain nit-1" in lowered or "nit-1" in result.output
-    assert "would drain nit-2" in lowered or "nit-2" in result.output
+    # 2 DRAIN / 1 EJECT / 0 DISCARD — the §6 expected output, pinned EXACTLY on the rendered
+    # headline (a drift to 3 DRAIN must fail this; per review test-1 the id-presence checks
+    # alone did not pin the count).
+    assert "counts: drain=2 eject=1 discard=0" in result.output, result.output
+    assert "would drain 2 / eject 1 / discard 0" in lowered, result.output
+    # And the expected items land in the right partitions.
+    assert "nit-1" in result.output
+    assert "nit-2" in result.output
     assert "schema-1" in result.output
-    assert "eject" in lowered

@@ -50,23 +50,30 @@ def plan_next_batch(
     triaged: list[Triage] = []
     overflow: list[Triage] = []
     discards: list[Triage] = []
-    # The candidates that still want draining after this batch — the loop_done input. A
-    # DISCARD is terminal (handled), so only the non-discard overflow keeps the loop alive.
+    # The DRAIN candidates that still want draining after this batch — the loop_done input.
     overflow_candidates: list[Candidate] = []
 
-    actionable_seen = 0
+    # The per-batch cap (MAX_ITEMS) bounds the DRAIN items only — the work that goes through
+    # A's gate. EJECTs are cheap ROADMAP drafts and DISCARDs are terminal, so neither consumes
+    # the drain budget (else a batch full of ejects would starve the drain lane). Only DRAINs
+    # beyond the cap overflow to a later batch.
+    drain_count = 0
     for candidate in fresh:
         triage = classify(candidate)
-        if triage.classification is Classification.DISCARD:
+        classification = triage.classification
+        if classification is Classification.DISCARD:
             discards.append(triage)
             continue
-        # DRAIN / EJECT are the actionable verdicts subject to the per-batch item cap.
-        if actionable_seen < MAX_ITEMS:
+        if classification is Classification.EJECT:
             triaged.append(triage)
+            continue
+        # DRAIN — subject to the per-batch item cap; the excess overflows (never dropped).
+        if drain_count < MAX_ITEMS:
+            triaged.append(triage)
+            drain_count += 1
         else:
             overflow.append(triage)
             overflow_candidates.append(candidate)
-        actionable_seen += 1
 
     # Termination summary: once the batch budget (MAX_BATCHES) is spent the cap is the binding
     # stop regardless of what remains; otherwise defer to loop_done over the actionable overflow

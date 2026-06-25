@@ -241,3 +241,47 @@ def test_eject_draft_prints_to_stdout_and_writes_no_roadmap(
     assert result.output.strip() != "", "eject-draft printed nothing to stdout"
     roadmap_writes = list(sandbox.glob("ROADMAP*"))
     assert roadmap_writes == [], f"eject-draft wrote a ROADMAP file: {roadmap_writes}"
+
+
+# ── Malformed-token rejection (review: sweep-1, silent-3, silent-4, ptest-8) ───
+
+
+def test_duplicate_field_token_exits_nonzero() -> None:
+    """from: review sweep-1 — a duplicate touched_paths key would silently last-win and drop a
+    guarded path (false-DRAIN); the parser must reject it with a non-zero exit."""
+    token = (
+        "candidate_id=x,source=repo-sweep,kind=k,change_class=core,"
+        "touched_paths=docs/schemas/x.md,touched_paths=docs/notes/y.md"
+    )
+    result = CliRunner().invoke(fast_follow_app, ["scan-assemble", "--candidate", token])
+    assert result.exit_code != 0
+
+
+def test_is_stale_malformed_token_exits_nonzero() -> None:
+    """from: review silent-3 — a malformed is_stale must raise, not silently coerce to False."""
+    token = "candidate_id=x,source=repo-sweep,kind=k,change_class=core,is_stale=maybe"
+    result = CliRunner().invoke(fast_follow_app, ["scan-assemble", "--candidate", token])
+    assert result.exit_code != 0
+
+
+def test_empty_collection_segment_exits_nonzero() -> None:
+    """from: review silent-4 — an empty '|'-segment (mis-delimited touched_paths) must reject,
+    not silently shrink the collection and disarm the path guard."""
+    token = "candidate_id=x,source=repo-sweep,kind=k,change_class=core,touched_paths=a.md||b.md"
+    result = CliRunner().invoke(fast_follow_app, ["scan-assemble", "--candidate", token])
+    assert result.exit_code != 0
+
+
+def test_unknown_field_token_exits_nonzero() -> None:
+    """from: review ptest-8 — a token with an unknown field name exits non-zero."""
+    token = "candidate_id=x,source=repo-sweep,kind=k,change_class=core,bogus_field=v"
+    result = CliRunner().invoke(fast_follow_app, ["scan-assemble", "--candidate", token])
+    assert result.exit_code != 0
+
+
+def test_triage_missing_candidates_file_exits_nonzero(tmp_path: Path) -> None:
+    """from: review ptest-6 — triage on a missing candidates.json exits non-zero cleanly."""
+    missing = tmp_path / "does-not-exist.json"
+    result = CliRunner().invoke(fast_follow_app, ["triage", "--candidates", str(missing)])
+    assert result.exit_code != 0
+    assert not isinstance(result.exception, NotImplementedError)

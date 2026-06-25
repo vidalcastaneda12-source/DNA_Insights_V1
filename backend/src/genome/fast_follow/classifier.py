@@ -8,8 +8,11 @@ target this one pure function. **No** :mod:`genome.db` import — pure data → 
 
 Fail-closed reduction order (plan §4 classifier), DRAIN is reachable only past every guard:
 
-1. **Extraction fail-closed** — any of ``change_class`` (empty) / ``applicable_anchors`` /
-   ``blast_radius`` / ``tier`` undecidable (``None``) → :attr:`Classification.EJECT`.
+1. **Extraction fail-closed** — ``change_class`` empty OR not a subset of
+   :data:`~genome.fast_follow.model.GUARD_CLASS_VOCAB` (an out-of-vocab / mis-derived label),
+   ``tier`` not in :data:`~genome.fast_follow.model.TIER_VOCAB`, or ``applicable_anchors`` /
+   ``blast_radius`` undecidable (``None``) → :attr:`Classification.EJECT`. Membership, not just
+   presence: a typo'd ``pipline`` / unknown ``infra`` / garbage ``tier-9`` is an unclear read.
 2. **touched_paths independent guard** — any path under ``docs/schemas/**`` or ``ddl/**``
    → :attr:`Classification.EJECT` (catches a schema item mislabeled ``core``, plan A2).
 3. **stale / already-handled** (``is_stale``) → :attr:`Classification.DISCARD` (logged).
@@ -29,8 +32,10 @@ This file is a **stub** for the interface-freeze step: :func:`classify` raises
 from __future__ import annotations
 
 from genome.fast_follow.model import (
+    GUARD_CLASS_VOCAB,
     GUARDED_CLASSES,
     MAX_DRAIN_FILES,
+    TIER_VOCAB,
     Candidate,
     Classification,
     Triage,
@@ -61,21 +66,26 @@ def classify(candidate: Candidate) -> Triage:  # noqa: PLR0911 — one return pe
     """
     cid = candidate.candidate_id
 
-    # 1. Extraction fail-closed: any decision-bearing field undecidable → EJECT. An empty
-    #    change_class is the "no class" / unclassified case and is treated as undecidable.
+    # 1. Extraction fail-closed: any decision-bearing field undecidable → EJECT. "Undecidable"
+    #    is not only None/empty — an OUT-OF-VOCAB label (a change_class the skill could not map
+    #    to GUARD_CLASS_VOCAB, or a tier outside TIER_VOCAB) is exactly the "unclear read" the
+    #    fail-closed contract maps to EJECT. Validating membership here (not just presence) is
+    #    what stops a typo'd 'pipline' / unknown 'infra' / garbage 'tier-9' from silently DRAINing.
     if (
         not candidate.change_class
+        or not (candidate.change_class <= GUARD_CLASS_VOCAB)
         or candidate.blast_radius is None
         or candidate.applicable_anchors is None
-        or candidate.tier is None
+        or candidate.tier not in TIER_VOCAB
     ):
         return Triage(
             candidate_id=cid,
             classification=Classification.EJECT,
             retier=None,
             reason=(
-                "extraction fail-closed: a decision-bearing field "
-                "(change_class / blast_radius / applicable_anchors / tier) is undecidable"
+                "extraction fail-closed: a decision-bearing field is undecidable or out-of-vocab "
+                "(change_class ⊄ GUARD_CLASS_VOCAB / tier ∉ TIER_VOCAB / "
+                "blast_radius / applicable_anchors is None)"
             ),
             drains=None,
         )

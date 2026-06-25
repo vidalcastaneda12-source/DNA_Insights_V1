@@ -292,3 +292,67 @@ def test_stale_guarded_class_is_discard_not_eject() -> None:
     """
     candidate = _drain_candidate(change_class=frozenset({"schema"}), is_stale=True)
     assert classify(candidate).classification is Classification.DISCARD
+
+
+# ── Out-of-vocab fail-closed (review: silent-failure-hunter silent-1/silent-2) ─
+# An out-of-vocab change_class label or tier is a mis-derived / undecidable read; the
+# fail-closed contract maps it to EJECT, never DRAIN. (The exhaustive sweep above only
+# enumerates in-vocab labels, so these pin the membership-not-just-presence guard.)
+
+
+def test_out_of_vocab_change_class_typo_is_eject() -> None:
+    """from: review silent-1 — a typo'd class ('pipline') must EJECT, not silently DRAIN."""
+    assert (
+        classify(_drain_candidate(change_class=frozenset({"pipline"}))).classification
+        is Classification.EJECT
+    )
+
+
+def test_out_of_vocab_change_class_unknown_is_eject() -> None:
+    """from: review silent-1 — an entirely unknown class ('infra') must EJECT (undecidable)."""
+    assert (
+        classify(_drain_candidate(change_class=frozenset({"infra"}))).classification
+        is Classification.EJECT
+    )
+
+
+def test_out_of_vocab_change_class_mixed_with_core_is_eject() -> None:
+    """from: review silent-1 — a benign 'core' mixed with an unknown label still EJECTs."""
+    assert (
+        classify(_drain_candidate(change_class=frozenset({"core", "infra"}))).classification
+        is Classification.EJECT
+    )
+
+
+def test_out_of_vocab_tier_is_eject() -> None:
+    """from: review silent-2 — a tier outside TIER_VOCAB ('tier-9') must EJECT, not DRAIN."""
+    assert classify(_drain_candidate(tier="tier-9")).classification is Classification.EJECT
+
+
+# ── At-cap boundary + provenance (review: pr-test-analyzer ptest-1/2/9) ────────
+
+
+def test_truth_table_blast_at_cap_is_drain() -> None:
+    """from: review ptest-1 — blast_radius == MAX_DRAIN_FILES (the exact at-cap boundary) → DRAIN.
+
+    Guards the strict '>' in the classifier: a future '>=' edit would break this with no other
+    failing test (the exhaustive sweep skips the non-guard-tripping arm).
+    """
+    assert (
+        classify(_drain_candidate(blast_radius=MAX_DRAIN_FILES)).classification
+        is Classification.DRAIN
+    )
+
+
+def test_drain_records_drains_provenance() -> None:
+    """from: review ptest-2 — a DRAIN verdict carries drains == candidate_id (decision #8)."""
+    candidate = _drain_candidate(candidate_id="cand-prov")
+    result = classify(candidate)
+    assert result.classification is Classification.DRAIN
+    assert result.drains == "cand-prov"
+
+
+def test_eject_and_discard_drains_is_none() -> None:
+    """from: review ptest-9 — EJECT / DISCARD verdicts carry drains is None (no provenance)."""
+    assert classify(_drain_candidate(change_class=frozenset({"schema"}))).drains is None
+    assert classify(_drain_candidate(is_stale=True)).drains is None

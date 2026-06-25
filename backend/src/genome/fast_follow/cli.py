@@ -74,14 +74,12 @@ def _parse_opt_int(field: str, value: str, token: str) -> int | None:
         raise typer.BadParameter(msg) from exc
 
 
-def _parse_candidate_token(token: str) -> Candidate:
-    """Parse one flat ``--candidate 'k=v,...'`` token into a :class:`Candidate`.
+def _tokenize_candidate_fields(token: str) -> dict[str, str]:
+    """Split a flat ``--candidate 'k=v,...'`` token into its ``{key: value}`` fields.
 
-    Scalar fields split on ``,``; the two collection fields (``touched_paths`` /
-    ``change_class``) carry their own values split on the ``|`` intra-field sub-delimiter so a
-    list value's separator never collides with the field-comma (a mis-parsed ``touched_paths``
-    is a false-DRAIN path the §2 safety invariant forbids). A malformed token — no ``=`` in a
-    chunk, an unknown field, or a missing required field — raises a clean ``typer.BadParameter``.
+    Each chunk must be ``key=value`` (raises otherwise), and a duplicate key is rejected rather
+    than silently last-winning — for ``touched_paths`` / ``change_class`` a silent overwrite
+    would drop a guarded path/label, a false-DRAIN the §2 safety invariant forbids.
     """
     fields: dict[str, str] = {}
     for chunk in token.split(","):
@@ -92,7 +90,24 @@ def _parse_candidate_token(token: str) -> Candidate:
             msg = f"--candidate field must be 'key=value', got {part!r} in {token!r}"
             raise typer.BadParameter(msg)
         key, _, value = part.partition("=")
-        fields[key.strip()] = value.strip()
+        key_clean = key.strip()
+        if key_clean in fields:
+            msg = f"--candidate has duplicate field {key_clean!r} in {token!r}"
+            raise typer.BadParameter(msg)
+        fields[key_clean] = value.strip()
+    return fields
+
+
+def _parse_candidate_token(token: str) -> Candidate:
+    """Parse one flat ``--candidate 'k=v,...'`` token into a :class:`Candidate`.
+
+    Scalar fields split on ``,``; the two collection fields (``touched_paths`` /
+    ``change_class``) carry their own values split on the ``|`` intra-field sub-delimiter so a
+    list value's separator never collides with the field-comma (a mis-parsed ``touched_paths``
+    is a false-DRAIN path the §2 safety invariant forbids). A malformed token — no ``=`` in a
+    chunk, a duplicate / unknown field, or a missing required field — raises ``typer.BadParameter``.
+    """
+    fields = _tokenize_candidate_fields(token)
 
     allowed = {
         "candidate_id",
@@ -117,9 +132,21 @@ def _parse_candidate_token(token: str) -> Candidate:
         raw = fields.get(field, "")
         if raw == "":
             return ()
-        return tuple(part for part in raw.split("|") if part)
+        parts = raw.split("|")
+        # An empty '|'-segment means a mis-delimited value (e.g. a stray '||' or wrong
+        # separator) that would silently shrink the collection — for touched_paths that can
+        # disarm the path guard (false-DRAIN). Reject rather than silently drop.
+        if any(not part for part in parts):
+            msg = f"--candidate field {field!r} has an empty '|'-segment in {raw!r}"
+            raise typer.BadParameter(msg)
+        return tuple(parts)
 
     is_stale_raw = fields.get("is_stale", "false").lower()
+    # Strict boolean parse — a malformed is_stale (typo, 'maybe') must raise, not silently
+    # coerce to False (which would re-enter the drain lane), matching the JSON seam's _as_bool.
+    if is_stale_raw not in {"true", "1", "yes", "false", "0", "no"}:
+        msg = f"--candidate is_stale must be a boolean, got {fields.get('is_stale')!r} in {token!r}"
+        raise typer.BadParameter(msg)
     tier_raw = fields.get("tier")
     return Candidate(
         candidate_id=fields["candidate_id"],
@@ -132,7 +159,7 @@ def _parse_candidate_token(token: str) -> Candidate:
         ),
         tier=None if tier_raw in (None, "", "none") else tier_raw,
         touched_paths=_collection("touched_paths"),
-        is_stale=is_stale_raw in {"true", "1", "yes"},
+        is_stale=is_stale_raw in {"true", "1", "yes"},  # falsey values validated above
     )
 
 

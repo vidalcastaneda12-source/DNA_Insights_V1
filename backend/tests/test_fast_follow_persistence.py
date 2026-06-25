@@ -21,6 +21,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
+
 from genome.fast_follow.persistence import (
     DEFAULT_SEEN_PATH,
     load_seen,
@@ -80,3 +82,15 @@ def test_default_seen_path_is_under_data_runtime_home() -> None:
     parts = DEFAULT_SEEN_PATH.parts
     assert "data" in parts, f"DEFAULT_SEEN_PATH not under data/: {DEFAULT_SEEN_PATH}"
     assert DEFAULT_SEEN_PATH.name == "seen.json"
+
+
+def test_load_seen_malformed_json_raises(tmp_path: Path) -> None:
+    """from: review ptest-3 — a non-array seen.json must raise, never silently return empty.
+
+    A silent empty return would re-surface every handled candidate (defeating cross-invocation
+    dedup), so the corrupt-file path must fail loud (the safe direction).
+    """
+    bad = tmp_path / "seen.json"
+    bad.write_text('{"not": "a list"}', encoding="utf-8")
+    with pytest.raises(TypeError):
+        load_seen(bad)

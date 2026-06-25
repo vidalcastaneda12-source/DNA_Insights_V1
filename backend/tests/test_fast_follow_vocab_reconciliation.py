@@ -20,11 +20,14 @@ from genome.verify_gate.model import CHANGE_CLASS_VOCAB
 
 
 def test_guard_class_vocab_reconciles_with_verify_gate() -> None:
-    """fast_follow's independent vocab stays a subset of verify_gate's change-class vocab."""
+    """from: plan A1 (independent GUARD_CLASS_VOCAB; reconciliation subset guard).
+
+    fast_follow's independent vocab stays a subset of verify_gate's change-class vocab.
+    """
     assert GUARD_CLASS_VOCAB <= CHANGE_CLASS_VOCAB
 
 
 def test_guarded_classes_are_the_non_core_change_classes() -> None:
-    """The EJECT-forcing guarded subset is exactly the change classes other than ``core``."""
+    """from: plan A1 (the EJECT-forcing guarded subset is exactly the change classes != core)."""
     assert GUARD_CLASS_VOCAB - {"core"} == GUARDED_CLASSES
     assert "core" not in GUARDED_CLASSES

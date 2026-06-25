@@ -167,3 +167,30 @@ def test_formatter_source_contains_no_comma_grouped_magnitude() -> None:
     anchor_shape = re.compile(r"\d{1,3}(?:,\d{3})+")
     found = anchor_shape.findall(source)
     assert found == [], f"formatter source contains comma-grouped magnitudes: {found}"
+
+
+def test_format_triage_plan_renders_overflow_items() -> None:
+    """from: review ptest-7 — a non-empty overflow partition is rendered (never silently hidden)."""
+    plan = TriagePlan(
+        triaged=(_drain_triage("d1"),),
+        overflow=(_drain_triage("ov1"),),
+        discards=(),
+        dry=False,
+        termination=None,
+    )
+    rendered = format_triage_plan(plan)
+    assert "ov1" in rendered
+
+
+def test_counts_includes_overflow_items() -> None:
+    """from: review sweep-2 — counts() spans overflow too, so the headline never under-reports."""
+    plan = TriagePlan(
+        triaged=(_drain_triage("d1"),),
+        overflow=(_drain_triage("ov1"), _drain_triage("ov2")),
+        discards=(_discard_triage("s1"),),
+        dry=False,
+        termination=None,
+    )
+    counts = plan.counts()
+    assert counts["drain"] == 3  # 1 triaged + 2 overflow
+    assert counts["discard"] == 1

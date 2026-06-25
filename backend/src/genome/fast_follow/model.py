@@ -213,11 +213,12 @@ class TriagePlan:
     def counts(self) -> Mapping[str, int]:
         """Return the per-disposition counts (``drain`` / ``eject`` / ``discard``).
 
-        A pure tally over :attr:`triaged` + :attr:`discards` — the headline the formatter
-        and the ``--dry-run`` smoke assert against (e.g. ``2 DRAIN / 1 EJECT``).
+        A pure tally over ALL partitions — :attr:`triaged` + :attr:`overflow` + :attr:`discards`
+        — so the headline the formatter and the ``--dry-run`` smoke assert against (e.g.
+        ``2 DRAIN / 1 EJECT``) accounts for overflowed items too and never under-reports.
         """
         tally: Counter[str] = Counter()
-        for triage in (*self.triaged, *self.discards):
+        for triage in (*self.triaged, *self.overflow, *self.discards):
             tally[triage.classification.value] += 1
         return {
             "drain": tally[Classification.DRAIN.value],
@@ -278,16 +279,3 @@ def _as_obj_list(value: object) -> list[object]:
 def _as_str_list(value: object) -> list[str]:
     """Narrow a JSON value to ``list[str]`` (``None`` → empty list) or raise."""
     return [_as_str(item) for item in _as_obj_list(value)]
-
-
-def _as_mapping(value: object) -> Mapping[str, object]:
-    """Narrow a JSON value to a ``Mapping[str, object]`` (``None`` → empty) or raise."""
-    if value is None:
-        return {}
-    if isinstance(value, dict):
-        out: dict[str, object] = {}
-        for key, val in value.items():
-            out[_as_str(key)] = val
-        return out
-    msg = f"expected an object, got {type(value).__name__}: {value!r}"
-    raise TypeError(msg)
