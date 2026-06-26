@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **(3)** Add six coverage tests (shrink-gate `<`-strict boundary, `out_of_scope_candidates`
   peeling, extraction-guard AND semantics, a direct `format_roadmap_block` unit, the
   `--manifest <file>` success path, and `_grep_count_line`'s bare/unparsable branches). Ticks the
-  deferred-followups plan items 4/5/6. (#NNN)
+  deferred-followups plan items 4/5/6. (#115)
 - Wave-1 docs/ledger sweep (docs-only — no code, schema, dependency, or DB change, so the dev-loop
   and every real-data anchor stay byte-unchanged). Four already-decided residuals drained into one
   PR. **(1)** Close ROADMAP **PR 7** (gnomAD orphan-version cleanup, finding-015 §12 Option C) as

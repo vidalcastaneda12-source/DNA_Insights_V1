@@ -23,13 +23,13 @@ lost. None gates any other work. Durable rationale for the scope lives in
   retained graph primitive); wiring it in remains a separate deferred code task, not this docs
   reconcile.
 
-- [x] **Dead inter-cluster cycle branch** in `splitter._topo_order` — **done (2026-06-26, PR #NNN):
+- [x] **Dead inter-cluster cycle branch** in `splitter._topo_order` — **done (2026-06-26, PR #115):
   removed.** The branch keyed a module→cluster map but probed it with `depends_on` scope-ids, so it
   never fired; confirmed structurally unreachable (`depends_on` carries external scope-ids, and
   `_primary_partition` places each module in exactly one cluster) and removed with a comment
   recording why. The reachable self-cycle guard (`scope_id in depends_on`) stays.
 
-- [x] **Type-design nits** — **done (2026-06-26, PR #NNN).** Landed `RiskTier = Literal[0, 1, 2]`
+- [x] **Type-design nits** — **done (2026-06-26, PR #115).** Landed `RiskTier = Literal[0, 1, 2]`
   (computed-tier domain), a `CouplingEdge` `NamedTuple` value type, and `TypedDict` shapes for the
   four `to_json()` serializers (`engine` was already the `CouplingEngine` `Literal`). The sealed
   `AtomicResult | SplitProposal` union was **consciously declined** — the existing
@@ -37,7 +37,7 @@ lost. None gates any other work. Durable rationale for the scope lives in
   the union would have broken ~9 test constructions + 3 rejection tests against the
   behavior-preserving constraint. `source` / `termination` have no referent in `scope_split`.
 
-- [x] **Test-coverage nits** — **done (2026-06-26, PR #NNN): all six added.** Shrink-gate
+- [x] **Test-coverage nits** — **done (2026-06-26, PR #115): all six added.** Shrink-gate
   `<`-strict boundary, a direct `format_roadmap_block` unit, `out_of_scope_candidates` peeling, the
   `--manifest <file-path>` success path, `_grep_count_line` bare/unparsable paths, and
   extraction-guard AND semantics — each in its matching `test_scope_split_*.py`.
