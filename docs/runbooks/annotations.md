@@ -1342,6 +1342,22 @@ extension gated on `pgs_score_weights`
 is moot while the filter is narrowed; if `three_way` is ever restored,
 the PGS leg appends as finding-011 describes.
 
+**Orphan version rows.** The loader allocates a `source_version_id` before any
+chromosome loads, so an interrupted or partial run can leave an
+`annotation_source_versions` row with zero `gnomad_frequencies` references.
+gnomAD now ships the same `_cleanup_orphan_version_row` guard the other five
+Phase-5 loaders carry (finding-015 Option B, PR #53), which prunes such a row on
+the failure / no-chrom-committed path. **Live state (ROADMAP PR-7 probe,
+read-only, 2026-06-26):** there are **no** zero-row gnomad orphans — the
+`annotation_source_versions` inventory is `{8 (4,467,370 rows, superseded), 10
+(4,568,802 rows, active)}` with the `annotation_sources` pointer at `10`, and
+both ids carry matching `gnomad_frequencies` data. The historical id-specific
+cleanup `DELETE … source_version_id IN (6,7,8,10)` (finding-015 §12) is **stale
+and must not be run** — those ids are no longer zero-row orphans, and the DELETE
+would erase the active + superseded builds. ROADMAP **PR 7** is therefore
+**closed as moot**; the general superseded-row cleanup procedure (covering the
+data-bearing id=8) is ROADMAP **PR 9** (finding-010 #14).
+
 **HTTP/2 retry behavior.** Remote-tabix iteration against gnomAD's
 GCS bucket trips libcurl `CURLE_HTTP2` (error 16) framing errors
 during BGZF block reads on roughly one in 200,000 range requests at

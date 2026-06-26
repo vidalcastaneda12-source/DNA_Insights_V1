@@ -159,7 +159,7 @@ For one scope item the full team is a pipeline **segmented by the two human gate
 | 2 · Implement | **this document** — `implementer` + plan-blind `test-author` + guards (see "Implementation phase" below) | Development |
 | 3 · Review fan-out | **this document** — parallel lenses → adversarial verify → synthesize | Verification + TestingBugs |
 | 4 · Handoff | **this document** — `handoff-assembler` wraps `/handoff` + `/changelog` + the pre-gate package | Development |
-| → | **HUMAN GATE: VSC-User runs `verification.md`, then merges** | VSC-User |
+| → | **HUMAN GATE: VSC-User runs `verification.md`, then merges** — or the owner-approved **evidence-gated** path (Claude runs `genome.verify_gate`, presents the raw evidence, takes a typed approval, then squash-merges; `finding-037`) | VSC-User |
 | 5 · Close | **this document** — `knowledge-curator` re-locks confirmed anchors; `repo-sweep` triage | — |
 
 This finding designs the complete team — Stage 0–5 (Intake, Plan, Implementation, Review, Handoff, Close).
@@ -835,7 +835,8 @@ finding-verifier (adversarial · refute-by-default · severity-scaled):
 review-synthesizer · dedup across lenses · rank by decision-relevance to VSC-User
       │            · go / no-go · anchors-to-watch list · residual-risk summary
       ├── blocker(s) → back to Stage 2 (implementer fixes; bounded loop ×2 → escalate)
-      └── clean → Stage 4 handoff → [HUMAN GATE: VSC-User runs verification.md, merges]
+      └── clean → Stage 4 handoff → [HUMAN GATE: VSC-User runs verification.md, merges
+                                     — or evidence-gated verify_gate approval]
 
 Tier 2 / "be comprehensive": completeness-critic asks "what lens didn't run / what's
 unverified / which diff hunk got zero coverage" → another round (loop-until-dry).
@@ -1165,7 +1166,7 @@ flowchart TD
     S2["STAGE 2 · IMPLEMENT<br/>test-author ∥ implementer + guards"]
     S3["STAGE 3 · REVIEW<br/>lenses → verify → synthesize"]
     S4["STAGE 4 · HANDOFF<br/>handoff-assembler"]
-    G2{{"HUMAN GATE 2<br/>verification.md · merge"}}
+    G2{{"HUMAN GATE 2<br/>verification.md · merge<br/>(or evidence-gated verify_gate approval)"}}
     S5["STAGE 5 · CLOSE<br/>knowledge-curator + repo-sweep"]
     S0 --> S1
     S1 -->|"revise ×2 ⟲"| S1
@@ -1275,7 +1276,7 @@ flowchart TD
         HA["handoff-assembler<br/>wraps /handoff · /changelog · /new-finding<br/>+ commit-push-pr · method: finishing-a-development-branch"]
         HA --> PKG["pre-gate package<br/>verdict · anchors-to-watch(expected)<br/>predicted→test map · residual risk"]
     end
-    PKG --> G2{{"HUMAN GATE 2<br/>run verification.md · confirm anchors on real data · merge"}}
+    PKG --> G2{{"HUMAN GATE 2<br/>run verification.md · confirm anchors on real data · merge<br/>(or owner-approved evidence-gated verify_gate merge)"}}
     G2 -->|merged| COUT(["→ STAGE 5"])
     G2 -.->|bounce| BOUT(["→ implementer (Stage 2)"])
     classDef gate fill:#ffe0b2,stroke:#e65100,stroke-width:3px,color:#000;
@@ -1312,7 +1313,7 @@ flowchart LR
     subgraph HUMAN["VSC-USER — out-of-loop gates (sacred)"]
         direction TB
         g1{{"GATE 1<br/>approve plan"}}
-        g2{{"GATE 2<br/>verification.md<br/>confirm anchors · merge"}}
+        g2{{"GATE 2<br/>verification.md<br/>confirm anchors · merge<br/>(or evidence-gated verify_gate)"}}
     end
     s1 ==> g1 ==> s2
     s4 ==> g2 ==> s5

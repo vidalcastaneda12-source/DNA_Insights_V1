@@ -47,17 +47,32 @@ The primary partition signal is the **Stage-0 dispatcher manifest**, not the imp
 footprint (`blast_radius.imports_touched`) is grouped by the manifest's `change_class` boundaries
 (schema / ddl / annotation-loader / pipeline / cli / tests / docs — separable AND ordered),
 refined by `out_of_scope_candidates`. The git-grep coupling graph is a **veto only**: it never
-creates the partition, it only fuses two candidate clusters joined by a high-coupling import edge
-(weight > `MAX_CUT_COST`). Shared infra helpers (a module imported by ≥ `SHARED_HELPER_FANIN`
-footprint modules) are dropped from the veto graph so a common dependency does not fuse otherwise
-independent clusters into one component.
+creates the partition, it only *rejects* a proposed manifest partition that is too entangled to
+ship as independent pieces. Concretely, the splitter measures the fraction of total (non-infra)
+coupling weight the partition would **sever** — `graph.cut_cost(partition)` — and vetoes the cut
+→ atomic when that fraction exceeds `MAX_CUT_COST` (the PR-3 / PR-5a tight-cluster rule). Shared
+infra helpers (a module imported by ≥ `SHARED_HELPER_FANIN` footprint modules) are dropped from
+the veto graph *before* the fraction is measured, so a common dependency does not inflate the
+severed-weight fraction.
+
+> **Doc↔code reconciliation (2026-06-26).** Earlier revisions of this section described the veto
+> as connected-components *cluster-fusion* (fusing two clusters joined by a high-coupling edge).
+> The as-built veto (`splitter._coupling_veto`) is the `cut_cost` **severed-fraction threshold**
+> described above — it rejects the whole proposed partition when
+> `graph.cut_cost(partition) > MAX_CUT_COST`; it does not fuse clusters or recount components.
+> `CouplingGraph.weakly_connected_components` is implemented (pure union-find, GREEN-from-freeze)
+> but is **not consumed by the splitter** — it is retained as a graph primitive for a possible
+> future fusion-based policy. Wiring it in is a separate, deferred code task (see
+> [`sub-project-B2-phase1-deferred-followups.md`](../plans/sub-project-B2-phase1-deferred-followups.md)),
+> not a prose change.
 
 ### Fail-closed atomic guard (the safety invariant)
 
 `splitter.propose_split` is a flat reducer (mirroring `verify_gate.verdict`) with **atomic** as
 the dominant outcome. A non-atomic proposal is returned **only** when a candidate cut survives
 every gate, in this REVISED reduction order: re-split cap → extraction guard → primary partition
-(< `MIN_CLUSTERS` → atomic) → coupling veto (collapse below `MIN_CLUSTERS` → atomic) → topo order
+(< `MIN_CLUSTERS` → atomic) → coupling veto (cut severs > `MAX_CUT_COST` of total non-infra
+coupling → atomic) → topo order
 (cycle → atomic) → quality gate → build sub-scopes. Any degenerate / undecidable input fails
 closed to atomic; an exhaustive property test enumerates the degenerate inputs and asserts none
 returns non-atomic.

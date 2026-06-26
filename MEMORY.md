@@ -173,13 +173,14 @@ back-pointer; `DEC-0002` is the live decision.
 | DEC-0115 | tactical | 2026-06-26 | active | — | VSC-User, ClaudeCodeDevelopment | PR #110 | docs(C2+D-Phase1): Stage-5 close — verification gate recipe, ROADMAP slot, residual ledger | https://github.com/vidalcastaneda12-source/DNA_Insights_V1/pull/110 |
 | DEC-0116 | tactical | 2026-06-26 | active | — | VSC-User, ClaudeCodeDevelopment | PR #111 | docs(fast-follow): drain B2-Phase1 ROADMAP checkbox + PR #98 CHANGELOG entry | https://github.com/vidalcastaneda12-source/DNA_Insights_V1/pull/111 |
 | DEC-0117 | tactical | 2026-06-26 | active | — | VSC-User, ClaudeCodeDevelopment | PR #112 | chore(repo-sweep): prune 3 implemented plans, slot untracked work, drain 4 fast-follow items | https://github.com/vidalcastaneda12-source/DNA_Insights_V1/pull/112 |
+| DEC-0118 | tactical | 2026-06-26 | active | — | VSC-User, ClaudeCodeDevelopment | PR #113 | docs(fast-follow): drain 8 post-#112 doc-staleness residuals | https://github.com/vidalcastaneda12-source/DNA_Insights_V1/pull/113 |
 
 <!-- END decision-ledger -->
 
 _**Backfill status:** `DEC-0001 … DEC-0021` are the curated decision-finding rows (every
-`type: decision`/`both` finding). `DEC-0022 … DEC-0084` and `DEC-0100 … DEC-0117` are the **per-PR-history retrospective** —
+`type: decision`/`both` finding). `DEC-0022 … DEC-0084` and `DEC-0100 … DEC-0118` are the **per-PR-history retrospective** —
 one row per merged PR in `main`'s history, the squash-merge subject git-verbatim as the decision
 (`DEC-0085 … DEC-0099` in between are decision-finding rows, not per-PR history).
-**Declared complete: PRs #19 … #112** (81 PR-referenced commits, the full PR history
+**Declared complete: PRs #19 … #113** (82 PR-referenced commits, the full PR history
 in the current `main` lineage; any pre-#19 PRs predate this lineage). New PRs append the next row
 at the `/handoff` or Stage-5 checkpoint._

@@ -15,10 +15,13 @@ lost. None gates any other work. Durable rationale for the scope lives in
   dials; back-test against ROADMAP's 13-PR pre-Phase-6 sequence (the hand-authored decomposition the
   detector aims to reproduce) to confirm they neither over- nor under-split.
 
-- [ ] **finding-039 doc↔code wording** — the finding describes the veto as connected-components
-  cluster-fusion; as-built it is a `cut_cost` severed-fraction threshold (and
-  `CouplingGraph.weakly_connected_components` is unused by the splitter). Reconcile the wording or
-  wire wcc in.
+- [x] **finding-039 doc↔code wording** — **done (2026-06-26 Wave-1 docs sweep): wording
+  reconciled.** DECISION 1's veto prose + the reduction-order line now describe the as-built
+  `cut_cost` severed-fraction threshold (`graph.cut_cost(partition) > MAX_CUT_COST`), with a dated
+  doc↔code reconciliation note recording that `CouplingGraph.weakly_connected_components` is
+  implemented but unused by the splitter. The wcc-wiring alternative is **declined** (kept as a
+  retained graph primitive); wiring it in remains a separate deferred code task, not this docs
+  reconcile.
 
 - [ ] **Dead inter-cluster cycle branch** in `splitter._topo_order` — keyed by module names but
   probed with `depends_on` scope-ids, so it never fires (harmless — the schema-first sort is
