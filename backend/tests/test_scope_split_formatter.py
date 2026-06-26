@@ -18,6 +18,7 @@ from __future__ import annotations
 from genome.scope_split.formatter import (
     ATOMIC_SENTINEL,
     MICRO_GATE_HEADER,
+    format_roadmap_block,
     format_split_proposal,
 )
 from genome.scope_split.model import CutQuality, SplitResult, SubScope
@@ -113,3 +114,31 @@ def test_split_proposal_has_no_hard_coded_magnitude() -> None:
     four = format_split_proposal(_split_result("PR-B", 4), origin_scope="PR-B")
     assert two.count("PR-A-s") == 2
     assert four.count("PR-B-s") == 4
+
+
+# ── format_roadmap_block direct unit (B2-Phase1 follow-up #6) ──────────────────
+
+
+def test_format_roadmap_block_atomic_is_empty_string() -> None:
+    """from: B2-Phase1 deferred follow-up #6 (test-coverage nit) — direct unit test of
+    ``format_roadmap_block`` (previously exercised only indirectly via the CLI write-roadmap).
+
+    An atomic result has nothing to splice into the ROADMAP managed block → the empty string.
+    """
+    result = SplitResult(atomic=True, reason="not separable by manifest")
+    assert format_roadmap_block(result, origin_scope="PR-7") == ""
+
+
+def test_format_roadmap_block_renders_one_checkbox_per_sub_scope() -> None:
+    """from: B2-Phase1 deferred follow-up #6 — direct unit test of the split branch.
+
+    A split renders one ``- [ ]`` slot per sub-scope (topo order), each carrying the sub_scope_id
+    and its origin_scope (provenance, locked decision #8).
+    """
+    block = format_roadmap_block(_split_result("PR-7", 3), origin_scope="PR-7")
+    lines = block.splitlines()
+    assert len(lines) == 3
+    for idx, line in enumerate(lines, start=1):
+        assert line.startswith("- [ ] ")
+        assert f"PR-7-s{idx}" in line
+        assert "origin_scope: PR-7" in line

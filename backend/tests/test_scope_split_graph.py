@@ -29,6 +29,7 @@ from genome.scope_split.graph import (
     CouplingGraphBuilder,
     GitGrepCouplingBuilder,
     StaticCouplingBuilder,
+    _grep_count_line,
     _import_pattern,
     _path_to_module,
     make_coupling_builder,
@@ -375,3 +376,20 @@ def test_git_grep_missing_git_binary_raises_runtime_error(
     builder = GitGrepCouplingBuilder(repo_root=".")
     with pytest.raises(RuntimeError, match="git"):
         builder.build(("genome.a", "genome.b"))
+
+
+# ── _grep_count_line bare/unparsable branches (B2-Phase1 follow-up #6) ─────────
+
+
+def test_grep_count_line_parses_bare_and_unparsable_lines() -> None:
+    """from: B2-Phase1 deferred follow-up #6 (test-coverage nit) — ``_grep_count_line``'s
+    bare-count and unparsable branches (existing tests reach it only via a ``path:count`` line).
+
+    A bare integer (no ``path:`` prefix) parses to itself; a ``path:count`` line yields the count;
+    an unparsable token (with or without a colon) fails closed to 0 (the warn-and-skip branch),
+    never raising.
+    """
+    assert _grep_count_line("5") == 5  # bare count, no colon
+    assert _grep_count_line("backend/src/genome/x.py:3") == 3  # path:count
+    assert _grep_count_line("garbage") == 0  # unparsable, no colon → warn → 0
+    assert _grep_count_line("backend/src/genome/x.py:notanumber") == 0  # unparsable with colon

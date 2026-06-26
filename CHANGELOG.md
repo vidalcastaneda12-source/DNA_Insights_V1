@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- `genome.scope_split` code-quality cleanup (Sub Project B2 Phase 1 deferred review residuals
+  4/5/6, finding-039; CODE change but **behavior-preserving** — the detector's atomic/split
+  decisions and the CLI `check --json` / `--dry-run` output shape are byte-unchanged, so every
+  scope-split anchor holds and `mypy --strict backend/src` stays clean). **(1)** Remove the
+  provably-dead inter-cluster cycle branch in `splitter._topo_order` (it keyed a module→cluster
+  map but probed it with `depends_on` scope-ids, so it never fired) and document why such a cycle
+  is structurally impossible. **(2)** Type-design (`mypy --strict` payoff): a
+  `RiskTier = Literal[0, 1, 2]` over the computed-tier domain, a `CouplingEdge` `NamedTuple` value
+  type for the coupling-graph edges, and `TypedDict` shapes for the four `to_json()` serializers —
+  illegal states made unrepresentable with no runtime change (the sealed `AtomicResult |
+  SplitProposal` union was consciously declined in favor of the existing
+  `SplitResult.__post_init__` guard; `source`/`termination` have no referent in the module).
+  **(3)** Add six coverage tests (shrink-gate `<`-strict boundary, `out_of_scope_candidates`
+  peeling, extraction-guard AND semantics, a direct `format_roadmap_block` unit, the
+  `--manifest <file>` success path, and `_grep_count_line`'s bare/unparsable branches). Ticks the
+  deferred-followups plan items 4/5/6. (#NNN)
 - Wave-1 docs/ledger sweep (docs-only — no code, schema, dependency, or DB change, so the dev-loop
   and every real-data anchor stay byte-unchanged). Four already-decided residuals drained into one
   PR. **(1)** Close ROADMAP **PR 7** (gnomAD orphan-version cleanup, finding-015 §12 Option C) as

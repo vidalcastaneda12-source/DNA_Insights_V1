@@ -27,7 +27,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol, runtime_checkable
+from typing import Literal, NamedTuple, Protocol, runtime_checkable
 
 import structlog
 
@@ -38,6 +38,21 @@ _GIT_NO_MATCHES: int = 1
 
 #: The engine-selection literal for :func:`make_coupling_builder` (mirrors ``LiftoverEngine``).
 CouplingEngine = Literal["auto", "git-grep", "static"]
+
+
+class CouplingEdge(NamedTuple):
+    """An undirected weighted coupling edge ``(a, b, weight)`` with ``a <= b`` canonical ordering.
+
+    A :class:`typing.NamedTuple` (not a frozen dataclass) so it stays tuple-compatible: an edge
+    unpacks (``for a, b, w in edges``), indexes (``edge[0]`` / ``edge[2]``), and compares + hashes
+    equal to the plain ``(a, b, weight)`` triple it replaces — so existing triple literals and
+    ``frozenset`` equality keep working unchanged. The named ``.a`` / ``.b`` / ``.weight`` access
+    is the type-design payoff (``finding-039`` deferred follow-up) with no runtime behavior change.
+    """
+
+    a: str
+    b: str
+    weight: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,8 +67,8 @@ class CouplingGraph:
 
     nodes: frozenset[str]
     """The footprint module names (the graph vertices)."""
-    edges: frozenset[tuple[str, str, float]]
-    """Undirected weighted edges as ``(a, b, weight)`` with ``a < b`` canonical ordering."""
+    edges: frozenset[CouplingEdge]
+    """Undirected weighted :class:`CouplingEdge` triples ``(a, b, weight)`` with ``a < b``."""
     unresolved: frozenset[str] = frozenset()
     """Footprint modules whose on-disk source file was not found, so their coupling could NOT be
     measured (a typo, a not-yet-created module, or a name that did not map to a real file). Distinct
@@ -78,7 +93,7 @@ class CouplingGraph:
                 continue
             a, b = sorted((raw_a, raw_b))
             merged[a, b] = merged.get((a, b), 0.0) + weight
-        canonical = frozenset((a, b, weight) for (a, b), weight in merged.items())
+        canonical = frozenset(CouplingEdge(a, b, weight) for (a, b), weight in merged.items())
         if canonical != self.edges:
             object.__setattr__(self, "edges", canonical)
 
@@ -169,8 +184,8 @@ class StaticCouplingBuilder:
     nodes: frozenset[str] = frozenset()
     """The full node set this builder knows about (the build result is intersected with the
     requested ``modules``)."""
-    edges: frozenset[tuple[str, str, float]] = frozenset()
-    """The fixed undirected weighted edges (``(a, b, weight)`` with ``a < b``)."""
+    edges: frozenset[CouplingEdge] = frozenset()
+    """The fixed undirected weighted edges (:class:`CouplingEdge` ``(a, b, weight)``, ``a < b``)."""
 
     def build(self, modules: tuple[str, ...]) -> CouplingGraph:
         """Return the fixed graph restricted to ``modules`` (no scan, fully deterministic).
@@ -180,7 +195,9 @@ class StaticCouplingBuilder:
         """
         node_set = frozenset(modules)
         kept_edges = frozenset(
-            (a, b, weight) for (a, b, weight) in self.edges if a in node_set and b in node_set
+            CouplingEdge(a, b, weight)
+            for (a, b, weight) in self.edges
+            if a in node_set and b in node_set
         )
         return CouplingGraph(nodes=node_set, edges=kept_edges)
 
@@ -240,7 +257,7 @@ class GitGrepCouplingBuilder:
                     continue
                 a, b = sorted((importer, imported))
                 weights[a, b] = weights.get((a, b), 0.0) + float(count)
-        edges = frozenset((a, b, weight) for (a, b), weight in weights.items())
+        edges = frozenset(CouplingEdge(a, b, weight) for (a, b), weight in weights.items())
         return CouplingGraph(nodes=nodes, edges=edges, unresolved=unresolved)
 
     def _module_file_exists(self, module: str) -> bool:

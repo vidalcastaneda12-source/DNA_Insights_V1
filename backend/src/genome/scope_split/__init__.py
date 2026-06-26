@@ -30,6 +30,7 @@ from genome.scope_split.formatter import (
     format_split_proposal,
 )
 from genome.scope_split.graph import (
+    CouplingEdge,
     CouplingGraph,
     CouplingGraphBuilder,
     GitGrepCouplingBuilder,
@@ -45,6 +46,7 @@ from genome.scope_split.model import (
     SCHEMA_FIRST_ORDER,
     SHARED_HELPER_FANIN,
     CutQuality,
+    RiskTier,
     ScopeManifestInput,
     SplitResult,
     SubScope,
@@ -73,10 +75,12 @@ __all__ = [
     "MIN_SUBSCOPE_SHRINK",
     "SCHEMA_FIRST_ORDER",
     "SHARED_HELPER_FANIN",
+    "CouplingEdge",
     "CouplingGraph",
     "CouplingGraphBuilder",
     "CutQuality",
     "GitGrepCouplingBuilder",
+    "RiskTier",
     "ScopeManifestInput",
     "SplitResult",
     "StaticCouplingBuilder",

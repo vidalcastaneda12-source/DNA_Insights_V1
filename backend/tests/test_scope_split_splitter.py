@@ -627,3 +627,88 @@ def test_veto_survives_at_exact_threshold_boundary() -> None:
     assert result.atomic is False, "a cut at exactly MAX_CUT_COST must survive the veto"
     assert result.cut_quality is not None
     assert result.cut_quality.cut_cost == pytest.approx(MAX_CUT_COST)
+
+
+# ── B2-Phase1 follow-up #6: shrink-gate boundary, peeling, extraction AND ──────
+
+
+def test_shrink_gate_boundary_is_strict_less_than() -> None:
+    """from: B2-Phase1 deferred follow-up #6 (test-coverage nit) + DECISION 1 quality gate
+    ("every sub-scope shrink >= MIN_SUBSCOPE_SHRINK") — pins the gate's STRICT ``<`` boundary.
+
+    The gate rejects a cut iff ``achieved_shrink < MIN_SUBSCOPE_SHRINK`` (a strict ``<``). A worst
+    cluster of 33/50 modules makes ``max_cluster_fraction == 0.66`` — so the achieved shrink is
+    mathematically EXACTLY MIN_SUBSCOPE_SHRINK (0.34), which lands at 0.33999… in IEEE-754 and is
+    therefore rejected; a 13/20 worst cluster (achieved 0.35) clears it. The two bracket the
+    boundary and prove a ``<=`` typo (which would split the 0.66 case) would be caught. The empty
+    builder makes the shrink term — not the veto/partition — the deciding gate.
+    """
+    # just below the 0.34 boundary (33/50 = 0.66 fraction → achieved 0.33999… < 0.34) → atomic
+    below = _manifest(
+        scope_id="PR-SHRINK-LO",
+        change_class=("schema", "cli"),
+        imports_touched=tuple(f"ddl/group_{i}.sql" for i in range(33))
+        + tuple(f"genome/x/cli_{i}.py" for i in range(17)),
+    )
+    result_below = propose_split(below, _empty_builder())
+    assert result_below.atomic is True
+    assert "shrink" in result_below.reason.lower()
+
+    # just above the boundary (13/20 = 0.65 fraction → achieved 0.35 >= 0.34) → splits
+    above = _manifest(
+        scope_id="PR-SHRINK-HI",
+        change_class=("schema", "cli"),
+        imports_touched=tuple(f"ddl/group_{i}.sql" for i in range(13))
+        + tuple(f"genome/x/cli_{i}.py" for i in range(7)),
+    )
+    result_above = propose_split(above, _empty_builder())
+    assert result_above.atomic is False
+    assert len(result_above.sub_scopes) == 2
+
+
+def test_out_of_scope_candidates_are_peeled_into_singletons() -> None:
+    """from: B2-Phase1 deferred follow-up #6 (test-coverage nit) + DECISION 1 (the primary
+    partition is refined so each ``out_of_scope_candidates`` entry naming a footprint module is
+    peeled into its OWN candidate cluster).
+
+    A single-change_class manifest is normally one cluster (atomic), but naming two footprint
+    modules in ``out_of_scope_candidates`` peels each into its own singleton cluster — yielding a
+    3-cluster split where the two peeled modules each come back as a 1-module sub-scope.
+    """
+    m = _manifest(
+        scope_id="PR-PEEL",
+        change_class=("cli",),
+        imports_touched=(
+            "genome.x.cli",
+            "genome.x.helpers",
+            "genome.x.special_a",
+            "genome.x.special_b",
+        ),
+        out_of_scope_candidates=("genome.x.special_a", "genome.x.special_b"),
+    )
+    result = propose_split(m, _empty_builder())
+    assert result.atomic is False
+    assert len(result.sub_scopes) == 3
+    # the grouped cluster keeps 2 modules; each peeled candidate is its own 1-module sub-scope
+    assert sorted(s.est_imports_touched for s in result.sub_scopes) == [1, 1, 2]
+
+
+def test_extraction_guard_requires_both_change_class_and_imports_empty() -> None:
+    """from: B2-Phase1 deferred follow-up #6 (test-coverage nit) + reduction step 2 (the
+    extraction guard is ``empty change_class AND empty imports_touched`` → atomic).
+
+    The guard's reason ("nothing to partition") fires ONLY when BOTH are empty. With exactly one
+    side empty the guard does NOT fire — the scope still reduces to atomic, but via the *partition*
+    gate ("not separable"), proving the guard is an AND, not an OR.
+    """
+    # imports present, change_class empty → NOT the extraction guard (falls to the partition gate)
+    no_class = _manifest(change_class=(), imports_touched=("genome.x.a", "genome.x.b"))
+    r1 = propose_split(no_class, _empty_builder())
+    assert r1.atomic is True
+    assert "nothing to partition" not in r1.reason
+
+    # change_class present, imports empty → NOT the extraction guard either
+    no_imports = _manifest(change_class=("cli",), imports_touched=())
+    r2 = propose_split(no_imports, _empty_builder())
+    assert r2.atomic is True
+    assert "nothing to partition" not in r2.reason
