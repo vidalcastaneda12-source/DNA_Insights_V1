@@ -11,6 +11,14 @@ engine). **Phase 2 (orchestration) leans on Sub Project C's resumability.**
 
 ---
 
+> **Currency note (2026-06-26 repo sweep):** kept as the live design for the still-unbuilt
+> **Phase 2 (`genome.campaign`)** — its state machine, adaptive re-validation, and resumability
+> are sole-sourced here (finding-039 + the ROADMAP slot carry only the one-line summary). One
+> update since the 2026-06-24 brainstorm: C2+D (`DEC-0099`) made the dynamic-workflows **engine**
+> the primary orchestration path, so Phase-2 wiring should target the engine, not the
+> "model-driven path" §4 assumes — the campaign design itself is substrate-independent and carries
+> over. Prune this plan once Phase 2 ships (then finding-039 + the code are the record).
+
 ## 1. Context — where this fits
 
 Fast-follow (B) drains **too-small** leftovers at the *end* of the pipeline. B2 is its dual

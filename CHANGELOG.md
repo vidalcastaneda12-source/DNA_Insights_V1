@@ -7,8 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 - Repo-sweep cleanup + fast-follow drains (docs + small CLI fixes; no schema/DB change). Prune
-  two implemented plan artifacts (`sub-project-A-agentic-verify-gate`,
-  `sub-project-B-fast-follow-loop` — durable rationale lives in finding-037 / finding-038). Track
+  three implemented plan artifacts (`sub-project-A-agentic-verify-gate`,
+  `sub-project-B-fast-follow-loop`, `sub-project-C1-cross-run-learning` — durable rationale lives in
+  finding-037 / finding-038 / finding-040; the C1 doc-status guard test is retired with it). Keep the
+  half-built `sub-project-B2-scope-split` (its Phase-2 `genome.campaign` design is unbuilt + sole-sourced)
+  with an engine-primary currency note. Track
   previously slot-less work in `ROADMAP.md`: a new **PR 14** bundling three fired deferrals
   (finding-005 #9 `pos_grch37` recoalesce, finding-027 panel-strand reconciliation, finding-021
   probe-ID normalization); fold finding-022 / finding-005 #10 (version-label↔bytes decoupling)
