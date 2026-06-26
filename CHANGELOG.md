@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sub-second `has_haploid_gt` existence short-circuit instead of the ~55 CPU-min exact count
   (finding-030 — byte-identical subsets, no anchor impact); drop the stale "stub / raises
   NotImplementedError" docstrings from the six implemented `genome.fast_follow` modules; and
-  refresh the README pre-Phase-6 status line. (PR #NNN)
+  refresh the README pre-Phase-6 status line. (#112)
 - Port the per-scope agent-team orchestrators to the dynamic-workflows engine dialect
   (sub-project-C2-D, finding-034): `plan-phase.js`, `implement-review.js`, and `close.js` are
   rewritten from the CommonJS + `runAgent()`-probe shim to the engine's self-contained dialect —
