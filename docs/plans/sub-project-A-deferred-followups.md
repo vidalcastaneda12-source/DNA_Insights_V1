@@ -12,16 +12,18 @@ other work. Durable rationale for the scope lives in [`finding-037`](../findings
   was deleted in the 2026-06-26 repo-sweep cleanup PR rather than have its stale
   *"ready for an implementation plan"* status line linger past Sub A's ship (PR #102).
 
-- [ ] **Independence-framing polish** (low leverage) — finishing the evidence-gated reconcile in the
-  spots the PR left on the old framing: `finding-034`'s stage table + its two Mermaid "HUMAN GATE 2"
-  labels, and `CLAUDE.md` line ~20 (the VSC-User actor one-liner). They still read "VSC-User runs
-  verification.md, merges" with no evidence-gated note. The `finding-034` amendment + `CLAUDE.md`
-  line 52 already cover it for a careful reader — this is annotation tidy-up to match.
+- [x] **Independence-framing polish** — **done (2026-06-26 Wave-1 docs sweep).** `finding-034`'s
+  Gate-2 stage-table row + its two Mermaid "HUMAN GATE 2" labels (plus the sibling compact "GATE 2"
+  + ASCII gate-2 labels, for consistency) now carry the owner-approved evidence-gated alternative
+  (Claude runs `genome.verify_gate`, presents raw evidence, takes a typed approval, squash-merges;
+  `finding-037`). The `CLAUDE.md` line-20 half was already done; this PR completed the `finding-034`
+  half.
 
-- [ ] **Per-PR-history ledger backfill** (pre-existing, *not* introduced by Sub A) — `MEMORY.md`'s
-  per-PR retrospective rows stop at PR #93 (`DEC-0084`); PRs #94, #96–#102 have none. Append the
-  rows + bump the "Declared complete: PRs … #93" footnote. (Sub A's own *decisions* are already in
-  the ledger as `DEC-0087`–`DEC-0090`; this is only the separate per-PR index.)
+- [x] **Per-PR-history ledger backfill** (pre-existing, *not* introduced by Sub A) — **done
+  (2026-06-26 Wave-1 docs sweep).** Note: by the time this ran, PR #113 had already backfilled
+  #94–#112 (`DEC-0100 … DEC-0117`, footnote advanced to "PRs #19 … #112"), so the residual was a
+  single row — this PR appended `DEC-0118` for the now-merged #113 and bumped the footnote to
+  "PRs #19 … #113" (82 commits). Sub A's own *decisions* remain `DEC-0087`–`DEC-0090`.
 
 - [ ] **`change_class` is a trusted input** (acknowledged in `finding-037`) — the DB-free verify-gate
   CLI can't re-derive `change_class` from the diff, so a mis-declared class is caught only by the

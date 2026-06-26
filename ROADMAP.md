@@ -2,7 +2,7 @@
 
 Phases are sequential. Do not start phase N+1 until phase N's verification passes.
 
-**Current phase:** Phase 5 closed; executing the pre-Phase-6 cleanup sequence (PRs 1–6 landed; PR 7 next — re-scope first, it may be moot against the live DB) before Phase 6 begins. PR 6 (minimal `genes` seed, #88) cleared the Phase-6 FK gate.
+**Current phase:** Phase 5 closed; executing the pre-Phase-6 cleanup sequence (PRs 1–6 landed; PR 7 closed-as-moot against the live DB — no FK-safe gnomAD orphan exists; PR 8 next) before Phase 6 begins. PR 6 (minimal `genes` seed, #88) cleared the Phase-6 FK gate.
 
 ## Phase 1 — Foundation (this is the bootstrap)
 
@@ -86,8 +86,8 @@ Deferred to later phases:
 
 ## Pre-Phase-6 sequence
 
-**Status:** in progress — PRs 1–6 landed (#63, #64, #65, #70, #74, #88); PR 7 is next
-(but re-scope first — see its ⚠️ note; it may be moot against the live DB).
+**Status:** in progress — PRs 1–6 landed (#63, #64, #65, #70, #74, #88); PR 7
+closed-as-moot (2026-06-26 — the live DB has no FK-safe gnomAD orphan); PR 8 is next.
 
 A 14-PR run that clears every dbSNP-dependent backfill, deferred-cleanup item,
 and FK blocker before the Phase 6 analyses begin, so Phase 6 starts with no open
@@ -147,18 +147,19 @@ finding-016 #8):
   `cpic_covered`/`pharmgkb_covered`=True; negative control byte-unchanged. See
   CLAUDE.md "Real-data observations" #7, [`finding-020`](docs/findings/finding-020-canonical-refalt-backfill.md)
   "Out of scope" amendment, and verification.md "PR 6 genes seed gate". (#88)
-- [ ] **PR 7** — finding-015 orphan gnomAD cleanup, **Option C**: one-off
-  `DELETE` of the pre-existing orphan `annotation_source_versions` rows (gnomAD
-  v6/v7/v8/v10, zero `gnomad_frequencies` references each). Distinct from PR #53, which
-  shipped finding-015 Option B (loader hardening to prevent *future* orphans) but
-  deliberately left these rows in place.
-  - **⚠️ Re-scope before running (post-PR-C, 2026-06-22):** the `v6/v7/v8/v10` list is
-    **stale**. The live (rebuilt) DB has only `source_version_id=8` (superseded,
-    4,467,370 rows) + `source_version_id=10` (**active**, 4,568,802 rows) — the
-    `IN (6,7,8,10)` DELETE would erase the **active** gnomAD version + the superseded
-    build (data loss). Re-derive the real zero-row orphan set against the live DB first;
-    by current evidence PR 7 may be **moot** (no zero-row orphans by those ids). See
-    finding-015 "Amendment — post-PR-C reload" + CLAUDE.md obs #4.
+- [x] **PR 7** — finding-015 orphan gnomAD cleanup (**Option C**) — **closed as moot
+  (2026-06-26).** The original one-off `DELETE` of zero-`gnomad_frequencies`-reference
+  gnomAD `annotation_source_versions` rows (framed `IN (6,7,8,10)`) is empty against the
+  live (rebuilt) DB. **Read-only PR-7 probe (2026-06-26):** the zero-row-orphan set is
+  `[]`; the live gnomad inventory is `{8 (4,467,370 rows, superseded-with-data), 10
+  (4,568,802 rows, active)}`, the `annotation_sources` pointer = `10`, and both ids carry
+  matching `gnomad_frequencies` data — **no FK-safe orphan exists**. The stale
+  `IN (6,7,8,10)` DELETE would have erased the **active** (id=10) + superseded (id=8)
+  builds, so **no DELETE was executed**. Future-orphan *prevention* already shipped
+  (finding-015 Option B, PR #53). The general superseded-row cleanup procedure (covering
+  the data-bearing id=8 and `variant_aliases` orphans) remains **PR 9** (finding-010 #14) —
+  not folded here. See finding-015 §12 (now inline-marked) + its Amendment closing note,
+  CLAUDE.md obs #4, and `docs/runbooks/annotations.md` (gnomAD §5.5 "Orphan version rows").
 - [ ] **PR 8** — Deferred docs/cosmetic batch: the `MAPPED_TRAIT_URI` truncation finding
   entry (finding-005, deferred from 5.3), the imputation docstring filename fix, and the
   PharmGKB/CPIC `already_current=True` cosmetic cleanup (finding-010 #12).

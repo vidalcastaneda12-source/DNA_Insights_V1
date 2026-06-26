@@ -149,7 +149,10 @@ superseded_by: []
     creation without touching existing v6/v7/v8/v10. Best aligns
     gnomad with the precedent the other five Phase-5 loaders follow.
 
-12. **Option C — cleanup SQL plus Option B.** Option B plus a one-off
+12. **`[SUPERSEDED · STALE · DO-NOT-RUN · PR7-MOOT-2026-06-26 — see the
+    Amendment below: the live DB has NO zero-row orphans; id=8 and id=10
+    BOTH carry data, so this DELETE would erase the active + superseded
+    gnomAD builds]`** **Option C — cleanup SQL plus Option B.** Option B plus a one-off
     `DELETE FROM annotation_source_versions WHERE source_db =
     'gnomad' AND source_version_id IN (6, 7, 8, 10)`. FK-safe by the
     same argument. Removes the `--resume` ambiguity (a future
@@ -183,3 +186,14 @@ argument relied on (v10 is referenced by `annotation_sources`; v8 by 4.47M
 first re-derive the *actual* zero-row orphan set against the live DB — by current
 evidence there are **none** by those ids, so PR 7 may now be **moot**. Current
 landscape: CLAUDE.md obs #4 (PR C re-lock).
+
+**Closing note — PR-7 probe (read-only, 2026-06-26):** the zero-row-orphan query
+(*not the active pointer **and** not referenced by any `gnomad_frequencies` row*)
+returns **0 rows**. The live gnomad `annotation_source_versions` inventory is
+**{8 (4,467,370 rows, superseded-with-data), 10 (4,568,802 rows, active)}**, the
+`annotation_sources` pointer = **10**, and both ids carry matching
+`gnomad_frequencies` data — there is **no FK-safe orphan to delete**. **PR 7 is
+closed as moot; no `DELETE` was executed.** Future-orphan *prevention* already
+shipped (Option B above, PR #53); the general superseded-row cleanup procedure
+(including the data-bearing id=8) remains ROADMAP **PR 9** (finding-010 #14). See
+ROADMAP PR-7 (now closed-as-moot) and the `CHANGELOG` entry.

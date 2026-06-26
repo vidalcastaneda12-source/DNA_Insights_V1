@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Wave-1 docs/ledger sweep (docs-only — no code, schema, dependency, or DB change, so the dev-loop
+  and every real-data anchor stay byte-unchanged). Four already-decided residuals drained into one
+  PR. **(1)** Close ROADMAP **PR 7** (gnomAD orphan-version cleanup, finding-015 §12 Option C) as
+  **moot**: a read-only probe of the live DB returns zero FK-safe gnomAD orphans (inventory
+  `{8 (4,467,370, superseded), 10 (4,568,802, active)}`, pointer 10; **no DELETE executed**), so the
+  stale `IN (6,7,8,10)` DELETE — which would erase the active + superseded builds — is inline-marked
+  `DO-NOT-RUN` in finding-015 §12, recorded in the finding-015 Amendment + `annotations.md` gnomAD
+  §5.5, and the ROADMAP slot is flipped to closed-as-moot (the general superseded-row cleanup stays
+  PR 9). **(2)** Add the owner-approved evidence-gated merge path (Claude runs `genome.verify_gate`,
+  presents raw evidence, typed approval, squash-merge; finding-037) to finding-034's Gate-2 stage
+  table + Mermaid labels — the Sub-A independence-framing reconcile (CLAUDE.md was already done).
+  **(3)** Append the per-PR ledger row `DEC-0118` (#113) and advance the `MEMORY.md` footnote to
+  "PRs #19 … #113" (PR #113 had already backfilled #94–#112). **(4)** Reconcile finding-039's
+  coupling-veto prose to the as-built `cut_cost` severed-fraction threshold and note that
+  `weakly_connected_components` is implemented but unused by the splitter (no wcc wiring). Closes the
+  Sub-A independence-framing + per-PR-backfill items and the Sub-B2 finding-039 doc↔code item.
+  (Wave 1 docs sweep)
 - Fast-follow drain of eight documentation residuals surfaced by the post-#112 repo sweep
   (`/fast-follow`, Sub Project B / finding-038; docs-only — no code, schema, dependency, or DB
   change, so the dev-loop and every real-data anchor stay byte-unchanged). Re-point four findings
