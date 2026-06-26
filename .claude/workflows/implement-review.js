@@ -290,7 +290,7 @@ async function stageImplement(ctx, fixFindings) {
   if (members.includes('silent-failure-hunter')) {
     guardThunks.push(() => call('silent-failure-hunter', { manifest, mode: 'in-loop' }, { label: 'silent-failure (in-loop)' }));
   }
-  const guardOut = await parallel(guardThunks);
+  const guardOut = guardThunks.length ? await parallel(guardThunks) : []; // Tier 0 has no guards
   const sentinel = guardOut.find((g) => g && 'verdict' in g);
 
   // green-keeper holds the dev-loop. On real red the in-loop sub-loop fires (GAP-4):
@@ -358,6 +358,7 @@ async function reviewRound(lenses, ctx, diffSummary, seenIds, useBarrier) {
   const verifyFresh = async (fromLens, findings) => {
     const fresh = (findings || []).filter((f) => f && f.severity !== 'nit' && f.id && !seenIds.has(f.id));
     fresh.forEach((f) => seenIds.add(f.id));
+    if (!fresh.length) return []; // common clean-lens path — don't lean on parallel([]) semantics
     return (await parallel(fresh.map((f) => () => verifyOne(f, fromLens)))).filter(Boolean);
   };
 
