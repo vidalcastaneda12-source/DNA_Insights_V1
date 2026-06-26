@@ -2,10 +2,14 @@ Run the per-scope agent team (finding-034) for one ROADMAP scope item, end to
 end, stopping at each of the two human gates. Argument: a scope id (e.g.
 `PR-6`), optionally followed by `--from <stage>` to resume after a gate.
 
-This command is the **model-driven orchestrator** — the runnable-today path. The
-team's members live in `.claude/agents/*.md` and are usable standalone; this
-command sequences them with **adaptive depth** and threads each member's
-structured JSON output to the next. You (the lead session) spawn each member via
+This command is the team's **model-driven conductor and headless/cron fallback** —
+the orchestration default went **engine-primary** in Sub Project C2-D (see "Two
+orchestration paths" below), so the deterministic JS workflows are preferred and this
+command's role is to launch each engine segment by name (pausing for the human between
+gates) and to walk the whole pipeline through the Task tool when the engine is
+unavailable. The team's members live in `.claude/agents/*.md` and are usable
+standalone; this command sequences them with **adaptive depth** and threads each
+member's structured JSON output to the next. You (the lead session) spawn each member via
 the **Task tool** with the matching `subagent_type`, collect its JSON, and route
 per the rules below. You never auto-approve a plan and never merge; those are the
 two human gates.

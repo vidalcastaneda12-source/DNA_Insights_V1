@@ -127,7 +127,7 @@ async function call(agentType, input, opts) {
   log(`[plan-phase] → ${label || agentType} (${agentType})`);
   const agentOpts = { agentType };
   if (schema) agentOpts.schema = schema;
-  if (isolation) agentOpts.isolation = isolation; // engine-level worktree directive (fan-out writers)
+  if (isolation) agentOpts.isolation = isolation; // isolation:'worktree' → engine worktree directive; NOT probe/harness-exercised (deferred-unverified, D7/suite7). Only the fan-out writer passes it.
   return withRetry(() => agent(prompt, agentOpts), agentType);
 }
 
@@ -140,6 +140,14 @@ function budgetRemaining() {
 function budgetExhausted() {
   if (!budget || typeof budget.total !== 'number' || budget.total <= 0) return false;
   return budgetRemaining() <= 0;
+}
+
+// Count-what-you-drop (CLAUDE.md): a parallel fan-out NULLs a rejected thunk and
+// `.filter(Boolean)` removes it. When any member is lost, log how many of the attempted
+// pool fell out + the pool identities, so a silent partial fan-out is observable.
+function logDropped(site, attempted, kept) {
+  const n = attempted.length - kept.length;
+  if (n > 0) log(`[plan-phase] ${site}: ${n}/${attempted.length} dropped (rejected→null→filtered) — pool=[${attempted.join(', ')}]`);
 }
 
 // `args` may be a bare scope id, a JSON string (the engine stringifies an object arg),
@@ -195,6 +203,7 @@ async function planPhase(scopeId) {
         ),
       )
     ).filter(Boolean);
+    logDropped('planners', panel.angles, candidates);
     if (!candidates.length) throw new Error('plan-phase.js: every planner failed to return a candidate');
 
     // 2 · Judge + 3 · Synthesize. A lone Tier-0 candidate skips the panel.
@@ -212,6 +221,7 @@ async function planPhase(scopeId) {
       const scorecards = (
         await parallel(axes.map((axis) => () => call('plan-judges', { manifest, candidates, axis }, { schema: SCHEMAS.planJudges, label: `judge:${axis}` })))
       ).filter(Boolean);
+      logDropped('judges', axes, scorecards);
       synthesized = await call('plan-synthesizer', { manifest, candidates, scorecards }, { schema: SCHEMAS.planSynthesizer, label: 'synthesizer' });
     }
 
@@ -225,6 +235,7 @@ async function planPhase(scopeId) {
         ),
       )
     ).filter(Boolean);
+    logDropped('premortem', lenses, premortems);
     premortem = mergePremortems(premortems, scopeId);
 
     // 5 · Audit — independent contract grade, consuming the pre-mortem. Tier 2 adds
@@ -242,7 +253,9 @@ async function planPhase(scopeId) {
         ),
       );
     }
+    const auditorIds = tier === 2 ? [...panel.auditorLenses, 'architect-reviewer'] : [...panel.auditorLenses];
     const audits = (await parallel(auditThunks)).filter(Boolean);
+    logDropped('auditors', auditorIds, audits);
     audit = mergeAudits(audits, scopeId);
 
     if (audit.verdict === 'ready' || audit.verdict === 'escalate') break;
@@ -286,6 +299,17 @@ async function planPhase(scopeId) {
 
 /** Merge N pre-mortems → strictest recommendation wins (probe-first > revise > proceed). */
 function mergePremortems(premortems, scopeId) {
+  // Fail-closed: an empty pre-mortem pool (every skeptic rejected → nulled → filtered) must
+  // NOT collapse to the permissive default 'proceed'. Reduce to the conservative recommend.
+  if (!premortems.length) {
+    return {
+      scope_id: scopeId,
+      recommend: 'probe-first',
+      predicted_surprises: [],
+      anchors_at_risk: [],
+      escalation_reason: 'every pre-mortem skeptic failed to return — failing closed to probe-first',
+    };
+  }
   const order = { proceed: 0, revise: 1, 'probe-first': 2 };
   let recommend = 'proceed';
   const predicted = [];
@@ -312,6 +336,18 @@ function severityRank(sev) {
  * least a revise, so a blocker-level architecture finding can never silently pass.
  */
 function mergeAudits(audits, scopeId) {
+  // Fail-closed: with NO verdict-bearing auditor in the pool (every plan-auditor rejected/crashed
+  // → nulled → filtered, leaving at most the verdict-LESS architect-reviewer), the plan is
+  // UNAUDITED — it must NOT collapse to the permissive default 'ready'. An unaudited plan escalates.
+  const verdictful = audits.filter((a) => a && typeof a.verdict === 'string');
+  if (!verdictful.length) {
+    return {
+      scope_id: scopeId,
+      verdict: 'escalate',
+      findings: [],
+      escalation_reason: 'no plan-auditor returned a verdict (all crashed) — unaudited plan, failing closed to escalate',
+    };
+  }
   const order = { ready: 0, revise: 1, escalate: 2 };
   let verdict = 'ready';
   const findings = [];

@@ -124,6 +124,11 @@ function stage3Lenses(tier, manifest) {
   return [...set];
 }
 
+// The factor-gated SAFETY lenses (finding-034 lens-gating BY FACTOR). If one is expected but
+// its call rejects (nulled by .filter(Boolean)), the review must fail closed — a dropped
+// safety result can never be silently synthesized into a 'go'.
+const SAFETY_LENSES = ['phi-pii-guardian', 'regression-hunter'];
+
 // manifest.review_lenses uses friendly names; map the ones with an agent file.
 const LENS_TO_AGENT = {
   'convention-compliance': 'convention-compliance',
@@ -183,7 +188,7 @@ async function call(agentType, input, opts) {
   log(`[implement-review] → ${label || agentType} (${agentType})`);
   const agentOpts = { agentType };
   if (schema) agentOpts.schema = schema;
-  if (isolation) agentOpts.isolation = isolation; // engine-level worktree directive (fan-out writers)
+  if (isolation) agentOpts.isolation = isolation; // isolation:'worktree' → engine worktree directive; NOT probe/harness-exercised (deferred-unverified, D7/suite7). Only the fan-out writer passes it.
   return withRetry(() => agent(prompt, agentOpts), agentType);
 }
 
@@ -247,7 +252,9 @@ async function stageImplement(ctx, fixFindings) {
   // Plan-blind test-author ∥ the writer. The author is denied the implementation diff by
   // contract; here it receives ONLY the plan + the frozen interface (or the plan).
   const writerThunks = [];
+  let testAuthorIdx = -1;
   if (members.includes('test-author')) {
+    testAuthorIdx = writerThunks.length;
     writerThunks.push(() =>
       call(
         'test-author',
@@ -275,6 +282,11 @@ async function stageImplement(ctx, fixFindings) {
   const writerOut = await parallel(writerThunks);
   const impl = writerOut[writerIdx];
   if (!impl) throw new Error('implement-review.js: the writer (implementer / fan-out-implementer) returned no result');
+  // Fail-closed: the plan-blind test-author was expected (≥ Tier 1) but its call rejected
+  // (null slot) → the red→green oracle never ran, so a "green" loop proves nothing. Do not
+  // silently proceed; mark the stage blocked (escalate).
+  const testAuthorMissing = testAuthorIdx >= 0 && !writerOut[testAuthorIdx];
+  if (testAuthorMissing) log('[implement-review] plan-blind test-author returned no result — blind tests unverified; failing closed (escalate)');
 
   // schema side-channel: change_class ⊇ schema → schema-change-executor runs the
   // documented rebuild/re-ingest protocol (it owns the schema files; the implementer is
@@ -287,14 +299,28 @@ async function stageImplement(ctx, fixFindings) {
   // Guards on the produced diff: sentinel (drift) + in-loop silent-failure (no verdict,
   // result discarded → schema-LESS per D1). The sentinel is the guard carrying a verdict.
   const guardThunks = [];
+  const guardIds = [];
+  let sentinelIdx = -1;
   if (members.includes('plan-adherence-sentinel')) {
+    sentinelIdx = guardThunks.length;
+    guardIds.push('plan-adherence-sentinel');
     guardThunks.push(() => call('plan-adherence-sentinel', { manifest, plan, predicted_surprises }, { schema: SCHEMAS.planAdherenceSentinel, label: 'sentinel' }));
   }
   if (members.includes('silent-failure-hunter')) {
+    guardIds.push('silent-failure-hunter');
     guardThunks.push(() => call('silent-failure-hunter', { manifest, mode: 'in-loop' }, { label: 'silent-failure (in-loop)' }));
   }
   const guardOut = guardThunks.length ? await parallel(guardThunks) : []; // Tier 0 has no guards
-  const sentinel = guardOut.find((g) => g && 'verdict' in g);
+  const droppedGuards = guardIds.filter((_, i) => !guardOut[i]); // positional: a null slot = that guard
+  if (droppedGuards.length) log(`[implement-review] guards: ${droppedGuards.length}/${guardIds.length} dropped (rejected→null→filtered) — [${droppedGuards.join(', ')}]`);
+  // Track the sentinel BY INDEX. The in-loop silent-failure-hunter returns a prose STRING, so
+  // `'verdict' in g` scanned over the pool would THROW on the string; gate on typeof object.
+  // A missing slot (sentinel was expected but its call returned null) is not a clean pass —
+  // the sentinel carries the drift verdict, so an absent verdict fails closed (escalate).
+  const sentinelSlot = sentinelIdx >= 0 ? guardOut[sentinelIdx] : undefined;
+  const sentinel = sentinelSlot && typeof sentinelSlot === 'object' && 'verdict' in sentinelSlot ? sentinelSlot : null;
+  const sentinelMissing = sentinelIdx >= 0 && !sentinel;
+  if (sentinelMissing) log('[implement-review] plan-adherence-sentinel returned no usable verdict — failing closed (escalate)');
 
   // green-keeper holds the dev-loop. On real red the in-loop sub-loop fires (GAP-4):
   // test-triage classifies → deep-debugger (tier ≥ 2, only when triage routes there).
@@ -312,6 +338,8 @@ async function stageImplement(ctx, fixFindings) {
 
   const blocked =
     (sentinel && sentinel.verdict === 'escalate') ||
+    sentinelMissing ||
+    testAuthorMissing ||
     Boolean(green && green.escalate) ||
     (debug && debug.escalate === true) ||
     (schemaExec && schemaExec.escalate === true) ||
@@ -323,8 +351,10 @@ async function stageImplement(ctx, fixFindings) {
 /**
  * Severity-scaled, refute-by-default verification of ONE finding (GAP-5 / D6). blocker →
  * 2–3 distinct-angle skeptics in parallel (3, or 2 when the budget is tight); warn → 1.
- * strict-majority survives (> half not-refuted; a 1-1 tie on 2 → KILLED); a crashed
- * skeptic (null) counts as a refutation.
+ * strict-majority survives (> half not-refuted; a 1-1 tie on 2 → KILLED). A crashed skeptic
+ * (null) is NOT a refutation: a genuine `{survives:false}` kills, but a missing skeptic means
+ * verification is DEGRADED — retain the finding (fail-closed) so verifier infra can never
+ * silently drop a real blocker, and surface `verifier_degraded` to force the review to escalate.
  */
 async function verifyOne(finding, fromLens) {
   const blocker = finding.severity === 'blocker';
@@ -334,15 +364,29 @@ async function verifyOne(finding, fromLens) {
       call('finding-verifier', { finding, from_lens: fromLens, angle }, { schema: SCHEMAS.findingVerifier, label: `verify:${finding.id}:${angle}` }),
     ),
   );
-  const notRefuted = skeptics.filter((r) => r && r.survives === true).length;
+  const returned = skeptics.filter(Boolean);
+  const skepticsReturned = returned.length;
+  const degraded = skepticsReturned < angles.length; // any null skeptic ⇒ cannot refute reliably
+  const notRefuted = returned.filter((r) => r.survives === true).length; // count RETURNED-vs-attempted
+  if (degraded) {
+    log(
+      `[implement-review] verify:${finding.id}: ${angles.length - skepticsReturned}/${angles.length} skeptic(s) returned null — DEGRADED, retaining finding (fail-closed)`,
+    );
+  }
   return {
     id: finding.id,
     finding,
     lens: fromLens,
     severity: finding.severity,
-    survives: notRefuted > angles.length / 2, // strict majority; tie → KILLED (D6)
+    // Degraded ⇒ retain (survives) rather than let a verifier crash silently kill the finding;
+    // otherwise strict majority of RETURNED skeptics fail to refute (tie → KILLED, D6).
+    survives: degraded ? true : notRefuted > angles.length / 2,
+    unresolved: degraded, // retained but NOT adversarially confirmed
+    verifier_degraded: degraded, // forces the review to escalate upstream (fail-closed)
+    skeptics_returned: skepticsReturned,
+    skeptics_attempted: angles.length,
     skeptic_angles: angles,
-    votes: skeptics.filter(Boolean).flatMap((s) => s.votes || []),
+    votes: returned.flatMap((s) => s.votes || []),
   };
 }
 
@@ -359,7 +403,10 @@ async function reviewRound(lenses, ctx, diffSummary, seenIds, useBarrier) {
   const lensInput = { manifest, predicted_surprises, diff: diffSummary };
 
   const verifyFresh = async (fromLens, findings) => {
-    const fresh = (findings || []).filter((f) => f && f.severity !== 'nit' && f.id && !seenIds.has(f.id));
+    const all = findings || [];
+    const fresh = all.filter((f) => f && f.severity !== 'nit' && f.id && !seenIds.has(f.id));
+    const skippedUnverified = all.filter((f) => f && (f.severity === 'nit' || !f.id)).length;
+    if (skippedUnverified > 0) log(`[implement-review] ${fromLens}: ${skippedUnverified} finding(s) not verified (nit or id-less) — logged unverified (GAP-5/D6)`);
     fresh.forEach((f) => seenIds.add(f.id));
     if (!fresh.length) return []; // common clean-lens path — don't lean on parallel([]) semantics
     return (await parallel(fresh.map((f) => () => verifyOne(f, fromLens)))).filter(Boolean);
@@ -367,17 +414,24 @@ async function reviewRound(lenses, ctx, diffSummary, seenIds, useBarrier) {
 
   if (useBarrier) {
     // Barrier: collect every lens, dedup by id across lenses, then verify once.
-    const lensOut = (
+    const raw = (
       await parallel(
         lenses.map((l) => () =>
           call(l, lensInput, { schema: SCHEMAS.lens, label: `lens:${l}` }).then((o) => ({
             lens: l,
             findings: (o && o.findings) || [],
             anchors_to_watch: (o && o.anchors_to_watch) || [],
+            crashed: o == null, // a RESOLVED-null lens is a crash, masked by the `||` defaults above
           })),
         ),
       )
     ).filter(Boolean);
+    // A lens is dropped if its thunk REJECTED (absent → nulled by .filter(Boolean)) OR it
+    // RESOLVED null (crashed but masked by the `|| []` defaults). Both yield no usable result.
+    const present = new Set(raw.map((o) => o.lens));
+    const dropped = [...new Set([...lenses.filter((l) => !present.has(l)), ...raw.filter((o) => o.crashed).map((o) => o.lens)])];
+    if (dropped.length) log(`[implement-review] review-lenses (barrier): ${dropped.length}/${lenses.length} dropped (rejected/resolved-null) — [${dropped.join(', ')}]`);
+    const lensOut = raw.map(({ lens, findings, anchors_to_watch }) => ({ lens, findings, anchors_to_watch }));
     const byId = new Map();
     for (const o of lensOut) {
       for (const f of o.findings) {
@@ -387,20 +441,25 @@ async function reviewRound(lenses, ctx, diffSummary, seenIds, useBarrier) {
       }
     }
     const verdicts = await verifyFresh('(deduped)', [...byId.values()]);
-    return { lensOut, verdicts };
+    return { lensOut, verdicts, dropped };
   }
 
   // Pipeline: per lens, stage 1 runs the lens, stage 2 verifies its findings as it lands.
   // The engine signature is variadic — pipeline(items, ...stages), NOT a stage array.
-  const lensStage = (l) => call(l, lensInput, { schema: SCHEMAS.lens, label: `lens:${l}` }).then((o) => ({ lens: l, out: o || {} }));
-  const verifyStage = async ({ lens, out }) => {
+  const lensStage = (l) => call(l, lensInput, { schema: SCHEMAS.lens, label: `lens:${l}` }).then((o) => ({ lens: l, out: o || {}, crashed: o == null }));
+  const verifyStage = async ({ lens, out, crashed }) => {
     const verdicts = await verifyFresh(lens, out.findings || []);
-    return { lens, findings: out.findings || [], anchors_to_watch: out.anchors_to_watch || [], verdicts };
+    return { lens, findings: out.findings || [], anchors_to_watch: out.anchors_to_watch || [], verdicts, crashed: !!crashed };
   };
   const piped = (await pipeline(lenses, lensStage, verifyStage)).filter(Boolean);
   const lensOut = piped.map(({ lens, findings, anchors_to_watch }) => ({ lens, findings, anchors_to_watch }));
+  // Dropped = thunk REJECTED (absent from piped) OR lens RESOLVED null (crashed but masked by
+  // the `|| {}` default). Both mean the lens produced no usable result and must be surfaced.
+  const present = new Set(piped.map((p) => p.lens));
+  const dropped = [...new Set([...lenses.filter((l) => !present.has(l)), ...piped.filter((p) => p.crashed).map((p) => p.lens)])];
+  if (dropped.length) log(`[implement-review] review-lenses (pipeline): ${dropped.length}/${lenses.length} dropped (rejected/resolved-null) — [${dropped.join(', ')}]`);
   const verdicts = piped.flatMap((p) => p.verdicts || []);
-  return { lensOut, verdicts };
+  return { lensOut, verdicts, dropped };
 }
 
 /** Stage 3 — fan out lenses, adversarially verify, synthesize the pre-gate package. */
@@ -421,13 +480,15 @@ async function stageReview(ctx, diffSummary) {
   const seenIds = new Set();
   const allLensOut = [];
   const allVerdicts = [];
+  const allDropped = [];
   let dryStreak = 0;
 
   for (let round = 1; round <= MAX_REVIEW_ROUNDS; round++) {
     const before = allVerdicts.length;
-    const { lensOut, verdicts } = await reviewRound(lenses, ctx, diffSummary, seenIds, useBarrier);
+    const { lensOut, verdicts, dropped } = await reviewRound(lenses, ctx, diffSummary, seenIds, useBarrier);
     allLensOut.push(...lensOut);
     allVerdicts.push(...verdicts);
+    if (dropped && dropped.length) allDropped.push(...dropped);
 
     if (tier < 1) break; // Tier 0: single pass, no loop-until-dry.
 
@@ -450,13 +511,24 @@ async function stageReview(ctx, diffSummary) {
 
   const survivors = allVerdicts.filter((v) => v.survives);
 
+  // Fail-closed escalation signals (port GAP fixes), evaluated BEFORE the synthesizer's
+  // advisory verdict so a degraded review can never be synthesized into a 'go':
+  //  (1) a DEGRADED finding-verifier (a skeptic returned null) — can't adversarially confirm.
+  //  (2) a factor-gated SAFETY lens nulled+dropped by .filter(Boolean) — no safety result.
+  const verifierDegraded = allVerdicts.some((v) => v && v.verifier_degraded);
+  const droppedSafety = [...new Set(allDropped)].filter((l) => SAFETY_LENSES.includes(l));
+  let forceEscalate = null;
+  if (verifierDegraded) forceEscalate = 'finding-verifier degraded (a skeptic returned null) — cannot adversarially confirm; failing closed';
+  if (droppedSafety.length) forceEscalate = `expected SAFETY lens produced no result: [${droppedSafety.join(', ')}] — failing closed (never synthesize go)`;
+  if (forceEscalate) log(`[implement-review] Stage 3 force-escalate — ${forceEscalate}`);
+
   // Synthesize the pre-gate package for VSC-User.
   const pkg = await call(
     'review-synthesizer',
     { manifest, lens_findings: allLensOut, verdicts: allVerdicts, predicted_surprises, composed_skills: skills },
     { schema: SCHEMAS.reviewSynthesizer, label: 'review-synthesizer' },
   );
-  return { lenses, survivors_count: survivors.length, package: pkg };
+  return { lenses, survivors_count: survivors.length, package: pkg, force_escalate: forceEscalate };
 }
 
 /** Run Stage 2 → Stage 3 with the bounded fix-first loop. */
@@ -481,6 +553,11 @@ async function implementReview(ctx) {
     }
 
     stage3 = await stageReview(ctx, summarizeDiff(stage2));
+    // Fail-closed: a degraded verifier or a dropped SAFETY lens forces escalation regardless of
+    // the synthesizer's advisory verdict (an undecidable review reduces to escalate, never go).
+    if (stage3.force_escalate) {
+      return done(ctx, stage2, stage3, 'escalate', stage3.force_escalate);
+    }
     if (stage3.package.verdict === 'go') {
       // GAP-3 / D8: Stage-4 handoff assembly on the 'go' path, before the Gate-2 return.
       // handoff-assembler returns PROSE → call it schema-LESS; store the text on the package.

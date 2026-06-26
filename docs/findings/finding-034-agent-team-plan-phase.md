@@ -31,8 +31,9 @@ ClaudeCodeVerification / ClaudeCodePlanning (no code was written that session).
 > orchestrators to it. See `.claude/agents/README.md`.
 
 > **Amendment (Sub Project C2-D, 2026-06-25 — `finding-034` / `DEC-0099`).** The build-status
-> caveat above is now **superseded**. The dynamic-workflows engine dialect is documented and
-> **empirically confirmed** (the C2D-Phase1 load-model probe): the engine loads a workflow by
+> caveat above is now **superseded**. The dynamic-workflows engine dialect is
+> **empirically confirmed** (and documented in this Amendment; the C2D-Phase1 load-model probe —
+> see the probe-evidence appendix at the end of this finding): the engine loads a workflow by
 > reading the pure-literal `export const meta` and wrapping the rest of the body in an async
 > function with the hooks `agent · parallel · pipeline · log · phase · budget · workflow ·
 > args` injected as parameters; subagents are invoked via `agent(prompt, {agentType, schema})`,
@@ -1408,3 +1409,39 @@ adversarially-verified review lenses → an enriched handoff → the unchanged i
 human gate → a post-merge re-lock — five stages of in-loop agents bracketed by two
 out-of-loop human gates, each stage handing the next exactly what it needs to be cheap and
 exact.
+
+## Appendix — C2D-Phase1 load-model probe (evidence)
+
+This is the committed evidence for the Amendment's "**empirically confirmed**" claim — the
+live dynamic-workflows engine probe, run `wf_a37802b2-c92` (the initial run crashed on a
+test-bug synchronous throw; it resumed clean after the thunk was fixed to an async rejection).
+The probe script is committed verbatim alongside this finding at
+[`c2d-load-probe-wf_a37802b2-c92.js`](c2d-load-probe-wf_a37802b2-c92.js). Together with this
+appendix it resolves the prior dangling "C2D-Phase1 plan-v2" reference in `DEC-0099` by
+bringing the plan + probe context in-repo.
+
+**Probe result (verbatim):**
+
+```json
+{"probe":"C2D-Phase1-load-model","args_seen":"{\"scope\": \"C2D-Phase1\", \"purpose\": \"load-model-probe-resume\"}","load_ok":true,"agentType_resolved":{"ok":true,"who":"scope-dispatcher"},"parallel_null_on_throw":["A",null,"C"],"pipeline_result":[11,21,31],"budget_total":null,"budget_spent":2738950}
+failures: parallel[1] failed: async rejection — expect null in this slot
+```
+
+**Confirmed (all green) — verbatim from the probe report:**
+
+- **load_ok**: `export const meta` (pure literal, **nested `phases`**) extracted correctly; a header comment containing the literal `export const meta` did **not** false-match; top-level `await` + top-level `return` work → the engine wraps the body in an async fn. (GT-2/GT-3, EF-4 retired.)
+- **agentType_resolved = {ok,who}**: `agent(prompt,{agentType:'scope-dispatcher',schema})` resolved `.claude/agents/scope-dispatcher.md` AND returned a **schema-validated object** — confirms `agentType` resolves the team registry and `schema` replaces `coerceJson`/`requireKeys`. (GT-1, riskiest #2/#4 retired.)
+- **parallel_null_on_throw = ["A",null,"C"]**: an **async rejection** (`Promise.reject`) resolves to `null`; success slots intact; the reason surfaces in `failures` (engine logs, never crashes). (Robustness `.filter(Boolean)` confirmed; arch-1 retired.)
+- **pipeline_result = [11,21,31]**: 2-stage per-item `pipeline` works.
+- **budget**: `total` is `null` when no target (the plan's null-budget fallback is the default path); `spent()` readable.
+- **resume**: on `resumeFromRunId`, the `agent()` call returned **cached** (`subagent_tokens:0`, 39ms total) — `resumeFromRunId` caching confirmed.
+
+**Two findings the port + tests must respect (verbatim from the probe report):**
+
+1. **null-on-failure applies to ASYNC rejection only.** `parallel`/`pipeline` null a thunk that returns a **rejected promise** (the real `() => agent(...)` failure mode) — but a **synchronous `throw`** in a thunk body **propagates and crashes the run**. So: (a) every ported thunk is `() => agent(...)` / `() => call(...)` (async); (b) NEVER use a sync-throwing thunk in `parallel`/`pipeline`; (c) the test harness's `parallel`/`pipeline` stubs MUST mirror this — `null` on async rejection, **propagate** on sync throw. (Refines arch-1 / D2.)
+2. **`args` arrives as a STRING.** Passing `args: {…}` (an object) to the engine delivered it to the script as a JSON **string**. The port keeps defensive arg-parsing (`parseArgs`): a JSON string is parsed, an object passes through, a bare scope id is wrapped.
+
+Net: riskiest-assumptions #1/#2/#4 + EF-1/EF-4/EF-6 + arch-1 are **empirically retired**, and the
+AsyncFunction construct-check (body-wrap) is validated as a faithful stand-in for the engine
+loader — which is why the Amendment records the dialect as empirically confirmed, not merely
+documented.

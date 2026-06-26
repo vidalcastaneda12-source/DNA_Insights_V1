@@ -477,9 +477,15 @@ const DEFAULT_RETURNS = {
     const votes = ctx.hooks.verifierVotes || [];
     const refuted = fvIdx < votes.length ? votes[fvIdx] : (ctx.hooks.verifierDefaultRefuted ?? true);
     const angle = ['reproduce', 'reachable', 'documented-exception'][fvIdx % 3];
+    // Contract shape (.claude/agents/finding-verifier.md Output, lines 46-57): the
+    // TOP-LEVEL field is `survives`; `refuted` lives ONLY inside each `votes[]` entry.
+    // The workflow's strict-majority adjudication reads top-level `survives`, so the
+    // previous top-level `refuted` dead-keyed it to `undefined` in every test (the
+    // test-fidelity bug). `survives: !refuted` makes the production path observable;
+    // `votes[].refuted` is preserved for any helper (e.g. deriveSynthVerdict) that reads it.
     return {
       id: ctx.opts?.findingId || 'find-1',
-      refuted,
+      survives: !refuted,
       votes: [{ angle, refuted, reason: 'stub' }],
       verified_severity: ctx.hooks.findingSeverity || 'blocker',
       confidence: 0.5,
@@ -586,6 +592,7 @@ function makeRecorder(hooks) {
   const phases = [];
   const pipelineShapes = []; // engine-seam fidelity: recorded pipeline() arg shapes
   const parallelShapes = []; // engine-seam fidelity: recorded parallel() arg shapes
+  const schemaViolations = []; // fix #5: schema-bearing calls whose stub return dropped a required key
   const budget = makeBudget(hooks);
 
   const agent = (prompt, opts = {}) => {
@@ -618,6 +625,26 @@ function makeRecorder(hooks) {
       ret = resolver(ctx);
     } else {
       ret = {}; // unknown agentType -> empty object (never crashes)
+    }
+    // Fix #5: validate the stub return against the schema THIS call carried. We RECORD any
+    // drift onto `schemaViolations` rather than re-throwing into the workflow — whose inlined
+    // agent()/retry seam SWALLOWS a synchronous throw and turns it into a perturbing retry, so
+    // a bare throw would neither surface loudly NOR leave the call graph faithful. Recording
+    // captures the drift verbatim; a dedicated test (harness-schema-guard) reddens on a
+    // non-empty `schemaViolations`. The pure `assertStubSatisfiesSchema` primitive still throws
+    // (unit-tested directly). A thenable is left for Promise.resolve to chain (no sync inspect).
+    const isThenable = ret != null && typeof ret.then === 'function';
+    if (!isThenable) {
+      try {
+        assertStubSatisfiesSchema(agentType, opts.schema, ret);
+      } catch (e) {
+        schemaViolations.push({
+          agentType,
+          required: schemaRequiredKeys(opts.schema),
+          got: ret && typeof ret === 'object' ? Object.keys(ret) : typeof ret,
+          message: e.message,
+        });
+      }
     }
     return Promise.resolve(ret);
   };
@@ -680,7 +707,7 @@ function makeRecorder(hooks) {
     return undefined;
   };
 
-  return { agent, parallel, pipeline, log, phase, workflow, budget: budget.obj, calls, logs, phases, pipelineShapes, parallelShapes };
+  return { agent, parallel, pipeline, log, phase, workflow, budget: budget.obj, calls, logs, phases, pipelineShapes, parallelShapes, schemaViolations };
 }
 
 // Run a workflow file against the recording stubs. Returns the recorded surface.
@@ -712,7 +739,7 @@ export async function loadWorkflow(path, hooks = {}) {
   } catch (e) {
     error = e;
   }
-  return { meta, body, result, error, calls: rec.calls, logs: rec.logs, phases: rec.phases, budgetObj: rec.budget, pipelineShapes: rec.pipelineShapes, parallelShapes: rec.parallelShapes };
+  return { meta, body, result, error, calls: rec.calls, logs: rec.logs, phases: rec.phases, budgetObj: rec.budget, pipelineShapes: rec.pipelineShapes, parallelShapes: rec.parallelShapes, schemaViolations: rec.schemaViolations };
 }
 
 // ===========================================================================
@@ -818,12 +845,62 @@ export function schemaRequiredKeys(schema) {
   return Object.keys(schema);
 }
 
+// ROOT-CAUSE GUARD (this task's fix #5). The recorder previously returned stub values
+// WITHOUT checking them against the schema the workflow's `agent()` call carried — which is
+// exactly why the finding-verifier stub's top-level-`refuted`-instead-of-`survives` drift
+// went silently uncaught and dead-keyed the production strict-majority path. This makes a
+// stubbed return that does NOT carry the schema's required keys fail LOUD at the call site,
+// so future stub-contract drift reddens a test instead of silently dead-keying production.
+//
+// Deliberately SKIPPED for a null/undefined return: that is an INJECTED infra crash (the
+// fail-closed tests), not a shape-drift — the workflow's own fail-closed guard is what those
+// tests exercise, and a crash must reduce to a null vote, not a harness throw.
+export function assertStubSatisfiesSchema(agentType, schema, ret) {
+  const required = schemaRequiredKeys(schema);
+  if (required === null) return; // schema-less call — nothing to enforce
+  if (ret === null || ret === undefined) return; // injected crash, not stub drift — skip
+  if (typeof ret !== 'object') {
+    throw new Error(
+      `stub-contract drift: '${agentType}' was called WITH a schema (required ${JSON.stringify(required)}) ` +
+        `but the stub returned a ${typeof ret}, not an object`,
+    );
+  }
+  const missing = required.filter((k) => !(k in ret));
+  if (missing.length) {
+    throw new Error(
+      `stub-contract drift: '${agentType}' stub return is missing schema-required key(s) ${JSON.stringify(missing)} ` +
+        `(stub emitted ${JSON.stringify(Object.keys(ret))}). The stub must echo the member's documented Output shape ` +
+        `so the workflow's strict read of those keys is exercised, not silently dead-keyed.`,
+    );
+  }
+}
+
 // ===========================================================================
 // Small assertion helpers shared by the suites.
 // ===========================================================================
 export const callsOf = (calls, agentType) => calls.filter((c) => c.agentType === agentType);
 export const countOf = (calls, agentType) => callsOf(calls, agentType).length;
 export const agentTypesIn = (calls) => calls.map((c) => c.agentType);
+
+// The verified-survivor set lives at the documented pre-gate package field
+// `result.stage3.survivors` (scope-run.md §"Stage 3" step 4 — review-synthesizer's
+// "keep survivors only"; review-synthesizer.md). These two readers are shape-agnostic:
+// the field may be a SET (array of surviving findings) or a COUNT (number of survivors);
+// both reduce to the same observable for the single-finding Suite-8 scenarios. A missing/
+// other-shaped field yields `undefined` / `false`, so a direct assertion reddens loudly
+// (rather than silently passing) if the workflow stops emitting it.
+export function survivorCount(result) {
+  const s = result && result.stage3 && result.stage3.survivors;
+  if (Array.isArray(s)) return s.length;
+  if (typeof s === 'number') return s;
+  return undefined;
+}
+export function survivorsInclude(result, id) {
+  const s = result && result.stage3 && result.stage3.survivors;
+  if (Array.isArray(s)) return deepHasValue(s, id);
+  if (typeof s === 'number') return s >= 1; // count shape: with one finding under review, present <=> count>=1
+  return false;
+}
 
 export function callAngle(call) {
   return call.angle ?? call.opts?.angle ?? call.label ?? call.opts?.label ?? promptAngle(call.prompt);

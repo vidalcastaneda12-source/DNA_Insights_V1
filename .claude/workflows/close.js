@@ -89,7 +89,7 @@ async function call(agentType, input, opts) {
   log(`[close] → ${label || agentType} (${agentType})`);
   const agentOpts = { agentType };
   if (schema) agentOpts.schema = schema;
-  if (isolation) agentOpts.isolation = isolation; // engine-level worktree directive (fan-out writers)
+  if (isolation) agentOpts.isolation = isolation; // isolation:'worktree' → engine worktree directive; NOT probe/harness-exercised (deferred-unverified, D7/suite7). Only the fan-out writer passes it.
   return withRetry(() => agent(prompt, agentOpts), agentType);
 }
 
@@ -194,7 +194,14 @@ const ctx = {
 let pkg;
 try {
   pkg = await close(ctx);
-  log('[close] Stage 5 complete — anchor loop closed; backlog filed.');
+  // Fail-closed: only claim "anchor loop closed" when the curator re-lock actually matched the
+  // gate set. A null curator or a cross-check mismatch (cross_check_passed === false) is an
+  // escalation, not a success — surface it instead of logging a misleading completion.
+  if (pkg.relock && pkg.relock.cross_check_passed === false) {
+    log(`[close] Stage 5 INCOMPLETE — curator re-lock unconfirmed (escalate): ${(pkg.escalations || []).join('; ')}`);
+  } else {
+    log('[close] Stage 5 complete — anchor loop closed; backlog filed.');
+  }
 } catch (err) {
   log(`[close] Stage 5 FAILED: ${err && err.message ? err.message : err}`);
   throw err;
