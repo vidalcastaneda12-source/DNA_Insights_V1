@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Fast-follow drain of eight documentation residuals surfaced by the post-#112 repo sweep
+  (`/fast-follow`, Sub Project B / finding-038; docs-only — no code, schema, dependency, or DB
+  change, so the dev-loop and every real-data anchor stay byte-unchanged). Re-point four findings
+  at the ROADMAP slots PR #112 assigned them: finding-007 marks dbSNP-based hom-only recovery
+  **shipped** (PR 3 canonicalize / finding-020), not deferred; finding-021's chip-probe-ID
+  normalization moves off the stale "/ PR-4" pointer to **PR 14** (PR 4 / finding-025 resolved
+  merged rsIDs but did not cover alias-format probe IDs); finding-022's version-label↔bytes fix
+  names its **PR 10** slot; finding-027's panel-strand reconcile names its **PR 14** slot. Align
+  the `ROADMAP.md` current-phase line and `README.md` status line with the authoritative status
+  block's "PR 7 — re-scope first, may be moot" caveat. Note the owner-approved evidence-gated
+  merge path (Sub Project A / finding-037) on the `CLAUDE.md` VSC-User actor. Backfill the
+  `MEMORY.md` decision ledger with the 18 missing per-PR-history rows DEC-0100…DEC-0117
+  (PRs #94, #96–#112) and advance the completeness footnote to "PRs #19 … #112 (81 commits)". (#113)
 - Repo-sweep cleanup + fast-follow drains (docs + small CLI fixes; no schema/DB change). Prune
   three implemented plan artifacts (`sub-project-A-agentic-verify-gate`,
   `sub-project-B-fast-follow-loop`, `sub-project-C1-cross-run-learning` — durable rationale lives in

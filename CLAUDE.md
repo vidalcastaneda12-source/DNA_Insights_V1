@@ -17,7 +17,7 @@ This codebase is built collaboratively across five actors. The boundaries betwee
 - **ClaudeCodeTestingBugs** — Claude Code. the post implementation chat. Test-results review and test assistance. Does not touch the codebase or run commands.
 - **ClaudeCodePlanning** — Claude Code in plan mode — toggled locally via Shift+Tab, or invoked in the cloud via /ultraplan for inline-comment review. Reads the repo, produces a technical plan, surfaces questions. Does not write code or run commands.
 - **ClaudeCodeDevelopment** — Claude Code. Writes code, runs the dev-loop tests, commits, pushes, opens PRs, produces an end-of-session handoff via `/handoff`.
-- **VSC-User** — the human operator. Approves plans, runs the formal verification protocol (`docs/runbooks/verification.md`), merges.
+- **VSC-User** — the human operator. Approves plans, runs the formal verification protocol (`docs/runbooks/verification.md`), merges (or gives the typed approval that drives the owner-approved evidence-gated merge — Sub Project A, `finding-037`).
 
 Older docs and CHANGELOG entries use **VSC-Claude** as a single name. That maps to VSC-ClaudeCodeDevelopment (implementation mode) by default.
 

@@ -2,7 +2,7 @@
 
 Phases are sequential. Do not start phase N+1 until phase N's verification passes.
 
-**Current phase:** Phase 5 closed; executing the pre-Phase-6 cleanup sequence (PRs 1–6 landed; PR 7 next) before Phase 6 begins. PR 6 (minimal `genes` seed, #88) cleared the Phase-6 FK gate.
+**Current phase:** Phase 5 closed; executing the pre-Phase-6 cleanup sequence (PRs 1–6 landed; PR 7 next — re-scope first, it may be moot against the live DB) before Phase 6 begins. PR 6 (minimal `genes` seed, #88) cleared the Phase-6 FK gate.
 
 ## Phase 1 — Foundation (this is the bootstrap)
 
