@@ -389,6 +389,81 @@ CLAUDE.md obs #7, ROADMAP "Pre-Phase-6 sequence" PR 6, and
 [`finding-020`](../findings/finding-020-canonical-refalt-backfill.md) "Out of scope"
 amendment.
 
+## C2+D Phase 1 gate (engine-dialect workflow port)
+
+This gate covers the Sub Project C2+D Phase 1 change class (PR #109, `866d255`): the port of
+the per-scope agent-team orchestrators
+(`.claude/workflows/{plan-phase,implement-review,close}.js`) to the real dynamic-workflows
+**engine dialect**, the six fidelity-gap closures, and the fail-closed hardening of the
+`parallel`/`pipeline` fan-out seams
+([`finding-034`](../findings/finding-034-agent-team-plan-phase.md) Amendment + load-model
+probe appendix / `DEC-0099`).
+
+It is a **JS-orchestration + docs change**, so the protocol scales differently from a pipeline
+PR: `manifest.applicable_anchors` is `[]` — the change class carried **no genome real-data
+anchors** — so there is nothing to re-lock in CLAUDE.md "Real-data observations", and the
+"Core commands" Python protocol above is run only as a **negative control** (it must stay
+byte-unchanged). The gate proper is the five deterministic engine-checks (EC1–EC5) below. Run
+from the repo root; the `node --test` checks use a local `node` (v24 at capture — the project
+ships no bundled JS runtime).
+
+**EC1 — construct-check ×3 + forbidden-token scan empty.** Each ported workflow parses as an
+AsyncFunction body (the engine's body-wrap loader, stood in for by the construct-check) and
+carries no forbidden construct:
+
+```
+node --test .claude/workflows/__tests__/suite1-construct.test.mjs
+```
+
+**EC2 — schema contract.** For every schema-bearing `agent()` call, `schema.required` is a
+subset of that agent's `.md` Output keys:
+
+```
+node --test .claude/workflows/__tests__/suite2-schema-contract.test.mjs \
+            .claude/workflows/__tests__/harness-schema-guard.test.mjs
+```
+
+**EC3 — JS dev-loop.** The full `node:test` harness is green:
+
+```
+node --test .claude/workflows/__tests__/*.test.mjs
+# → 87 tests · 86 pass · 1 skip · 0 fail
+```
+
+The single skip is the **intentional Phase-2 reversal-gate placeholder** in `drift.test.mjs`
+(the Python-CLI reversal-gate is Phase 2 — see ROADMAP "Sub Project C2+D — Workflow-Engine
+Migration"). `0 fail` is the bar.
+
+**EC4 — dev-loop byte-unchanged (negative control).** No Python / DDL / schema file moved:
+
+```
+git diff --name-only main...HEAD | grep -E '^(backend/|ddl/|docs/schemas/)|\.py$'
+# → empty
+```
+
+The full Python protocol was run as the negative control and is clean: `uv run pytest`
+**1579 passed**; `uv run ruff check`, `uv run ruff format --check`, and
+`uv run mypy --strict backend/src` all clean.
+
+**EC5 — reversal-gate + ledger.** The decision-tracking gate passes and the pure-append
+reversal row is intact:
+
+```
+uv run genome docs check          # exit 0
+```
+
+`DEC-0099` is the **last in-table ledger row** (ledger count **99**), recorded **pure-append**
+(the finding-034 design `DEC-0020` left active and unflipped). The two gate-crossing packages
+assert `auto_approved` / `auto_merged` `=== false` (`plan-phase`, `implement-review`);
+`close.js` carries **no** auto field **by design** (Stage 5 crosses no human gate) — its
+absence is **not** a regression.
+
+**Residual (not gated here; carried to Phase 2).** The four trigger-gated Stage-2 writers are
+**deferred-unverified (D7)** — exercised only on synthetic manifests, live-engine RUN semantics
+not yet validated — and the `arch-1` drift-guard seam-coverage gap is latent/backlogged. See
+[`finding-034`](../findings/finding-034-agent-team-plan-phase.md) "C2D-Phase1 residual risk"
+and ROADMAP "Sub Project C2+D" Phase 2.
+
 ## When the protocol fails
 
 If any step fails, do not attempt to fix the failure locally before
