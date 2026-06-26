@@ -21,7 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   escalation. Reverses the orchestration default from model-driven to **engine-primary** while
   retaining `/scope-run` as the conductor + headless/cron fallback and preserving both human
   gates; recorded **pure-append** (DEC-0099; the finding-034 design DEC-0020 left active). No
-  Python/schema/DB change — the dev-loop stays byte-unchanged. (sub-project-C2-D / PR-C2-D)
+  Python/schema/DB change — the dev-loop stays byte-unchanged. Hardened at Stage-3 review
+  (fix-first): fail-closed guards across the `parallel`/`pipeline` → `.filter(Boolean)` fan-out
+  seams (a null verifier skeptic no longer counts as a refutation; a dropped factor-gated safety
+  lens forces escalate; empty auditor/premortem pools escalate; `close` fails loud on a curator
+  miss) — the port-introduced silent-1/2/3 review blockers; an 87-test `node:test` harness
+  (86 pass · 1 intentional Phase-2 skip) with mutation-proven discrimination of the fail-closed
+  and verifier-severity paths; and the live-engine load-probe artifact committed in-repo
+  (`docs/findings/c2d-load-probe-wf_a37802b2-c92.js`). (sub-project-C2-D / PR-C2-D)
 - Add cross-run learning calibration (sub-project-C1, finding-040): a DB-free `genome.calibration`
   core whose `compute_tier(fields, weights)` is the single deterministic risk-tier source of truth
   (Gate-1 = D1), exposed as `genome calibrate compute-tier`; the `scope-dispatcher` now RUNS it and
