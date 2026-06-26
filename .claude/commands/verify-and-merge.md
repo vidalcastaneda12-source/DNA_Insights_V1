@@ -62,7 +62,16 @@ it; it adds an owner-approved path where Claude performs the merge.
    (TOCTOU — the branch may have drifted since the verify run); `gh pr merge <pr>
    --squash`; write the result audit row (`phase='result'`, `status='success'`/`'failure'`).
    The audit records and proceeds — it never gates the merge.
-9. **Close.** Delete the merged branch. **Delegate** the re-lock of the operator-confirmed
+9. **Close.** Delete the merged branch. **Write the cross-run outcome record** (Sub Project
+   C1, `finding-040`): run `genome calibrate write-outcome --scope-id <id> --actual-json -`,
+   piping the human-confirmed ACTUAL gate facts (verdict, review blockers, materialized /
+   missed surprises, unexpected anchor moves, revise / fix-first cycle counts, needed-deep)
+   as JSON on stdin. It sources the `predicted` block + `risk_weights_version` from the
+   dispatch-time persisted manifest (`data/calibration/manifests/<id>.json`) and appends one
+   line to `data/calibration/outcomes.jsonl` — this is the datum the next dispatch reads as
+   precedent and the ratchet calibrates over. **Non-blocking**: a missing manifest prints a
+   visible `outcome NOT recorded` warning and exits 0 (never holds up the close), and the
+   command never touches `verify_gate`. **Delegate** the re-lock of the operator-confirmed
    anchors into `CLAUDE.md` / `verification.md` / the finding's bedrock table to the
    Stage-5 `knowledge-curator` as a fast-follow **reviewable doc change** (human-confirmed
    numbers only, never a direct push). After close, auto-scan the residual backlog and

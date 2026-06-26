@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Add cross-run learning calibration (sub-project-C1, finding-040): a DB-free `genome.calibration`
+  core whose `compute_tier(fields, weights)` is the single deterministic risk-tier source of truth
+  (Gate-1 = D1), exposed as `genome calibrate compute-tier`; the `scope-dispatcher` now RUNS it and
+  consumes the returned `{tier, breakdown}` (the inline prose C/B/P/t1/t2 formula is demoted to a
+  non-authoritative reference, with the `+1` bump and `deep_T2` selector re-homed into the formula).
+  Adds the append-only outcome ledger + the asymmetric L3 ratchet — a tighten auto-applies only when
+  back-test-clean AND the knob has unfloored coverage; a loosen or clean-by-vacuity tighten parks for
+  one-click human approval; direction is by tier-delta over the witness ladder (a t1/t2 raise is a
+  loosen). The trip-wire floors are immutable (hard-coded, not representable in `risk_weights.json`),
+  git-write is a tested pathspec-scoped CommitPlan (never a subprocess), and the `/verify-and-merge`
+  close step gains a non-blocking `genome calibrate write-outcome` hook. Ships **report-only**
+  (`auto_tuning_enabled=false`); appends DEC-0095…DEC-0098. (sub-project-C1 / PR-C1)
 - Add the scope-split smart-cut detector (sub-project-B2 Phase 1, finding-039): a fail-closed,
   DB-free `genome.scope_split` core that reads a Stage-0 dispatcher scope manifest and proposes
   whether a scope is separable into independently-shippable sub-scopes or is one indivisible
