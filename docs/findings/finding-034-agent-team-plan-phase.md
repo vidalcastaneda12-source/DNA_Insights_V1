@@ -24,9 +24,35 @@ ClaudeCodeVerification / ClaudeCodePlanning (no code was written that session).
 > members in `.claude/agents/*.md`, three segmented orchestrators
 > (`plan-phase.js`, `implement-review.js`, `close.js` — split by the two human gates),
 > the four authoring skills in `.claude/commands/`, and the four guardrail hooks. The
-> one runtime caveat: the dynamic-workflows subagent-invocation primitive is undocumented,
-> so each orchestrator isolates it behind a single `runAgent()` helper (`node --check`-
-> clean, not end-to-end executed). See `.claude/agents/README.md`.
+> one runtime caveat noted at build — the dynamic-workflows subagent-invocation primitive
+> was treated as undocumented, each orchestrator isolating it behind a single `runAgent()`
+> helper (`node --check`-clean, not end-to-end executed) — is **superseded by the Amendment
+> below**: Sub Project C2-D confirmed the engine dialect empirically and ported all three
+> orchestrators to it. See `.claude/agents/README.md`.
+
+> **Amendment (Sub Project C2-D, 2026-06-25 — `finding-034` / `DEC-0099`).** The build-status
+> caveat above is now **superseded**. The dynamic-workflows engine dialect is documented and
+> **empirically confirmed** (the C2D-Phase1 load-model probe): the engine loads a workflow by
+> reading the pure-literal `export const meta` and wrapping the rest of the body in an async
+> function with the hooks `agent · parallel · pipeline · log · phase · budget · workflow ·
+> args` injected as parameters; subagents are invoked via `agent(prompt, {agentType, schema})`,
+> where a `schema` returns a validated object (replacing the old hand-rolled output coercion +
+> key-assertion) and a schema-less call returns prose. The three orchestrators
+> (`plan-phase.js`, `implement-review.js`, `close.js`) are **ported to that dialect** —
+> self-contained (no `import`), `return pkg` terminator, validated by an AsyncFunction
+> construct-check — closing six fidelity gaps: the Tier-0 minimal-diff planner; the Tier-2
+> architect-reviewer folded into one severity→verdict ladder; the Stage-4 `handoff-assembler`
+> wired on the `go` path (returning prose, stored as a string); the four trigger-gated Stage-2
+> members on real triggers, with `fan-out-implementer` *replacing* the single implementer;
+> severity-scaled refute-by-default verification (blocker → 2–3 distinct-angle skeptics,
+> strict-majority survival); and budget-guarded escalation. This **reverses the orchestration
+> default from model-driven to engine-primary** (the prior "runnable-today" framing): the
+> deterministic JS workflows are now the preferred path, while the model-driven `/scope-run`
+> conductor is **retained** as the by-name segment launcher and the headless/cron fallback.
+> Both human gates and the team/membership design are **unchanged** — which is why this is
+> recorded **pure-append** (`DEC-0099`, leaving the design `DEC-0020` active and unflipped, per
+> the `DEC-0086`/`DEC-0087` precedent), not a supersession of this finding. The Stage-4 row in
+> `.claude/agents/README.md` is correspondingly flipped to *wired*.
 
 Decisions locked this session:
 
