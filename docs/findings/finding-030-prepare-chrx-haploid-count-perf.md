@@ -10,9 +10,17 @@ superseded_by: []
 
 ## Status
 
-Open (doc-only). Surfaced by the PR 5a real-data chrX gate. Recommended fix
-below is **not yet applied** — this finding records the issue and the remedy so
-a follow-up (or this PR) can land it. No behavior change in this note.
+**Resolved — the existence short-circuit landed in the 2026-06-26 repo-sweep cleanup
+PR.** `has_haploid_gt` (a `found`-flag / `exit` awk that closes the decompressor pipe
+early via SIGPIPE) replaced `count_haploid_gts` at the three prep-time composition
+assertions, and `ChrxPanelResult.nonpar_haploid_gts` (exact int) became
+`nonpar_has_haploid` (bool). `count_haploid_gts` is **kept** for the single-sample
+re-diploidize post-assertion (cheap there, exact value useful). The prep-time check is now
+sub-second instead of ~55 CPU-min, on byte-identical subsets with no downstream-anchor
+impact. Tests: `has_haploid_gt` existence assertions in
+`test_region_split_par_haploid_free_nonpar_retains_males` + the unchanged
+`test_region_split_rejects_nonpar_without_haploid` (`test_imputation_chrx_panel.py`). The
+original finding is retained below as the durable record of the issue and the remedy.
 
 ## Symptom
 

@@ -232,7 +232,9 @@ The gate also runs as the `docs-check` GitHub Action on every PR.
 Phases 1–5 complete (foundation, ingestion, merge & discrepancy detection, local
 imputation via Beagle 5.5, and the reference annotation loaders — Phase 5 closed with
 the `variant_annotations_index` rollup, sub-phase 5.7). The project is now executing a
-short pre-Phase-6 cleanup sequence (PRs 1–3 landed; PR 4 next) that clears the
-dbSNP-dependent backfills and the deferred-item backlog before the Phase 6 analysis
-pipelines begin. See `ROADMAP.md` for the sub-phase / PR breakdown and `CHANGELOG.md`
+pre-Phase-6 cleanup sequence (PRs 1–6 landed; PR 7 next) that clears the dbSNP-dependent
+backfills and the deferred-item backlog before the Phase 6 analysis pipelines begin.
+Several `/scope-run` enhancement sub-projects (agentic verify-gate, fast-follow drain
+loop, scope-split, cross-run-learning calibration, workflow-engine migration) have also
+landed alongside it. See `ROADMAP.md` for the sub-phase / PR breakdown and `CHANGELOG.md`
 for release-level detail.

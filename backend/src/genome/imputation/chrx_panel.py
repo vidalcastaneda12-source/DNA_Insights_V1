@@ -52,13 +52,25 @@ logger = structlog.get_logger(__name__)
 # matches contig labels by exact string, and the region strings below must agree.
 _CHRX_CONTIG: Final[str] = "chrX"
 
-# Counts haploid GT fields across every (non-header) record — used at prep time to
-# assert the PAR subsets are haploid-free and the non-PAR subset retains males, and
-# as the re-diploidizer's haploid-free post-assertion.
+# Counts haploid GT fields across every (non-header) record — the re-diploidizer's
+# haploid-free post-assertion, where the input is the single-sample Beagle output so the
+# exact `doubled` total is both cheap (one sample) and a useful log value.
 _COUNT_HAPLOID_AWK: Final[str] = r"""
 /^#/ { next }
 { for (i = 10; i <= NF; i++) { split($i, a, ":"); if (a[1] !~ /[|\/]/) h++ } }
 END { print h + 0 }
+"""
+
+# Existence-only variant: short-circuits on the FIRST haploid GT (`exit`), so the
+# decompressor pipe closes early (SIGPIPE) instead of streaming the whole subset. Used by
+# the prep-time composition assertions, which branch only on presence (`> 0` / `== 0`),
+# not the exact total — sub-second on the multi-GB non-PAR subset where the exact count
+# pegs a core for ~55 CPU-min (finding-030). A `found` flag + a single END `print` keeps
+# the output one line ("1" / "0") even though `exit` still triggers the END block.
+_HAS_HAPLOID_AWK: Final[str] = r"""
+/^#/ { next }
+{ for (i = 10; i <= NF; i++) { split($i, a, ":"); if (a[1] !~ /[|\/]/) { found = 1; exit } } }
+END { print found + 0 }
 """
 
 # R1 re-diploidizer (un-gated; runs on EVERY record, unlike the deleted M1
@@ -90,7 +102,7 @@ class ChrxPanelResult:
     nonpar_path: Path
     par2_path: Path
     skipped: bool
-    nonpar_haploid_gts: int
+    nonpar_has_haploid: bool
 
 
 class ChrxToolingError(RuntimeError):
@@ -144,6 +156,44 @@ def count_haploid_gts(vcf: Path, *, bgzip_bin: str, awk_bin: str) -> int:
         )
         raise ChrxToolingError(msg)
     return int(out.strip() or "0")
+
+
+def has_haploid_gt(vcf: Path, *, bgzip_bin: str, awk_bin: str) -> bool:
+    """Return ``True`` if ``vcf`` contains any haploid GT field, else ``False``.
+
+    The existence-only counterpart to :func:`count_haploid_gts`: the awk ``exit``s on the
+    first haploid GT, closing the decompressor pipe early (SIGPIPE) rather than streaming
+    the whole file — sub-second on the multi-GB non-PAR subset where the exact count is
+    ~55 CPU-min (finding-030). Use this for the prep-time composition assertions, which
+    branch only on presence; :func:`count_haploid_gts` is kept where the exact total is a
+    cheap, useful value (the single-sample re-diploidize post-assertion).
+    """
+    p_decomp = subprocess.Popen(  # noqa: S603 — bins are resolved/validated paths
+        [bgzip_bin, "-dc", str(vcf)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    assert p_decomp.stdout is not None  # noqa: S101 — stdout=PIPE guarantees non-None
+    p_awk = subprocess.Popen(  # noqa: S603
+        [awk_bin, _HAS_HAPLOID_AWK],
+        stdin=p_decomp.stdout,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    p_decomp.stdout.close()
+    out, _ = p_awk.communicate()
+    rc_decomp = p_decomp.wait()
+    # awk must exit cleanly. The decompressor may be SIGPIPE-killed (rc -13, or 141 when
+    # wrapped) when awk short-circuits on a found haploid — that early close is the whole
+    # point, so it is not a failure. Any OTHER bgzip rc (e.g. a corrupt file) still raises.
+    if p_awk.returncode != 0 or rc_decomp not in (0, -13, 141):
+        msg = (
+            f"haploid-existence pipe failed (bgzip rc={rc_decomp}, "
+            f"awk rc={p_awk.returncode}) on {vcf}"
+        )
+        raise ChrxToolingError(msg)
+    return out.strip() == "1"
 
 
 def _par1_region() -> str:
@@ -323,7 +373,7 @@ def prepare_chrx_panel(
             nonpar_path=nonpar_out,
             par2_path=par2_out,
             skipped=True,
-            nonpar_haploid_gts=0,
+            nonpar_has_haploid=False,
         )
 
     _ensure_panel_index(input_vcf, bcftools)
@@ -333,17 +383,15 @@ def prepare_chrx_panel(
     _bcftools_view_region(bcftools, input_vcf, _par2_region(), par2_out)
 
     for region_name, p in (("par1", par1_out), ("par2", par2_out)):
-        haploid = count_haploid_gts(p, bgzip_bin=bgzip, awk_bin=awk)
-        if haploid != 0:
+        if has_haploid_gt(p, bgzip_bin=bgzip, awk_bin=awk):
             _cleanup_subsets(par1_out, nonpar_out, par2_out)
             msg = (
-                f"chrX {region_name} subset has {haploid} haploid GT field(s); PAR is "
+                f"chrX {region_name} subset has a haploid GT field; PAR is "
                 "diploid in both sexes — the region split is wrong, refusing."
             )
             raise ChrxToolingError(msg)
 
-    nonpar_haploid = count_haploid_gts(nonpar_out, bgzip_bin=bgzip, awk_bin=awk)
-    if nonpar_haploid == 0:
+    if not has_haploid_gt(nonpar_out, bgzip_bin=bgzip, awk_bin=awk):
         _cleanup_subsets(par1_out, nonpar_out, par2_out)
         msg = (
             "chrX non-PAR subset has zero haploid GT fields; the panel's male "
@@ -353,13 +401,13 @@ def prepare_chrx_panel(
 
     for p in (par1_out, nonpar_out, par2_out):
         restrict_file(p)
-    log.info("imputation.panel.prepare_chrx.complete", nonpar_haploid_gts=nonpar_haploid)
+    log.info("imputation.panel.prepare_chrx.complete", nonpar_has_haploid=True)
     return ChrxPanelResult(
         par1_path=par1_out,
         nonpar_path=nonpar_out,
         par2_path=par2_out,
         skipped=False,
-        nonpar_haploid_gts=nonpar_haploid,
+        nonpar_has_haploid=True,
     )
 
 
@@ -367,6 +415,7 @@ __all__ = [
     "ChrxPanelResult",
     "ChrxToolingError",
     "count_haploid_gts",
+    "has_haploid_gt",
     "prepare_chrx_panel",
     "rediploidize_vcf",
 ]

@@ -19,9 +19,7 @@ Two vocabulary decisions are load-bearing for safety (plan A1, R8):
 * :data:`TIER_VOCAB` is named to **not** collide with the clinical ``1A | 1B | 2A | 2B |
   3 | 4`` evidence-tier scale; these are loop-internal drain tiers only.
 
-This file is a **stub** for the interface-freeze step: every body raises
-:class:`NotImplementedError` so plan-blind tests are honestly RED on ``NotImplementedError``
-(never ``ImportError``). The signatures below are the frozen contract.
+The signatures below are the frozen data-model contract.
 """
 
 from __future__ import annotations

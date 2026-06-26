@@ -18,6 +18,7 @@ from typer.testing import CliRunner
 from genome.cli import app
 from genome.db import duckdb_connection, init_databases
 from genome.db.sqlite_conn import sqlcipher_connection
+from genome.privacy.external_client import is_external_enabled
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -89,6 +90,29 @@ def test_config_set_updates_existing_key_and_writes_audit_row(
     # Operation details JSON should reflect old → new transition.
     assert "false" in audit_rows[0][2]
     assert "true" in audit_rows[0][2]
+
+
+def test_status_reports_live_external_calls_value_not_env_snapshot(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    """`status` must report the LIVE user_preferences gate value, not the .env snapshot.
+
+    Regression for finding-024: `status` read ``settings.external_calls_enabled`` (a
+    load-time ``.env`` snapshot) while the egress gate enforces ``user_preferences``. After
+    ``config set external_calls_enabled true`` — which writes ONLY ``user_preferences``; the
+    isolated env keeps ``EXTERNAL_CALLS_ENABLED=false`` — ``status`` and the gate must agree.
+    The pre-fix code, reading the ``.env``-bound Settings, would print ``False`` here.
+    """
+    init_databases()
+    runner = CliRunner()
+    set_result = runner.invoke(app, ["config", "set", "external_calls_enabled", "true"])
+    assert set_result.exit_code == 0
+    # The egress gate now reads True from the live store...
+    assert is_external_enabled() is True
+    # ...and status must display the same effective value.
+    status_result = runner.invoke(app, ["status"])
+    assert status_result.exit_code == 0
+    assert "External calls enabled: True" in status_result.output
 
 
 def test_config_set_requires_value_type_for_new_key(

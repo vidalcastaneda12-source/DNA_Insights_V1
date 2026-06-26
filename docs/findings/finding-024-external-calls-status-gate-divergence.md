@@ -130,3 +130,16 @@ B/C should not be bundled together.
 Verification when a fix lands: a test asserting `status` and the gate report the same
 effective value after a `config set` that changes only `user_preferences` (not
 `.env`/Settings); `pytest` / `ruff` / `mypy --strict` clean.
+
+## Resolution
+
+**Option A landed in the 2026-06-26 repo-sweep cleanup PR.** `status` now reads the live
+`user_preferences` value via `is_external_enabled()` — guarded by `app.db` existence
+(fail-closed `False` when the DB is absent) — instead of `settings.external_calls_enabled`.
+Regression test: `test_status_reports_live_external_calls_value_not_env_snapshot`
+(`backend/tests/test_cli_phase4.py`) asserts that after a `config set` writing only
+`user_preferences`, both `status` and `is_external_enabled()` report `True` (the pre-fix
+code printed `False`). Options B (show both stores) and C (drop the decorative `.env`
+field) remain available as future hardening but were intentionally not bundled. The
+frontmatter `status` stays `active`: the finding is the durable record of the two-store
+divergence.

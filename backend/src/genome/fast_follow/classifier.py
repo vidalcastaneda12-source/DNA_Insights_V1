@@ -24,9 +24,6 @@ Fail-closed reduction order (plan §4 classifier), DRAIN is reachable only past 
 The SAFETY INVARIANT (plan §2): no candidate carrying a guarded class, a non-empty anchor
 set, an over-cap blast_radius, or a ``docs/schemas/**`` / ``ddl/**`` touched path is EVER
 classified DRAIN. The exhaustive property test enumerates (not samples) this invariant.
-
-This file is a **stub** for the interface-freeze step: :func:`classify` raises
-:class:`NotImplementedError` so plan-blind tests are honestly RED.
 """
 
 from __future__ import annotations

@@ -7,10 +7,10 @@ other work. Durable rationale for the scope lives in [`finding-037`](../findings
 - [x] **`.pytest-tmp/` gitignore** — done in this PR (#103). Generated `app.db`/`genome.duckdb`
   test artifacts can no longer be staged by a stray `git add -A` (privacy decision #9).
 
-- [ ] **Design-doc status / prune** — `docs/plans/sub-project-A-agentic-verify-gate.md` still reads
-  *"Design approved … ready for an implementation plan,"* but Sub A shipped (PR #102). Either
-  **prune it** (the `DEC-0084` prune-implemented-plans precedent — `finding-037` now holds the
-  durable rationale) or **update the status line** to "Shipped — PR #102 / `finding-037`." Owner's call.
+- [x] **Design-doc status / prune** — **pruned** (the `DEC-0084` prune-implemented-plans
+  precedent; `finding-037` holds the durable rationale). `docs/plans/sub-project-A-agentic-verify-gate.md`
+  was deleted in the 2026-06-26 repo-sweep cleanup PR rather than have its stale
+  *"ready for an implementation plan"* status line linger past Sub A's ship (PR #102).
 
 - [ ] **Independence-framing polish** (low leverage) — finishing the evidence-gated reconcile in the
   spots the PR left on the old framing: `finding-034`'s stage table + its two Mermaid "HUMAN GATE 2"

@@ -5,11 +5,11 @@ from: §5 test #17 (test_calibration_doc_consistency.py) + §6:
   * the dispatcher step-7 precedent read cites ``data/calibration/outcomes.jsonl`` with an explicit
     absent -> fall-back-to-grep note;
   * ``docs/findings/finding-040-*.md`` exists with valid frontmatter (type/status/actors/date +
-    CAPTURE/RETRIEVAL/LIFECYCLE);
-  * ``docs/plans/sub-project-C1-cross-run-learning.md`` status is flipped (no longer "ready for an
-    implementation plan").
+    CAPTURE/RETRIEVAL/LIFECYCLE).
 
-All four are RED until the implementer's doc work (T10/T11) lands; each asserts the POSITIVE
+A fourth check (``sub-project-C1-cross-run-learning.md`` status flipped) was retired when that
+plan was pruned in the 2026-06-26 repo sweep — finding-040 is the durable record. The three
+remaining were RED until the implementer's doc work (T10/T11) landed; each asserts the POSITIVE
 invariant (a specific pairing / a real frontmatter), never a naive grep. test->spec provenance is
 stamped per test for the Stage-3 test-integrity lens.
 """
@@ -87,19 +87,3 @@ def test_finding_040_exists_and_frontmatter_parses() -> None:
         assert key in fm, f"finding-040 frontmatter missing {key!r}"
     for section in ("CAPTURE", "RETRIEVAL", "LIFECYCLE"):
         assert section in text, f"finding-040 body missing {section} section"
-
-
-def test_c1_plan_status_is_flipped() -> None:
-    """from: §6 (sub-project-C1-cross-run-learning.md status flipped).
-
-    The C1 plan's status no longer reads "ready for an implementation plan" — it has flipped to an
-    implemented/landed state now that the calibrator ships. RED until the status edit lands.
-    """
-    text = (_repo_root() / "docs" / "plans" / "sub-project-C1-cross-run-learning.md").read_text(
-        encoding="utf-8"
-    )
-    match = re.search(r"\*\*Status:\*\*\s*(.+)", text)
-    assert match is not None, "C1 plan has no **Status:** line"
-    status_line = match.group(1)
-    assert "ready for an implementation plan" not in status_line
-    assert re.search(r"implement|land|complete|done|merged|shipped", status_line, re.IGNORECASE)

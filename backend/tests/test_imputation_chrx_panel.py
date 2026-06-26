@@ -22,6 +22,7 @@ from genome.cli import _require_chrx_region_panels
 from genome.imputation.chrx_panel import (
     ChrxToolingError,
     count_haploid_gts,
+    has_haploid_gt,
     prepare_chrx_panel,
     rediploidize_vcf,
 )
@@ -157,7 +158,12 @@ def test_region_split_par_haploid_free_nonpar_retains_males(tmp_path: Path) -> N
     assert count_haploid_gts(panel.chrx_par2_panel, bgzip_bin=_BGZIP, awk_bin=_AWK) == 0
     nonpar_haploid = count_haploid_gts(panel.chrx_nonpar_panel, bgzip_bin=_BGZIP, awk_bin=_AWK)
     assert nonpar_haploid == 3  # three non-PAR male haploids (two slivers + core)
-    assert result.nonpar_haploid_gts == 3  # type: ignore[attr-defined]
+    assert result.nonpar_has_haploid is True  # type: ignore[attr-defined]
+    # has_haploid_gt is the existence-only short-circuit the prep assertions now use:
+    # True on the non-PAR subset (male haploids present), False on the haploid-free PARs.
+    assert has_haploid_gt(panel.chrx_nonpar_panel, bgzip_bin=_BGZIP, awk_bin=_AWK) is True
+    assert has_haploid_gt(panel.chrx_par1_panel, bgzip_bin=_BGZIP, awk_bin=_AWK) is False
+    assert has_haploid_gt(panel.chrx_par2_panel, bgzip_bin=_BGZIP, awk_bin=_AWK) is False
 
 
 def test_region_split_ensures_panel_index(tmp_path: Path) -> None:

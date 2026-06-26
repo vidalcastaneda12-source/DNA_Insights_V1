@@ -10,9 +10,6 @@ verify_gate keeps I/O in cli.py and model.py stays I/O-free).
 
 ``data/`` is the gitignored runtime-state home (CLAUDE.md), the conventional fit for mutable
 operational state; ``archive/`` is snapshot territory. **No** :mod:`genome.db` import.
-
-This file is a **stub** for the interface-freeze step: every body raises
-:class:`NotImplementedError` so plan-blind tests are honestly RED.
 """
 
 from __future__ import annotations
