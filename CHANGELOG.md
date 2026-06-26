@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Repo-sweep cleanup + fast-follow drains (docs + small CLI fixes; no schema/DB change). Prune
+  two implemented plan artifacts (`sub-project-A-agentic-verify-gate`,
+  `sub-project-B-fast-follow-loop` — durable rationale lives in finding-037 / finding-038). Track
+  previously slot-less work in `ROADMAP.md`: a new **PR 14** bundling three fired deferrals
+  (finding-005 #9 `pos_grch37` recoalesce, finding-027 panel-strand reconciliation, finding-021
+  probe-ID normalization); fold finding-022 / finding-005 #10 (version-label↔bytes decoupling)
+  into **PR 10**; and add a **Sub-project Phase-2 continuations** block for the C1 calibration
+  enablement (finding-040) and B2 `genome.campaign` (finding-039) buckets. Drain four fast-follow
+  items: `genome status` now reports the live `user_preferences` external-calls value via
+  `is_external_enabled()` instead of the decorative `.env` snapshot (finding-024 — fixes a
+  privacy-relevant under-report; + regression test); `prepare-chrx` composition assertions use a
+  sub-second `has_haploid_gt` existence short-circuit instead of the ~55 CPU-min exact count
+  (finding-030 — byte-identical subsets, no anchor impact); drop the stale "stub / raises
+  NotImplementedError" docstrings from the six implemented `genome.fast_follow` modules; and
+  refresh the README pre-Phase-6 status line. (PR #NNN)
 - Port the per-scope agent-team orchestrators to the dynamic-workflows engine dialect
   (sub-project-C2-D, finding-034): `plan-phase.js`, `implement-review.js`, and `close.js` are
   rewritten from the CommonJS + `runAgent()`-probe shim to the engine's self-contained dialect —

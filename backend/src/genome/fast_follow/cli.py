@@ -20,9 +20,6 @@ so the loop core stays runnable on a fresh checkout (plan §3 / A4). The ``genom
 registers this sub-app eagerly; the DB-free guarantee is carried by the package-local
 ``test_fast_follow_no_db_import.py`` clean-subprocess test, not by lazy import. ``gh`` / ``rm``
 / the merge itself live in the **skill**, never here.
-
-This file is a **stub** for the interface-freeze step: every command body raises
-:class:`NotImplementedError` so plan-blind tests are honestly RED.
 """
 
 from __future__ import annotations

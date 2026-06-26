@@ -9,9 +9,6 @@ human to paste into ``/scope-run`` (drafts-to-stdout, never an autonomous ROADMA
 **No** :mod:`genome.db` import. **No anchor magnitudes hard-coded in this module's source**
 (plan §4 / §6): every number in the output comes from the plan at runtime, so the real-data
 anchors are never transcribed into code.
-
-This file is a **stub** for the interface-freeze step: every body raises
-:class:`NotImplementedError` so plan-blind tests are honestly RED.
 """
 
 from __future__ import annotations

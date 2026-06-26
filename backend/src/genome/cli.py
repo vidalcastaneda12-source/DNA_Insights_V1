@@ -164,7 +164,11 @@ def status() -> None:
             typer.echo(f"  profiles:    {profiles[0] if profiles else 0}")
             typer.echo(f"  preferences: {prefs[0] if prefs else 0}")
 
-    typer.echo(f"External calls enabled: {settings.external_calls_enabled}")
+    # Report the LIVE user_preferences value the egress gate actually enforces, not
+    # settings.external_calls_enabled — a load-time .env snapshot that nothing consults
+    # for gating (finding-024). Fail-closed (False) when app.db is absent / uninitialized.
+    external_enabled = is_external_enabled() if settings.app_db_path.exists() else False
+    typer.echo(f"External calls enabled: {external_enabled}")
 
 
 @app.command()
@@ -1060,7 +1064,7 @@ def panel_prepare_chrx(
     typer.echo(
         f"chrX panel split into region subsets beside {result.par1_path.parent}: "
         f"{result.par1_path.name}, {result.nonpar_path.name}, {result.par2_path.name} "
-        f"(non-PAR haploid GTs={result.nonpar_haploid_gts})",
+        f"(non-PAR retains male haploids={result.nonpar_has_haploid})",
     )
     typer.echo(
         "Next: `genome imputation run <id> --chromosomes X` (or a full run including X).",

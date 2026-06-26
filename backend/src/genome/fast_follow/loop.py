@@ -7,9 +7,6 @@ seen-set dedup, the per-batch :data:`~genome.fast_follow.model.MAX_ITEMS` /
 partitions (no silent truncation), and the ``dry`` / ``cap`` termination predicate. The
 self-spawning nit cannot loop because a handled candidate's ``seen_key`` is excluded on the
 next scan. **No** :mod:`genome.db` import.
-
-This file is a **stub** for the interface-freeze step: every body raises
-:class:`NotImplementedError` so plan-blind tests are honestly RED.
 """
 
 from __future__ import annotations

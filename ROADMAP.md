@@ -89,9 +89,10 @@ Deferred to later phases:
 **Status:** in progress — PRs 1–6 landed (#63, #64, #65, #70, #74, #88); PR 7 is next
 (but re-scope first — see its ⚠️ note; it may be moot against the live DB).
 
-A 13-PR run that clears every dbSNP-dependent backfill, deferred-cleanup item,
+A 14-PR run that clears every dbSNP-dependent backfill, deferred-cleanup item,
 and FK blocker before the Phase 6 analyses begin, so Phase 6 starts with no open
-deferred items. Replaces the former "Post-5.7 backfills" slot and absorbs the
+deferred items. (PR 14 was appended by the 2026-06-26 repo sweep to absorb three
+fired deferrals — finding-005 #9, finding-027, finding-021 — that had no slot.) Replaces the former "Post-5.7 backfills" slot and absorbs the
 non-phase-bound follow-ups previously tracked under Phase 5. Sequence positions
 ("PR N") are stable references and are distinct from GitHub PR numbers.
 
@@ -164,14 +165,36 @@ finding-016 #8):
 - [ ] **PR 9** — finding-010 #14: orphan-row cleanup *procedure* for rows under
   superseded `source_version_id`s, plus a runbook entry (covers `variant_aliases`
   orphans too). General/ongoing, vs. PR 7's one-off gnomAD-specific delete.
-- [ ] **PR 10** — finding-010 #13: HEAD-request-failure version-label policy — write
-  its own finding, decide refuse-vs-fallback, implement.
+- [ ] **PR 10** — Version-label correctness policy (two related defects):
+  - finding-010 #13: HEAD-request-failure version-label policy — write its own finding,
+    decide refuse-vs-fallback, implement.
+  - finding-022 / finding-005 #10: the loader version label decouples from the cached bytes on a
+    `rm -rf data/` rebuild reload — ClinVar/GWAS resolve the *current upstream* label (e.g. June)
+    while loading *older cached* bytes (e.g. May), mislabeling `annotation_source_versions.version`
+    (data correct, label wrong). Bind the persisted label to the loaded bytes — a sidecar
+    `<file>.version` written on fresh download and read back on a cache-hit, or generalize
+    finding-014's `maybe_skip_on_hash_match` to adopt the label of any prior row whose hash matches
+    the cached file. (Folded here by the 2026-06-26 repo sweep; the named "next annotation-loader
+    PR" fix point had no slot.)
 - [ ] **PR 11** — finding-008: `register-existing-result` CLI command, collapsing
   the full-archive rebuild workflow.
 - [ ] **PR 12** — Top-level CLI test module for `init` / `status` / `config get|set` /
   `version` (audit item 3.2; currently uncovered).
 - [ ] **PR 13** — gnomAD total-reopen drift sentinel on the `gnomad.refresh.complete`
   event (finding-012 #12).
+- [ ] **PR 14** — Deferred pipeline / imputation residuals (surfaced by the 2026-06-26 repo
+  sweep — each was a deferral whose original fold target landed without absorbing it, so it had
+  no slot):
+  - finding-005 #9: `pos_grch37` not re-coalesced across the `canonicalize-variants` collapse
+    (the survivor INSERT inherits only the `MIN(old_variant_id)` representative's GRCh37 coord;
+    divergent/NULL movers are dropped, not coalesced). Needs a re-liftover / GRCh37-recoalesce
+    pass. **Low severity** — GRCh38 (the project's primary) and the GRCh38-keyed consensus / index
+    are unaffected; only the alongside-stored GRCh37 value is at issue.
+  - finding-027: the upstream `vcf_export.py` panel-strand reconciliation that stops *new*
+    duplicate `variants_master` rows from being created (PR 5b collapsed only the *existing* ones).
+    Fold into a future `imputation prepare` / re-impute PR.
+  - finding-021: recover chip-probe IDs to canonical rsIDs (`kgp`→`rs`, unwrap `acom_rs…`) —
+    alias-format normalization that PR 4's merged-rsID resolution (finding-025) did not cover.
 
 **Out-of-sequence fix that landed mid-run** (not a numbered slot):
 
@@ -194,8 +217,32 @@ CLAUDE.md "Real-data observations" #7); PRs 4 (tier-2 rsID matching, #70) and 5 
 M3-physical, #74) had already landed. The FK gate is therefore **cleared** — Phase 6's
 remaining entry conditions are the locked conventions: supersession-over-update,
 operation-level provenance without schema changes, and the PyArrow / INSERT-SELECT
-bulk-load pattern. (The remaining open pre-Phase-6 slots — PRs 7–13 — are cleanup that
-does not block Phase-6 entry.)
+bulk-load pattern. (The remaining open pre-Phase-6 slots — PRs 7–14 — and the
+sub-project Phase-2 continuations below are cleanup / enhancement that does not block
+Phase-6 entry.)
+
+### Sub-project Phase-2 continuations
+
+Tracked here per the 2026-06-26 repo sweep (each previously lived only in its finding with no
+ROADMAP slot). These are **orthogonal to Phase-6 entry** — they continue the `/scope-run`
+enhancement sub-projects, not the dbSNP-backfill cleanup, and none gates the Phase 6 analyses.
+
+- [ ] **Sub Project C1 — Phase 2 (calibration enablement, [`finding-040`](docs/findings/finding-040-cross-run-learning-calibration.md)).**
+  C1 shipped report-only (`auto_tuning_enabled=false`, ratchet dark). The enablement flip
+  (`auto_tuning_enabled=true`) is gated on the loop-closure test, a VSC-User `tier_in_hindsight`
+  decision, and three **pre-enablement must-fixes** in the dark `apply-parked` / `ratchet --apply`
+  write path (finding-040 "Pre-enablement residuals"): (1) the stale full-snapshot apply can
+  silently lose a concurrent auto-commit's knob move; (2) an approved parked row is never retired,
+  so it stays re-appliable (duplicate `CommitPlan` → empty commit); (3) `apply-parked` does not
+  read the kill switch — an open design decision (is one-click human approval exempt from
+  `auto_tuning_enabled=false`?) — plus the deferred test coverage for all three. Also deferred
+  here: the dispatcher/splitter `est_risk_tier` convergence PR (the splitter stays advisory until
+  then) and the unattended every-N-merges close-hook auto-commit (on-demand `/calibrate` is first).
+- [ ] **Sub Project B2 — Phase 2 (`genome.campaign`, [`finding-039`](docs/findings/finding-039-scope-split-smart-cut.md)).**
+  The campaign runner that auto-runs split sub-scopes through the per-scope team (each transition
+  an insert-then-flip supersession). B2 Phase 1 shipped the smart-cut detector only.
+- See also **Sub Project C2+D — Phase 2** (engine-primary CLI + the Python-CLI reversal-gate),
+  already tracked in its own section below.
 
 ## Sub Project B2 — scope-split (Phase 1)
 
