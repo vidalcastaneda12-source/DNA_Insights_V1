@@ -1,6 +1,10 @@
 # Sub Project C1 — Cross-Run Learning (`/calibrate`, L3-asymmetric)
 
-**Status:** Design approved (brainstorming), ready for an implementation plan.
+**Status:** Implemented (Sub Project C1, `finding-040`). The `genome.calibration` core, the
+`genome calibrate` CLI, the `compute-tier` loop-closure dispatcher rewire, and the asymmetric
+L3 ratchet have landed; ships **report-only** (`auto_tuning_enabled=false`) until the
+enablement signoff. This design doc is the durable rationale; the synthesized plan artifact is
+transient.
 **Date:** 2026-06-24.
 **Source:** Brainstorming session on bolstering `/scope-run`.
 **Scope:** The **learning/calibration** half of Sub Project C. The other half — **C2

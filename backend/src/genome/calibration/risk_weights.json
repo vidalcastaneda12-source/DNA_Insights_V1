@@ -1,0 +1,35 @@
+{
+  "weights_version": "rw-1",
+  "c_map": {
+    "docs": 0,
+    "tests": 1,
+    "cli": 1,
+    "data-backfill": 2,
+    "annotation-loader": 2,
+    "analysis": 2,
+    "insights": 2,
+    "pipeline": 3,
+    "schema": 4,
+    "ddl": 4
+  },
+  "b_buckets": {
+    "isolated": 0,
+    "small": 1,
+    "moderate": 2,
+    "large": 3
+  },
+  "p_levels": {
+    "clean": 0,
+    "minor": 1,
+    "correction": 2
+  },
+  "t1": 1,
+  "t2": 5,
+  "auto_tuning_enabled": false,
+  "provenance": {
+    "source": "seed",
+    "rationale": "Initial seed — mirrors scope_split._C_MAP and the scope-dispatcher.md additive S = C + B + P formula (finding-040 / Gate-1 D1). Report-only: auto_tuning_enabled is false until the deterministic loop-closure test + the three safety fixes are green and VSC-User confirms the tier_in_hindsight default.",
+    "cited_outcomes": [],
+    "parent_version": null
+  }
+}

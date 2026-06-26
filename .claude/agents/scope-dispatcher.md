@@ -39,22 +39,69 @@ You are **read-only**. You produce a manifest, not a plan and not code.
    "Real-data observations" / the cited finding's bedrock anchor table.
 7. **Retrieve the 2–3 nearest past findings/PRs and *what surprised them*** into
    `precedent` (`{"finding":"finding-008","surprise":"Beagle aborts on male non-PAR
-   ploidy"}`). This is what lets the pre-mortem apply history to the current plan.
+   ploidy"}`). Consult the systematic outcome ledger `data/calibration/outcomes.jsonl`
+   first (the `finding-040` cross-run record of what actually surprised each merged scope);
+   **if it is absent** — the `data/` tree is gitignored, so a fresh checkout or first run has
+   none — **skip it and fall back** to the `git log` / finding-grep precedent search below.
+   This is what lets the pre-mortem apply history to the current plan.
 8. **Compute `blast_radius`** — `imports_touched` + `tests_covering`. See the MCP note.
-9. **Set `rebuild_required`** (true iff `docs/schemas/`|`ddl/` change implied) and
-   **`risk_tier`** via the formula below.
+9. **Set `rebuild_required`** (true iff `docs/schemas/`|`ddl/` change implied) and the
+   authoritative **`risk_tier` + `risk_breakdown`** by RUNNING
+   `genome calibrate compute-tier --manifest -` (see "Risk-tier scoring" below) and consuming
+   the returned `{tier, breakdown}` — never by hand-computing the formula.
 10. **Run the reading-list freshness slice** (below) → `freshness_flags`.
 11. **Flag `open_questions`** — anything needing VSC-User judgment.
 
 **Return only the manifest JSON. No prose before or after.**
 
-## Risk-tier scoring (compute exactly — do not improvise)
+## Risk-tier scoring — RUN the authoritative CLI (do not hand-compute)
 
-Under-tiering a risky change is far costlier here than over-tiering, so trip-wires
-floor the two irreversible risks, an additive score handles the rest, ties round up,
-and escalations only ever raise the tier. Store the sub-scores in `risk_breakdown` so
-the call is auditable and a human can override upward. **Estimate each sub-score
-conservatively — when unsure, round up.**
+The risk tier is computed by the single deterministic Python source of truth —
+`genome.calibration.compute_tier`, exposed as `genome calibrate compute-tier` (Gate-1 = D1,
+`finding-040`) — **not** by improvising the formula in prose. Assemble the `TierFields`
+(`change_class`, `imports_touched_count`, `precedent_surprise`, `applicable_anchors_count`,
+plus the dispatch-time bump triggers `has_open_questions` / `human_bump`) and **RUN** the
+CLI, feeding the fields on stdin exactly as the blast-radius shell-out below already does:
+
+```bash
+echo "$TIER_FIELDS_JSON" | genome calibrate compute-tier --manifest - --scope-id "$SCOPE_ID" --persist
+```
+
+**CONSUME** the returned `{tier, breakdown}` verbatim: `tier` is the authoritative
+`risk_tier` and `breakdown` (`{C,B,P,A,S,floor,deep_T2}`) is the authoritative
+`risk_breakdown` — do not re-derive either by hand. `--persist` writes the dispatch-time
+predicted manifest to `data/calibration/manifests/<scope_id>.json`, the store A's close hook
+(`genome calibrate write-outcome`) later sources so the run is learned from.
+
+**CLI-error fallback (fail loud).** If `genome calibrate compute-tier` exits non-zero, fall
+back to the non-authoritative **Reference** table below for *this* run only and record the
+failure in `open_questions` — never silently emit a guessed tier.
+
+**Escalations the dispatcher still applies (now computed by / read from `compute_tier`):**
+
+- **Conservative +1 bump — two stages, applied once each, never double-counted.** The bump
+  has two triggers folded at two different times:
+  1. **Inside the CLI:** `compute_tier` itself already applies `tier = min(2, tier + 1)` when
+     the `has_open_questions` / `human_bump` fields you put in the manifest are set. Set them in
+     `TierFields` and let the CLI fold them — **do not** re-apply them by hand on the returned
+     tier (that would double-count the bump).
+  2. **On top, after the CLI returns:** re-bump `tier = min(2, tier + 1)` for the **one**
+     trigger the dispatch-time call structurally cannot know — **pre-mortem = probe-first** (a
+     later-stage signal). This is the only post-CLI adjustment the dispatcher makes to `tier`.
+
+  So the manifest carries `has_open_questions` + `human_bump` (folded in stage 1); the dispatcher
+  layers only the probe-first re-bump (stage 2). Escalations only ever raise the tier.
+- **Review depth.** Read `deep_T2` from the returned `breakdown` (`(S >= 7) OR (A >= 3)`) to
+  select deep review (3 skeptics + completeness-critic + loop-until-dry; else standard T2,
+  2 skeptics); do not recompute it.
+
+### Reference (informational — the authoritative tier comes from `genome calibrate compute-tier`)
+
+The CLI evaluates exactly the additive formula reproduced below; it is kept here for review
+and audit only. **Do not hand-compute the tier from it** — run the CLI (above). The tunable
+weights live in `backend/src/genome/calibration/risk_weights.json`; the trip-wire floors are
+hard-coded and immutable (never in the config). **Estimate each sub-score conservatively —
+when unsure, round up.**
 
 - **C — change-class** (max over touched concerns; `+1` if ≥3 distinct code concerns):
   `docs 0 · tests 1 · cli 1 · data-backfill 2 · annotation-loader 2 ·
@@ -76,12 +123,13 @@ floor = 2  if  (schema|ddl touched)  OR  (|applicable_anchors| >= 1)   else 0
 
 tier_from_S = 0 if S==0 · 1 if 1<=S<=4 · 2 if S>=5
 tier  = max(floor, tier_from_S)                       # conservative: max, never min
-tier  = min(2, tier + 1)  if  pre-mortem=probe-first  OR  manifest.open_questions  OR  human-bump
+tier  = min(2, tier + 1)  if  manifest.open_questions  OR  human-bump   # stage 1: folded INSIDE compute_tier
+tier  = min(2, tier + 1)  if  pre-mortem=probe-first                    # stage 2: dispatcher adds on top, post-CLI
 
 deep_T2 = (S >= 7) OR (A >= 3)         # 3 skeptics + completeness-critic + loop-until-dry; else standard T2 (2 skeptics)
 ```
 
-**Back-test (your own regression check — these must reproduce):**
+**Back-test (the CLI's own regression check, mirrored in `calibration.BACKTEST_ROWS` — these must reproduce):**
 
 | Slot | C | B | P | S | trip-wire | → tier |
 |---|---|---|---|---|---|---|

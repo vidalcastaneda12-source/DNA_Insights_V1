@@ -13,6 +13,7 @@ import typer
 
 from genome import __version__
 from genome.annotate import annotate_app
+from genome.calibration import calibration_app
 from genome.config import get_logging_settings, get_settings
 from genome.db.duckdb_conn import duckdb_connection
 from genome.db.init_schema import init_databases
@@ -87,6 +88,9 @@ app.add_typer(fast_follow_app, name="fast-follow")
 # scope_split is eagerly registered; the DB-free guarantee is carried by the package-local
 # clean-subprocess test (test_scope_split_no_db_import.py), not by lazy import.
 app.add_typer(scope_split_app, name="scope-split")
+# calibration is eagerly registered; the DB-free guarantee (no genome.db AND no genome.config)
+# is carried by the package-local clean-subprocess test (test_calibration_no_db_import.py).
+app.add_typer(calibration_app, name="calibrate")
 imputation_app.add_typer(panel_app, name="panel")
 
 
