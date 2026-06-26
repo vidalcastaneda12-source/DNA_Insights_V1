@@ -133,7 +133,8 @@ event for visibility instead of aborting. The leftover is logged on every run �
 including the idempotent no-op re-run where `matched == 0` — so the chip-probe
 residue stays observable in steady state. Recovering these probe IDs to canonical
 rsIDs (`kgp`→`rs`, unwrapping `acom_rs…`) is alias-normalization, deferred to
-`variant_aliases` / PR-4; the ingest predicate `_dbsnp_rsid_or_none` is unchanged
+`variant_aliases` (the pre-Phase-6 **PR 14** slot, ROADMAP — PR 4's merged-rsID
+resolution, finding-025, did not cover this alias-format normalization); the ingest predicate `_dbsnp_rsid_or_none` is unchanged
 (it is correct and real-data-confirmed).
 
 ## Amendment — one genuine `rsid_conflicts` survives the #66 sweep (PR-3 canonicalize gate)

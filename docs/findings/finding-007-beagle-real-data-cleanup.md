@@ -136,7 +136,8 @@ callers (e.g. a future merge or analysis pipeline that reuses
 
 ## Follow-up
 
-None for this session. The three defects are now closed. Future
-imputation enhancements (HRC panel support, dbSNP-based hom-only
-recovery, bref3 conversion) remain deferred per `finding-005` and the
-Phase 4 plan.
+None for this session. The three defects are now closed. Of the future
+imputation enhancements once deferred here, **dbSNP-based hom-only recovery
+shipped** in the pre-Phase-6 PR 3 canonical REF/ALT backfill (`genome annotate
+canonicalize-variants`, finding-020, closing finding-005 #6); HRC panel support
+and bref3 conversion remain deferred per `finding-005` and the Phase 4 plan.

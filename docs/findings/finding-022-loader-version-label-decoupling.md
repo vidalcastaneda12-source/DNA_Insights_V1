@@ -99,7 +99,7 @@ superseded_by: []
 
 ## Follow-up
 
-10. **Bind the label to the loaded bytes (finding-005 #10, next loader PR).** Two
+10. **Bind the label to the loaded bytes (finding-005 #10; the pre-Phase-6 PR 10 slot, ROADMAP).** Two
     viable shapes: (a) write a sidecar `<file>.version` next to the cache on a fresh
     download and read it back on a cache hit, so the label always describes the bytes
     on disk; or (b) generalize finding-014's `maybe_skip_on_hash_match` so that on a

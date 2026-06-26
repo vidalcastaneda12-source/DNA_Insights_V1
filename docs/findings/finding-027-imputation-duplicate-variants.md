@@ -82,7 +82,7 @@ PR 5b collapses **all** existing duplicates regardless of origin. The upstream
 - Re-imputation is a rare, operator-gated ~30-min op, so recurrence is low-frequency.
 
 **Recommended future fix point:** a pre-export canonicalize/panel-reconcile step
-folded into a future `imputation prepare` / re-impute PR — write the chip alleles to
+folded into the pre-Phase-6 **PR 14** slot (ROADMAP), a future `imputation prepare` / re-impute PR — write the chip alleles to
 the export VCF in the panel's orientation (or canonicalize `variants_master` REF/ALT
 before export, recovering the hom-only rows too), and dedup the imputed import against
 opposite-strand/swap chip rows in `_upsert_variants_master`.
