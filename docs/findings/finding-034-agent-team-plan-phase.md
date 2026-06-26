@@ -1445,3 +1445,30 @@ Net: riskiest-assumptions #1/#2/#4 + EF-1/EF-4/EF-6 + arch-1 are **empirically r
 AsyncFunction construct-check (body-wrap) is validated as a faithful stand-in for the engine
 loader — which is why the Amendment records the dialect as empirically confirmed, not merely
 documented.
+
+## C2D-Phase1 residual risk (deferred-unverified — carried to Phase 2)
+
+Phase 1 (PR #109 / `866d255`) is gate-GREEN under the deterministic EC1–EC5 checks
+([`verification.md`](../runbooks/verification.md) "C2+D Phase 1 gate (engine-dialect workflow
+port)"; `manifest.applicable_anchors` was `[]`, so no genome real-data anchor was re-locked).
+Three items are **deliberately carried forward**, not closed — recorded here at the Stage-5
+close so the next scope item starts from accurate ground:
+
+- **The four trigger-gated Stage-2 writers are deferred-unverified (D7).** The
+  `schema-change executor`, `fan-out-implementer`, `test-triage`, and `deep-debugger` branches
+  are wired on real triggers and covered by the `node:test` harness **only against synthetic
+  manifests** — their **live-engine RUN semantics are not yet validated**. The harness proves
+  the trigger wiring and the fail-closed seams; it is not a substitute for an end-to-end engine
+  run of those branches.
+- **arch-1 drift-guard seam-coverage gap (latent, backlogged).** The load-model probe
+  empirically retired arch-1 at the *engine* level (async rejection → `null`; a synchronous
+  `throw` propagates — see the probe appendix above). The residual is the narrower *drift-guard
+  test seam coverage* for that footgun: the harness `parallel`/`pipeline` stubs must keep
+  mirroring null-on-async-rejection / propagate-on-sync-throw, and that guard is not yet
+  exhaustively covered. Latent — no current trigger.
+- **The Python-CLI reversal-gate is Phase 2.** It is the single intentionally-skipped
+  `drift.test.mjs` test (EC3's one skip); the engine-primary CLI + the reversal-gate land in
+  Phase 2. Tracked in `ROADMAP.md` "Sub Project C2+D — Workflow-Engine Migration".
+
+None of these blocks a gate; they are the Stage-5 residual ledger for C2D-Phase1, paired with
+the Phase 2 slot in `ROADMAP.md`.

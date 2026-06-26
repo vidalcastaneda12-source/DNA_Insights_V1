@@ -216,6 +216,43 @@ not hand-edit it; the writer replaces only the inter-sentinel region (append-onl
 <!-- B2-SUBSCOPES:BEGIN -->
 <!-- B2-SUBSCOPES:END -->
 
+## Sub Project C2+D — Workflow-Engine Migration
+
+Port the per-scope agent-team orchestrators from the model-driven `runAgent()` probe-shim to
+the real dynamic-workflows **engine dialect** and make the deterministic JS workflows the
+**engine-primary** path, while retaining the model-driven `/scope-run` conductor as the
+by-name segment launcher and the headless/cron fallback. Both human gates (plan approval;
+merge verification) are unchanged. The reversal is recorded **pure-append**
+([`finding-034`](docs/findings/finding-034-agent-team-plan-phase.md) Amendment / `DEC-0099`;
+the finding-034 design `DEC-0020` is left active and unflipped, per the `DEC-0086`/`DEC-0087`
+precedent). The Stage-1 gate package flagged that no ROADMAP slot existed for this work; this
+is it, added at Stage-5 close.
+
+- [x] **Phase 1** (PR #109 / `866d255`) — port
+  `.claude/workflows/{plan-phase,implement-review,close}.js` to the engine dialect
+  (pure-literal `export const meta`, self-contained body, injected
+  `agent · parallel · pipeline · log · phase · budget` hooks, schema-validated `agent()` calls
+  replacing the hand-rolled coercion, top-level `return`); close six fidelity gaps (Tier-0
+  minimal-diff planner; Tier-2 architect-reviewer folded into one severity→verdict ladder;
+  Stage-4 `handoff-assembler` wired on the `go` path; the four trigger-gated Stage-2 writers on
+  real triggers, `fan-out-implementer` replacing the single implementer; severity-scaled
+  refute-by-default verification; budget-guarded escalation); record the
+  model-driven→engine-primary reversal (`DEC-0099`, pure-append); add the `node:test` harness
+  (87 tests · 86 pass · 1 intentional Phase-2 skip · 0 fail); and fail-closed-harden the
+  `parallel`/`pipeline` fan-out seams. The engine load model was empirically confirmed by a
+  committed live-engine probe
+  ([`c2d-load-probe-wf_a37802b2-c92.js`](docs/findings/c2d-load-probe-wf_a37802b2-c92.js), run
+  `wf_a37802b2-c92`; see finding-034's probe appendix). JS-orchestration + docs only — no
+  Python / schema / DB change (the dev-loop stayed byte-unchanged; `manifest.applicable_anchors`
+  was `[]`, no real-data anchors). Gate recipe: verification.md "C2+D Phase 1 gate
+  (engine-dialect workflow port)".
+- [ ] **Phase 2** — the engine-primary CLI + the Python-CLI **reversal-gate** (the one
+  intentionally-skipped `drift.test.mjs` test — EC3's single skip). **Residual carried from
+  Phase 1:** the four trigger-gated Stage-2 writers are **deferred-unverified (D7)** (exercised
+  only on synthetic manifests; live-engine RUN semantics not yet validated), and the `arch-1`
+  drift-guard seam-coverage gap is latent/backlogged. See
+  [`finding-034`](docs/findings/finding-034-agent-team-plan-phase.md) "C2D-Phase1 residual risk".
+
 ## Phase 6 — Analysis pipelines
 - Load `pgs_score_weights` (per-variant PGS weights, overlapping-only per locked decision #5) → PRS computation against PGS Catalog
 - PharmCAT integration → `derived_pgx_phenotypes`
