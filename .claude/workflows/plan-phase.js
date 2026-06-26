@@ -116,7 +116,7 @@ async function withRetry(thunk, who) {
  * `opts.schema` the engine returns a schema-validated object; without it, prose.
  */
 async function call(agentType, input, opts) {
-  const { schema, label } = opts || {};
+  const { schema, label, isolation } = opts || {};
   const prompt =
     `You are being invoked as the \`${agentType}\` subagent in the per-scope agent ` +
     `team's Plan-phase workflow. Follow your agent definition exactly and ` +
@@ -125,7 +125,10 @@ async function call(agentType, input, opts) {
       : `return the document described in your "Output" section.`) +
     `\n\nINPUT (JSON):\n${JSON.stringify(input, null, 2)}`;
   log(`[plan-phase] → ${label || agentType} (${agentType})`);
-  return withRetry(() => agent(prompt, schema ? { agentType, schema } : { agentType }), agentType);
+  const agentOpts = { agentType };
+  if (schema) agentOpts.schema = schema;
+  if (isolation) agentOpts.isolation = isolation; // engine-level worktree directive (fan-out writers)
+  return withRetry(() => agent(prompt, agentOpts), agentType);
 }
 
 // ── Budget helpers. `budget.total` is null when no target (the default path; the

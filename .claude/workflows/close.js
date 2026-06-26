@@ -78,7 +78,7 @@ async function withRetry(thunk, who) {
  * a schema-validated object; without it, the member's prose text is returned.
  */
 async function call(agentType, input, opts) {
-  const { schema, label } = opts || {};
+  const { schema, label, isolation } = opts || {};
   const prompt =
     `You are being invoked as the \`${agentType}\` subagent in the per-scope agent team's ` +
     `close workflow. Follow your agent definition exactly and ` +
@@ -87,7 +87,10 @@ async function call(agentType, input, opts) {
       : `return the document described in your "Output" section.`) +
     `\n\nINPUT (JSON):\n${JSON.stringify(input, null, 2)}`;
   log(`[close] → ${label || agentType} (${agentType})`);
-  return withRetry(() => agent(prompt, schema ? { agentType, schema } : { agentType }), agentType);
+  const agentOpts = { agentType };
+  if (schema) agentOpts.schema = schema;
+  if (isolation) agentOpts.isolation = isolation; // engine-level worktree directive (fan-out writers)
+  return withRetry(() => agent(prompt, agentOpts), agentType);
 }
 
 // Output-shape contracts. Each `required` list is a subset of that member's documented

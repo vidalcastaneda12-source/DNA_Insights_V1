@@ -172,7 +172,7 @@ async function withRetry(thunk, who) {
  * a schema-validated object; without it, the member's prose (e.g. handoff-assembler).
  */
 async function call(agentType, input, opts) {
-  const { schema, label } = opts || {};
+  const { schema, label, isolation } = opts || {};
   const prompt =
     `You are being invoked as the \`${agentType}\` subagent in the per-scope agent team's ` +
     `implement-review workflow. Follow your agent definition exactly and ` +
@@ -181,7 +181,10 @@ async function call(agentType, input, opts) {
       : `return the document described in your "Output" section.`) +
     `\n\nINPUT (JSON):\n${JSON.stringify(input, null, 2)}`;
   log(`[implement-review] → ${label || agentType} (${agentType})`);
-  return withRetry(() => agent(prompt, schema ? { agentType, schema } : { agentType }), agentType);
+  const agentOpts = { agentType };
+  if (schema) agentOpts.schema = schema;
+  if (isolation) agentOpts.isolation = isolation; // engine-level worktree directive (fan-out writers)
+  return withRetry(() => agent(prompt, agentOpts), agentType);
 }
 
 // ── Budget helpers. `budget.total` is null with no target (default path; probe-confirmed)
@@ -260,8 +263,8 @@ async function stageImplement(ctx, fixFindings) {
     writerThunks.push(() =>
       call(
         'fan-out-implementer',
-        { manifest, plan, predicted_surprises, fix_findings: fixFindings, isolation: 'worktree' },
-        { schema: SCHEMAS.fanOutImplementer, label: 'fan-out-implementer' },
+        { manifest, plan, predicted_surprises, fix_findings: fixFindings },
+        { schema: SCHEMAS.fanOutImplementer, label: 'fan-out-implementer', isolation: 'worktree' },
       ),
     );
   } else {
@@ -388,15 +391,13 @@ async function reviewRound(lenses, ctx, diffSummary, seenIds, useBarrier) {
   }
 
   // Pipeline: per lens, stage 1 runs the lens, stage 2 verifies its findings as it lands.
-  const piped = (
-    await pipeline(lenses, [
-      (l) => call(l, lensInput, { schema: SCHEMAS.lens, label: `lens:${l}` }).then((o) => ({ lens: l, out: o || {} })),
-      async ({ lens, out }) => {
-        const verdicts = await verifyFresh(lens, out.findings || []);
-        return { lens, findings: out.findings || [], anchors_to_watch: out.anchors_to_watch || [], verdicts };
-      },
-    ])
-  ).filter(Boolean);
+  // The engine signature is variadic — pipeline(items, ...stages), NOT a stage array.
+  const lensStage = (l) => call(l, lensInput, { schema: SCHEMAS.lens, label: `lens:${l}` }).then((o) => ({ lens: l, out: o || {} }));
+  const verifyStage = async ({ lens, out }) => {
+    const verdicts = await verifyFresh(lens, out.findings || []);
+    return { lens, findings: out.findings || [], anchors_to_watch: out.anchors_to_watch || [], verdicts };
+  };
+  const piped = (await pipeline(lenses, lensStage, verifyStage)).filter(Boolean);
   const lensOut = piped.map(({ lens, findings, anchors_to_watch }) => ({ lens, findings, anchors_to_watch }));
   const verdicts = piped.flatMap((p) => p.verdicts || []);
   return { lensOut, verdicts };
