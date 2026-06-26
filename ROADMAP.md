@@ -206,7 +206,7 @@ git-grep import graph as a veto signal; fail-closed (a false split is the costli
 so the detector under-proposes by construction). Phase 1 is the detector only — no
 campaign runner, no auto-running of sub-scopes.
 
-- [ ] **B2-Phase1** — `genome.scope_split` smart-cut detector + `scope-split` sub-app
+- [x] **B2-Phase1** — `genome.scope_split` smart-cut detector + `scope-split` sub-app
   (check / dry-run / write-roadmap), the Stage-0.5 split-check micro-gate hook, and the
   managed ROADMAP block below. DB-free core; placeholder sub-scope ids only.
 

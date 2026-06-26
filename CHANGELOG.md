@@ -100,6 +100,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pysqlcipher3 is lazy, not removed (locked decisions #1/#6 intact). Added a clean-subprocess
   regression-lock test and documented the gate in CLAUDE.md + verification.md (the finding-036
   follow-up). (decision-tracking-followups)
+- Fix the `docs-check` CI Action's dependency sync to skip pysqlcipher3 as well as cyvcf2:
+  `uv sync --no-install-package cyvcf2` still built pysqlcipher3, which needs SQLCipher headers
+  absent on the runner. The gate is config-free / DB-free / pysqlcipher3-lazy, so the workflow
+  sync skips it too (`.github/workflows/docs-gate.yml`); verified green on a real runner. The
+  CI-recipe completion of the docs-gate-enforcement / decision-tracking-followups work above. (#98)
 - Add a decision-tracking ledger to close the repo's decision-leak (tactical/reversed
   decisions previously lived only in PR bodies + prose). A git-tracked `MEMORY.md` decision
   log + per-finding frontmatter (`type`/`status`/`actors`/`date`/supersession), generated and
