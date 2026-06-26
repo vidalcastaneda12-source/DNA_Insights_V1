@@ -345,7 +345,21 @@ async function stageImplement(ctx, fixFindings) {
     (schemaExec && schemaExec.escalate === true) ||
     impl.ready_for_review === false;
 
-  return { freeze, impl, schemaExec, sentinel, green, triage, debug, blocked, members };
+  // Name the specific trigger(s) that fired so a fail-closed Stage-2 escalation is
+  // self-describing in the machine-readable escalation_reason (the cause otherwise lived
+  // only in log()). ADDITIVE — the `blocked` routing decision above is unchanged; this only
+  // enriches the reason string threaded into done().
+  const blockedReasons = [];
+  if (sentinel && sentinel.verdict === 'escalate') blockedReasons.push('plan-adherence-sentinel verdict=escalate (plan drift)');
+  if (sentinelMissing) blockedReasons.push('plan-adherence-sentinel returned no usable verdict (failing closed)');
+  if (testAuthorMissing) blockedReasons.push('plan-blind test-author returned no result — blind tests unverified (failing closed)');
+  if (green && green.escalate) blockedReasons.push('green-keeper escalate (only path to green was a weakened test / schema touch)');
+  if (debug && debug.escalate === true) blockedReasons.push('deep-debugger escalate');
+  if (schemaExec && schemaExec.escalate === true) blockedReasons.push('schema-change-executor escalate');
+  if (impl.ready_for_review === false) blockedReasons.push('implementer ready_for_review=false (unescalated surprise)');
+  const blockedReason = blockedReasons.length ? `Stage 2 fail-closed: ${blockedReasons.join('; ')}` : null;
+
+  return { freeze, impl, schemaExec, sentinel, green, triage, debug, blocked, blocked_reason: blockedReason, members };
 }
 
 /**
@@ -549,7 +563,7 @@ async function implementReview(ctx) {
 
     stage2 = await stageImplement(ctx, fixFindings);
     if (stage2.blocked) {
-      return done(ctx, stage2, null, 'escalate', 'Stage 2 sentinel/green-keeper/debugger escalation or implementer surprise');
+      return done(ctx, stage2, null, 'escalate', stage2.blocked_reason || 'Stage 2 sentinel/green-keeper/debugger escalation or implementer surprise');
     }
 
     stage3 = await stageReview(ctx, summarizeDiff(stage2));

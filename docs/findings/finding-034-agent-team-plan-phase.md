@@ -1436,9 +1436,9 @@ failures: parallel[1] failed: async rejection — expect null in this slot
 - **budget**: `total` is `null` when no target (the plan's null-budget fallback is the default path); `spent()` readable.
 - **resume**: on `resumeFromRunId`, the `agent()` call returned **cached** (`subagent_tokens:0`, 39ms total) — `resumeFromRunId` caching confirmed.
 
-**Two findings the port + tests must respect (verbatim from the probe report):**
+**Two findings the port + tests must respect (#1 verbatim from the probe report; #2 rephrased to describe the as-built `parseArgs` rather than the report's pre-port prescription):**
 
-1. **null-on-failure applies to ASYNC rejection only.** `parallel`/`pipeline` null a thunk that returns a **rejected promise** (the real `() => agent(...)` failure mode) — but a **synchronous `throw`** in a thunk body **propagates and crashes the run**. So: (a) every ported thunk is `() => agent(...)` / `() => call(...)` (async); (b) NEVER use a sync-throwing thunk in `parallel`/`pipeline`; (c) the test harness's `parallel`/`pipeline` stubs MUST mirror this — `null` on async rejection, **propagate** on sync throw. (Refines arch-1 / D2.)
+1. **null-on-failure applies to ASYNC rejection only.** `parallel`/`pipeline` null a thunk that returns a **rejected promise** (the real `() => agent(...)` failure mode) — but a **synchronous `throw`** in a thunk body **propagates and crashes the run**. So: (a) every ported thunk is `() => agent(...)` / `() => call(...)` (async) — covered; (b) NEVER use a sync-throwing thunk in `parallel`/`pipeline`; (c) the test harness's `parallel`/`pipeline` stubs MUST mirror this — `null` on async rejection, **propagate** on sync throw. (Refines arch-1 / D2.)
 2. **`args` arrives as a STRING.** Passing `args: {…}` (an object) to the engine delivered it to the script as a JSON **string**. The port keeps defensive arg-parsing (`parseArgs`): a JSON string is parsed, an object passes through, a bare scope id is wrapped.
 
 Net: riskiest-assumptions #1/#2/#4 + EF-1/EF-4/EF-6 + arch-1 are **empirically retired**, and the

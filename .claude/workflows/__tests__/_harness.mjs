@@ -2,6 +2,11 @@
 //
 // from: C2D-Phase1-synthesized-plan.md §"Implementation steps" step 2 + §"Tests";
 //       C2D-Phase1-probe-results.md (EMPIRICAL engine semantics); plan-v2-delta D2/D9.
+//       In-repo substantiation (the two C2D-Phase1-* plan files above are session-local, NOT
+//       committed to the repo): docs/findings/c2d-load-probe-wf_a37802b2-c92.js (the committed
+//       load-probe for the engine load model + semantics — null-on-async-reject /
+//       propagate-on-sync-throw / variadic pipeline(items, ...stages)) +
+//       docs/findings/finding-034-agent-team-plan-phase.md (the probe appendix).
 //
 // This module loads a workflow EXACTLY how the empirically-confirmed dynamic-workflows
 // engine does (probe `wf_a37802b2-c92`): it statically extracts the pure-literal
