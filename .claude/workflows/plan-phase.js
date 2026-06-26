@@ -10,35 +10,44 @@
  * gate stays human (finding-034).
  *
  * ── How it runs ────────────────────────────────────────────────────────────
- * Saved dynamic workflows live in `.claude/workflows/` (project, shared with
- * clones) and are invoked as a command: `/plan-phase PR-6`. The scope id arrives
- * via the runtime-provided global `args`. The workflow is intentionally OPT-IN —
- * it is NOT wired into settings.json; VSC-User triggers a per-scope run. The
- * members remain usable standalone via the Task/Agent tool.
+ * Saved dynamic workflows live in `.claude/workflows/` and are invoked as a
+ * command: `/plan-phase PR-6`. The scope id arrives via the runtime-provided
+ * `args`. The model-driven conductor (`/scope-run`, retained as the headless/cron
+ * fallback) launches this segment by name and pauses for the human at Gate 1.
  *
- * ── One undocumented dependency, isolated on purpose ───────────────────────
- * The dynamic-workflows runtime executes JS that orchestrates subagents, but the
- * exact subagent-invocation primitive is not part of Claude Code's *public*
- * authoring API (confirmed via claude-code-guide against
- * https://code.claude.com/docs/en/workflows.md). Every subagent call in this
- * file therefore funnels through the single `runAgent()` helper below. If a given
- * runtime exposes the primitive under a different name/shape, adjust that ONE
- * function and the whole chain follows — the orchestration logic itself
- * (tier-driven fan-out, parallel awaits, output validation, the bounded revise
- * loop) is runtime-agnostic. The helper tries the known conventions and throws a
- * loud, actionable error if none resolve, rather than silently no-op'ing.
+ * ── Runtime model (dynamic-workflows engine) ───────────────────────────────
+ * The engine loads this file by reading the pure-literal `export const meta`
+ * statically and wrapping the rest of the body in an async function with the
+ * workflow hooks injected as parameters:
+ *   agent · parallel · pipeline · log · phase · budget · workflow · args
+ * The script is SELF-CONTAINED (no import / no Node API) and ends with a top-level
+ * `return pkg`. Every subagent call funnels through the inline `call()` seam over
+ * the injected `agent(prompt, {agentType, schema})` primitive (empirically
+ * confirmed — C2D-Phase1 probe, finding-034 Amendment): the `schema` makes the
+ * engine return a validated object, replacing the old hand-rolled output coercion
+ * and key-assertion. Fan-out uses `parallel([() => call(...)])` — a rejected thunk
+ * resolves to null in its slot (we `.filter(Boolean)`); thunks are always async so
+ * a synchronous throw can never crash the run. The load model is validated by an
+ * AsyncFunction construct-check, exactly how the engine wraps the body.
  *
  * Read-only contract: every member is read-only (Read/Grep/Glob/Bash). This
  * workflow produces a plan, never code and never a commit.
  */
 
-'use strict';
+export const meta = {
+  name: 'plan-phase',
+  description: 'Per-scope agent team · Stages 0–1 (Intake + Plan) — produces the pre-gate plan package for Gate 1.',
+  phases: [
+    { title: 'Intake', detail: 'scope-dispatcher → the scope manifest; risk_tier sets the depth for every downstream stage.' },
+    { title: 'Plan', detail: 'tier-driven planner panel → judges → synthesize → pre-mortem → auditor panel → pre-gate package (bounded revise ×2).' },
+  ],
+};
 
 // ── Tier → panel shape (finding-034 "Adaptive depth"). The dispatcher's
 // risk_tier is the switch; this table is the depth knob it drives. ───────────
 const PANEL = {
   0: {
-    angles: ['general'],
+    angles: ['minimal-diff'], // Tier 0 = the single minimal-diff planner (finding-034 / scope-run depth table).
     judge: null, // single candidate — nothing to compare
     premortemLenses: ['general'],
     auditorLenses: ['contract'],
@@ -59,95 +68,103 @@ const PANEL = {
     // T2 (2 skeptics)"); deep_T2 adds the 3rd distinct lens below.
     premortemLenses: ['anchor-drift', 'schema-assumption'],
     auditorLenses: ['contract', 'architecture-fit'],
+    // Tier 2 additionally runs a distinct architect-reviewer over the plan's design fit;
+    // its findings (no verdict) fold into mergeAudits' severity→verdict ladder (GAP-6b).
   },
 };
 
 // deep_T2 widens the Tier-2 pre-mortem from 2 → 3 distinct-lens skeptics (finding-034
 // deep_T2 def: "3 skeptics ... else standard T2 (2 skeptics)"). The 3rd lens is
 // hidden-coupling — NOT completeness-critic, which is a Stage-3 review member, not a
-// pre-mortem lens (finding-034 §"completeness-critic (Tier 2)"; the deep_T2 comment's
-// "completeness-critic + loop-until-dry" describes Stage 3, handled in implement-review.js).
+// pre-mortem lens (finding-034 §"completeness-critic (Tier 2)").
 const DEEP_T2_EXTRA_PREMORTEM_LENS = 'hidden-coupling';
 const MAX_REVISE_CYCLES = 2; // bounded loop; then escalate to VSC-User.
 
+// Output-shape contracts. Each `required` list is a subset of that member's documented
+// "Output" JSON keys (../agents/<name>.md); the engine validates against it (replacing
+// the old coerceJson + requireKeys). `required` = the keys the consuming code reads.
+const SCHEMAS = {
+  scopeDispatcher: { required: ['scope_id', 'change_class', 'risk_tier', 'reading_list'] },
+  planner: { required: ['implementation_plan', 'verification', 'confidence'] },
+  planJudges: { required: ['scores'] },
+  planSynthesizer: { required: ['synthesized_plan', 'divergence', 'riskiest_assumptions'] },
+  planPremortem: { required: ['recommend'] },
+  planAuditor: { required: ['verdict'] },
+  architectReviewer: { required: ['findings'] },
+};
+
+// ── Inlined agent seam (self-contained; no sibling import). ──────────────────
+const RETRY_LIMIT = 2; // bounded retry on a transient agent/validation failure.
+
+async function withRetry(thunk, who) {
+  let lastErr;
+  for (let attempt = 1; attempt <= RETRY_LIMIT; attempt++) {
+    try {
+      return await thunk();
+    } catch (err) {
+      lastErr = err;
+      log(`[plan-phase] retry ${attempt}/${RETRY_LIMIT} — ${who}: ${err && err.message ? err.message : err}`);
+    }
+  }
+  throw new Error(
+    `plan-phase.js: ${who} failed after ${RETRY_LIMIT} attempts: ${lastErr && lastErr.message ? lastErr.message : lastErr}`,
+  );
+}
+
 /**
- * Invoke one `.claude/agents/<name>.md` subagent with a JSON-bearing prompt and
- * return its parsed JSON output. THE one runtime-coupled call — see the header.
- *
- * @param {string} name   agent name, matching the `name:` frontmatter of an
- *                         ../agents/<name>.md file.
- * @param {object} input  structured input; serialized into the prompt. Members
- *                         document their own input shape in their "Inputs" block.
- * @param {string} role   short label used only for progress lines.
- * @returns {Promise<object>} the member's parsed JSON "Output" object.
+ * Invoke one `.claude/agents/<name>.md` subagent with a JSON-bearing prompt. With
+ * `opts.schema` the engine returns a schema-validated object; without it, prose.
  */
-async function runAgent(name, input, role) {
+async function call(agentType, input, opts) {
+  const { schema, label, isolation } = opts || {};
   const prompt =
-    `You are being invoked as the \`${name}\` subagent in the per-scope agent ` +
-    `team's Plan-phase workflow. Follow your agent definition exactly and return ` +
-    `ONLY the JSON described in your "Output" section — no prose before or after.\n\n` +
-    `INPUT (JSON):\n${JSON.stringify(input, null, 2)}`;
-
-  progress(`→ ${role || name} (${name})`);
-
-  // The dynamic-workflows runtime exposes a subagent primitive in the script's
-  // global scope; its public name is undocumented, so probe the known shapes.
-  // Each is expected to resolve to the agent's final text. Keep this the ONLY
-  // place that knows the primitive's name.
-  let raw;
-  if (typeof globalThis.runAgent === 'function' && globalThis.runAgent !== runAgent) {
-    raw = await globalThis.runAgent({ agent: name, prompt });
-  } else if (typeof globalThis.invokeSubagent === 'function') {
-    raw = await globalThis.invokeSubagent({ agent: name, prompt });
-  } else if (typeof globalThis.task === 'function') {
-    raw = await globalThis.task({ subagent_type: name, prompt });
-  } else if (typeof globalThis.agent === 'function') {
-    raw = await globalThis.agent(name, prompt);
-  } else {
-    throw new Error(
-      `plan-phase.js: no subagent-invocation primitive found in the workflow ` +
-        `runtime global scope (tried runAgent/invokeSubagent/task/agent). The ` +
-        `dynamic-workflows JS authoring API is not publicly documented — inspect ` +
-        `a generated workflow under ~/.claude/projects/<session>/ to find the ` +
-        `real primitive, then wire it into runAgent() in this file (the only ` +
-        `place that needs to change).`,
-    );
-  }
-
-  return coerceJson(raw, name);
+    `You are being invoked as the \`${agentType}\` subagent in the per-scope agent ` +
+    `team's Plan-phase workflow. Follow your agent definition exactly and ` +
+    (schema
+      ? `return ONLY the JSON described in your "Output" section — no prose before or after.`
+      : `return the document described in your "Output" section.`) +
+    `\n\nINPUT (JSON):\n${JSON.stringify(input, null, 2)}`;
+  log(`[plan-phase] → ${label || agentType} (${agentType})`);
+  const agentOpts = { agentType };
+  if (schema) agentOpts.schema = schema;
+  if (isolation) agentOpts.isolation = isolation; // isolation:'worktree' → engine worktree directive; NOT probe/harness-exercised (deferred-unverified, D7/suite7). Only the fan-out writer passes it.
+  return withRetry(() => agent(prompt, agentOpts), agentType);
 }
 
-/** Parse a member's output to JSON, tolerating a ```json fenced block. */
-function coerceJson(raw, name) {
-  if (raw && typeof raw === 'object') return raw; // already parsed by the runtime
-  const text = String(raw == null ? '' : raw);
-  const fenced = text.match(/```(?:json[c]?)?\s*([\s\S]*?)```/i);
-  const body = (fenced ? fenced[1] : text).trim();
-  try {
-    return JSON.parse(body);
-  } catch (err) {
-    throw new Error(
-      `plan-phase.js: ${name} did not return parseable JSON (the member contract ` +
-        `is "return only this JSON"). First 200 chars: ${body.slice(0, 200)}`,
-    );
-  }
+// ── Budget helpers. `budget.total` is null when no target (the default path; the
+// C2D-Phase1 probe confirmed this) → remaining is Infinity → guards are no-ops. ──
+function budgetRemaining() {
+  if (!budget || typeof budget.total !== 'number' || typeof budget.spent !== 'function') return Infinity;
+  return budget.total - budget.spent();
+}
+function budgetExhausted() {
+  if (!budget || typeof budget.total !== 'number' || budget.total <= 0) return false;
+  return budgetRemaining() <= 0;
 }
 
-/** Assert a member output carries the keys the next stage consumes. */
-function requireKeys(obj, keys, who) {
-  const missing = keys.filter((k) => !(k in (obj || {})));
-  if (missing.length) {
-    throw new Error(`plan-phase.js: ${who} output missing required keys: ${missing.join(', ')}`);
-  }
-  return obj;
+// Count-what-you-drop (CLAUDE.md): a parallel fan-out NULLs a rejected thunk and
+// `.filter(Boolean)` removes it. When any member is lost, log how many of the attempted
+// pool fell out + the pool identities, so a silent partial fan-out is observable.
+function logDropped(site, attempted, kept) {
+  const n = attempted.length - kept.length;
+  if (n > 0) log(`[plan-phase] ${site}: ${n}/${attempted.length} dropped (rejected→null→filtered) — pool=[${attempted.join(', ')}]`);
 }
 
-function progress(msg) {
-  // Per-step progress so the wall-clock window is observable (CLAUDE.md
-  // performance convention). The runtime may also surface a progress sink; this
-  // stays useful regardless.
-  if (typeof globalThis.emitProgress === 'function') globalThis.emitProgress(msg);
-  else console.log(`[plan-phase] ${msg}`);
+// `args` may be a bare scope id, a JSON string (the engine stringifies an object arg),
+// or an object. Defensive parse — the C2D-Phase1 probe confirmed string delivery.
+function parseArgs(raw) {
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) return raw;
+  if (typeof raw === 'string') {
+    const s = raw.trim();
+    if (!s) return {};
+    try {
+      const parsed = JSON.parse(s);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : { scope_id: String(parsed) };
+    } catch (_e) {
+      return { scope_id: s };
+    }
+  }
+  return {};
 }
 
 /**
@@ -160,17 +177,13 @@ async function planPhase(scopeId) {
   }
 
   // ── Stage 0 · Intake — the manifest is the single source of truth. ────────
-  const manifest = requireKeys(
-    await runAgent('scope-dispatcher', { scope_id: scopeId }, 'Stage 0 · dispatcher'),
-    ['scope_id', 'change_class', 'risk_tier', 'reading_list'],
-    'scope-dispatcher',
-  );
+  const manifest = await call('scope-dispatcher', { scope_id: scopeId }, { schema: SCHEMAS.scopeDispatcher, label: 'Stage 0 · dispatcher' });
 
   const tier = Number(manifest.risk_tier);
   const panel = PANEL[tier];
   if (!panel) throw new Error(`plan-phase.js: dispatcher returned unknown risk_tier=${manifest.risk_tier}`);
   const deepT2 = tier === 2 && Boolean(manifest.risk_breakdown && manifest.risk_breakdown.deep_T2);
-  progress(`tier=${tier}${deepT2 ? ' (deep)' : ''} · angles=[${panel.angles.join(', ')}]`);
+  log(`[plan-phase] tier=${tier}${deepT2 ? ' (deep)' : ''} · angles=[${panel.angles.join(', ')}]`);
 
   // ── Stage 1 — bounded plan→audit loop. Each cycle re-fans the planners with
   // the prior auditor's findings folded in, per the ×2-then-escalate rule. ───
@@ -180,18 +193,18 @@ async function planPhase(scopeId) {
   let audit = null;
 
   for (let cycle = 1; cycle <= MAX_REVISE_CYCLES + 1; cycle++) {
-    progress(`Stage 1 · cycle ${cycle}/${MAX_REVISE_CYCLES + 1}`);
+    log(`[plan-phase] Stage 1 · cycle ${cycle}/${MAX_REVISE_CYCLES + 1}`);
 
     // 1 · Fan out the planners in parallel — diversity by construction.
-    const candidates = await Promise.all(
-      panel.angles.map((angle) =>
-        runAgent(
-          'planner',
-          { manifest, angle, revision_findings: auditorFindings },
-          `planner:${angle}`,
-        ).then((p) => requireKeys(p, ['implementation_plan', 'verification', 'confidence'], `planner:${angle}`)),
-      ),
-    );
+    const candidates = (
+      await parallel(
+        panel.angles.map((angle) => () =>
+          call('planner', { manifest, angle, revision_findings: auditorFindings }, { schema: SCHEMAS.planner, label: `planner:${angle}` }),
+        ),
+      )
+    ).filter(Boolean);
+    logDropped('planners', panel.angles, candidates);
+    if (!candidates.length) throw new Error('plan-phase.js: every planner failed to return a candidate');
 
     // 2 · Judge + 3 · Synthesize. A lone Tier-0 candidate skips the panel.
     if (candidates.length === 1) {
@@ -205,51 +218,58 @@ async function planPhase(scopeId) {
       };
     } else {
       const axes = panel.judge === 'combined' ? ['combined'] : panel.judge;
-      const scorecards = await Promise.all(
-        axes.map((axis) => runAgent('plan-judges', { manifest, candidates, axis }, `judge:${axis}`)),
-      );
-      synthesized = requireKeys(
-        await runAgent(
-          'plan-synthesizer',
-          { manifest, candidates, scorecards },
-          'synthesizer',
-        ),
-        ['synthesized_plan', 'divergence', 'riskiest_assumptions'],
-        'plan-synthesizer',
-      );
+      const scorecards = (
+        await parallel(axes.map((axis) => () => call('plan-judges', { manifest, candidates, axis }, { schema: SCHEMAS.planJudges, label: `judge:${axis}` })))
+      ).filter(Boolean);
+      logDropped('judges', axes, scorecards);
+      synthesized = await call('plan-synthesizer', { manifest, candidates, scorecards }, { schema: SCHEMAS.planSynthesizer, label: 'synthesizer' });
     }
 
     // 4 · Pre-mortem (fires at every tier). Tier 2 runs distinct-lens skeptics
     // in parallel and merges; deep_T2 adds the 3rd distinct-lens skeptic (2 → 3).
     const lenses = deepT2 ? [...panel.premortemLenses, DEEP_T2_EXTRA_PREMORTEM_LENS] : panel.premortemLenses;
-    const premortems = await Promise.all(
-      lenses.map((lens) =>
-        runAgent(
-          'plan-premortem',
-          { manifest, synthesized_plan: synthesized.synthesized_plan, lens },
-          `premortem:${lens}`,
+    const premortems = (
+      await parallel(
+        lenses.map((lens) => () =>
+          call('plan-premortem', { manifest, synthesized_plan: synthesized.synthesized_plan, lens }, { schema: SCHEMAS.planPremortem, label: `premortem:${lens}` }),
         ),
-      ),
-    );
+      )
+    ).filter(Boolean);
+    logDropped('premortem', lenses, premortems);
     premortem = mergePremortems(premortems, scopeId);
 
-    // 5 · Audit — independent contract grade, consuming the pre-mortem. Tier 2
-    // adds the architecture-fit lens; merge to the strictest verdict.
-    const audits = await Promise.all(
-      panel.auditorLenses.map((lens) =>
-        runAgent(
-          'plan-auditor',
-          { manifest, synthesized_plan: synthesized.synthesized_plan, premortem, lens },
-          `auditor:${lens}`,
-        ),
-      ),
+    // 5 · Audit — independent contract grade, consuming the pre-mortem. Tier 2 adds
+    // the architecture-fit auditor lens AND a distinct architect-reviewer (GAP-6b);
+    // mergeAudits folds the whole pool through one severity→verdict ladder.
+    const auditThunks = panel.auditorLenses.map((lens) => () =>
+      call('plan-auditor', { manifest, synthesized_plan: synthesized.synthesized_plan, premortem, lens }, { schema: SCHEMAS.planAuditor, label: `auditor:${lens}` }),
     );
+    if (tier === 2) {
+      auditThunks.push(() =>
+        call(
+          'architect-reviewer',
+          { manifest, synthesized_plan: synthesized.synthesized_plan, premortem, lens: 'architecture-fit' },
+          { schema: SCHEMAS.architectReviewer, label: 'architect-reviewer:plan' },
+        ),
+      );
+    }
+    const auditorIds = tier === 2 ? [...panel.auditorLenses, 'architect-reviewer'] : [...panel.auditorLenses];
+    const audits = (await parallel(auditThunks)).filter(Boolean);
+    logDropped('auditors', auditorIds, audits);
     audit = mergeAudits(audits, scopeId);
 
     if (audit.verdict === 'ready' || audit.verdict === 'escalate') break;
 
     // verdict === 'revise' → fold findings back and re-fan, up to the cap.
     auditorFindings = audit.findings || [];
+
+    // D5 budget guard: exhausted before a ready verdict → stamp escalate (mirror the
+    // cap-hit path below). With no budget target, budgetExhausted() is false → unchanged.
+    if (budgetExhausted()) {
+      audit.verdict = 'escalate';
+      audit.escalation_reason = 'budget exhausted before a ready verdict';
+      break;
+    }
     if (cycle === MAX_REVISE_CYCLES + 1 || cycle > MAX_REVISE_CYCLES) {
       audit.verdict = 'escalate';
       audit.escalation_reason = `revise loop hit the ${MAX_REVISE_CYCLES}-cycle cap without a ready verdict`;
@@ -258,11 +278,8 @@ async function planPhase(scopeId) {
   }
 
   // ── The pre-gate package. Routing is advisory; the human gate is the gate. ─
-  const route =
-    audit.verdict === 'ready'
-      ? 'human-plan-approval-gate (VSC-User)'
-      : 'VSC-User (escalation)';
-  progress(`verdict=${audit.verdict} · premortem=${premortem.recommend} → ${route}`);
+  const route = audit.verdict === 'ready' ? 'human-plan-approval-gate (VSC-User)' : 'VSC-User (escalation)';
+  log(`[plan-phase] verdict=${audit.verdict} · premortem=${premortem.recommend} → ${route}`);
 
   return {
     scope_id: scopeId,
@@ -282,6 +299,17 @@ async function planPhase(scopeId) {
 
 /** Merge N pre-mortems → strictest recommendation wins (probe-first > revise > proceed). */
 function mergePremortems(premortems, scopeId) {
+  // Fail-closed: an empty pre-mortem pool (every skeptic rejected → nulled → filtered) must
+  // NOT collapse to the permissive default 'proceed'. Reduce to the conservative recommend.
+  if (!premortems.length) {
+    return {
+      scope_id: scopeId,
+      recommend: 'probe-first',
+      predicted_surprises: [],
+      anchors_at_risk: [],
+      escalation_reason: 'every pre-mortem skeptic failed to return — failing closed to probe-first',
+    };
+  }
   const order = { proceed: 0, revise: 1, 'probe-first': 2 };
   let recommend = 'proceed';
   const predicted = [];
@@ -294,48 +322,54 @@ function mergePremortems(premortems, scopeId) {
   return { scope_id: scopeId, recommend, predicted_surprises: predicted, anchors_at_risk: [...anchors] };
 }
 
-/** Merge N audits → strictest verdict wins (escalate > revise > ready). */
+/** nit < warn < blocker. */
+function severityRank(sev) {
+  const r = { nit: 0, warn: 1, blocker: 2 };
+  return r[sev] ?? 0;
+}
+
+/**
+ * Merge N audits → strictest verdict wins (escalate > revise > ready), over ONE
+ * severity→verdict ladder across the whole findings pool. This generalizes the merge
+ * so it also handles the Tier-2 architect-reviewer, which emits `findings` but NO
+ * top-level `verdict` (GAP-6b): a surviving blocker — from any contributor — forces at
+ * least a revise, so a blocker-level architecture finding can never silently pass.
+ */
 function mergeAudits(audits, scopeId) {
+  // Fail-closed: with NO verdict-bearing auditor in the pool (every plan-auditor rejected/crashed
+  // → nulled → filtered, leaving at most the verdict-LESS architect-reviewer), the plan is
+  // UNAUDITED — it must NOT collapse to the permissive default 'ready'. An unaudited plan escalates.
+  const verdictful = audits.filter((a) => a && typeof a.verdict === 'string');
+  if (!verdictful.length) {
+    return {
+      scope_id: scopeId,
+      verdict: 'escalate',
+      findings: [],
+      escalation_reason: 'no plan-auditor returned a verdict (all crashed) — unaudited plan, failing closed to escalate',
+    };
+  }
   const order = { ready: 0, revise: 1, escalate: 2 };
   let verdict = 'ready';
   const findings = [];
   for (const a of audits) {
-    if ((order[a.verdict] ?? 0) > order[verdict]) verdict = a.verdict;
-    for (const f of a.findings || []) findings.push({ lens: a.lens, ...f });
+    if (a && typeof a.verdict === 'string' && (order[a.verdict] ?? 0) > order[verdict]) verdict = a.verdict;
+    for (const f of (a && a.findings) || []) findings.push({ lens: a && a.lens, ...f });
   }
-  // A surviving blocker forces at least a revise regardless of the headline verdict.
-  if (verdict === 'ready' && findings.some((f) => f.severity === 'blocker')) verdict = 'revise';
+  const maxSev = findings.reduce((m, f) => (severityRank(f.severity) > severityRank(m) ? f.severity : m), 'nit');
+  if (severityRank(maxSev) >= severityRank('blocker') && order[verdict] < order.revise) verdict = 'revise';
   return { scope_id: scopeId, verdict, findings };
 }
 
-// ── Entry point. The runtime passes the user's args via the global `args`. ───
-// `/plan-phase PR-6` → scopeId = "PR-6". Falls back to args.scope_id if the
-// runtime delivers a structured object instead of a bare string.
-const _args = typeof args !== 'undefined' ? args : globalThis.args;
-const _scopeId =
-  (typeof _args === 'string'
-    ? _args.trim()
-    : (_args && (_args.scope_id || (Array.isArray(_args._) && _args._[0]))) || '') ||
-  // Fallback so the workflow is also runnable/testable as `node plan-phase.js PR-6`.
-  (typeof process !== 'undefined' && process.argv && process.argv[2]) ||
-  '';
+// ── Entry point. The engine passes the user's args via `args`. ───────────────
+const a = parseArgs(args);
+const scopeId = a.scope_id || (Array.isArray(a._) && a._[0]) || '';
 
-// Export for unit tests under a CommonJS loader; harmless/skipped in a runtime
-// that has no `module` (the dynamic-workflows sandbox may not be CommonJS).
-const _hasModule = typeof module !== 'undefined' && module && module.exports;
-if (_hasModule) module.exports = { planPhase, runAgent, PANEL };
-
-// Auto-run when executed as a workflow, NOT when require()'d by a test.
-const _requiredByTest = _hasModule && typeof require !== 'undefined' && require.main !== module;
-if (!_requiredByTest) {
-  planPhase(_scopeId)
-    .then((pkg) => {
-      progress('Plan phase complete — pre-gate package ready for VSC-User.');
-      if (typeof globalThis.setResult === 'function') globalThis.setResult(pkg);
-      else console.log(JSON.stringify(pkg, null, 2));
-    })
-    .catch((err) => {
-      progress(`Plan phase FAILED: ${err.message}`);
-      throw err;
-    });
+let pkg;
+try {
+  pkg = await planPhase(scopeId);
+  log('[plan-phase] Plan phase complete — pre-gate package ready for VSC-User.');
+} catch (err) {
+  log(`[plan-phase] Plan phase FAILED: ${err && err.message ? err.message : err}`);
+  throw err;
 }
+return pkg;

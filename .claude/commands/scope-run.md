@@ -2,27 +2,37 @@ Run the per-scope agent team (finding-034) for one ROADMAP scope item, end to
 end, stopping at each of the two human gates. Argument: a scope id (e.g.
 `PR-6`), optionally followed by `--from <stage>` to resume after a gate.
 
-This command is the **model-driven orchestrator** — the runnable-today path. The
-team's members live in `.claude/agents/*.md` and are usable standalone; this
-command sequences them with **adaptive depth** and threads each member's
-structured JSON output to the next. You (the lead session) spawn each member via
+This command is the team's **model-driven conductor and headless/cron fallback** —
+the orchestration default went **engine-primary** in Sub Project C2-D (see "Two
+orchestration paths" below), so the deterministic JS workflows are preferred and this
+command's role is to launch each engine segment by name (pausing for the human between
+gates) and to walk the whole pipeline through the Task tool when the engine is
+unavailable. The team's members live in `.claude/agents/*.md` and are usable
+standalone; this command sequences them with **adaptive depth** and threads each
+member's structured JSON output to the next. You (the lead session) spawn each member via
 the **Task tool** with the matching `subagent_type`, collect its JSON, and route
 per the rules below. You never auto-approve a plan and never merge; those are the
 two human gates.
 
-## Two orchestration paths (pick one)
+## Two orchestration paths (engine-primary since Sub Project C2-D)
 
-- **This command (`/scope-run`) — model-driven.** Works today; rides the Task
-  tool. Flexible (the session interprets the routing rules each run) but
-  non-deterministic. Use this as the default and as the fallback whenever the JS
-  workflow runtime is unavailable.
-- **The JS workflows — deterministic.** `.claude/workflows/{plan-phase,
-  implement-review,close}.js` encode the same pipeline as deterministic control
-  flow, segmented by the two gates (`/plan-phase PR-6` → gate → `/implement-review
-  PR-6` → gate → `/close PR-6`). Prefer these once the dynamic-workflows
-  subagent-invocation primitive is confirmed in your runtime (they isolate that
-  one call behind `runAgent()` and fail loud if it's absent — see
-  `.claude/agents/README.md`). Same members, same depth, same gates as below.
+Since Sub Project C2-D (`finding-034` / `DEC-0099`) the orchestration default is
+**engine-primary**: the deterministic JS workflows are the preferred path, and this
+model-driven command is retained as the **conductor** and the **headless/cron fallback**.
+
+- **The JS workflows — deterministic (preferred).** `.claude/workflows/{plan-phase,
+  implement-review,close}.js` encode this pipeline as deterministic control flow in the
+  empirically-confirmed dynamic-workflows engine dialect, segmented by the two gates
+  (`/plan-phase PR-6` → gate → `/implement-review PR-6` → gate → `/close PR-6`). Same
+  members, same depth, same gates as below. **When the dynamic-workflows engine is
+  available, use these** (the syntax gate is the AsyncFunction construct-check described in
+  `.claude/agents/README.md`).
+- **This command (`/scope-run`) — model-driven (conductor + fallback).** Rides the Task
+  tool; flexible (the session interprets the routing rules each run) but non-deterministic.
+  It keeps two roles: (1) the **conductor** that launches each engine segment by name and
+  pauses for the human between segments, and (2) the **headless/cron fallback** that walks
+  the whole pipeline through the Task tool **whenever the engine is unavailable**. Same
+  members, same depth, same gates.
 
 Either way the guardrail **hooks are live** (`.claude/settings.json`): the
 `implementer` / `schema-change-executor` cannot edit `docs/schemas/`|`ddl/`

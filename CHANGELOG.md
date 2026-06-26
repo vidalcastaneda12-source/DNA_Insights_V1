@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Port the per-scope agent-team orchestrators to the dynamic-workflows engine dialect
+  (sub-project-C2-D, finding-034): `plan-phase.js`, `implement-review.js`, and `close.js` are
+  rewritten from the CommonJS + `runAgent()`-probe shim to the engine's self-contained dialect —
+  pure-literal `export const meta`, body wrapped by the injected `agent · parallel · pipeline ·
+  log · phase · budget · workflow · args` hooks, top-level `return pkg`, and an inline
+  `agent(prompt, {agentType, schema})` seam whose `schema` returns a validated object (replacing
+  the hand-rolled coercion + key-assertion). The load model was empirically confirmed by a
+  live-engine probe. Closes six fidelity gaps: the Tier-0 minimal-diff planner; the Tier-2
+  architect-reviewer folded into one severity→verdict ladder; the Stage-4 `handoff-assembler`
+  wired on the `go` path (prose, stored as a string); the four trigger-gated Stage-2 members on
+  real triggers, with `fan-out-implementer` replacing the single implementer; severity-scaled
+  refute-by-default verification (blocker → 2–3 skeptics, strict-majority); and budget-guarded
+  escalation. Reverses the orchestration default from model-driven to **engine-primary** while
+  retaining `/scope-run` as the conductor + headless/cron fallback and preserving both human
+  gates; recorded **pure-append** (DEC-0099; the finding-034 design DEC-0020 left active). No
+  Python/schema/DB change — the dev-loop stays byte-unchanged. Hardened at Stage-3 review
+  (fix-first): fail-closed guards across the `parallel`/`pipeline` → `.filter(Boolean)` fan-out
+  seams (a null verifier skeptic no longer counts as a refutation; a dropped factor-gated safety
+  lens forces escalate; empty auditor/premortem pools escalate; `close` fails loud on a curator
+  miss) — the port-introduced silent-1/2/3 review blockers; an 87-test `node:test` harness
+  (86 pass · 1 intentional Phase-2 skip) with mutation-proven discrimination of the fail-closed
+  and verifier-severity paths; and the live-engine load-probe artifact committed in-repo
+  (`docs/findings/c2d-load-probe-wf_a37802b2-c92.js`). (sub-project-C2-D / PR-C2-D)
 - Add cross-run learning calibration (sub-project-C1, finding-040): a DB-free `genome.calibration`
   core whose `compute_tier(fields, weights)` is the single deterministic risk-tier source of truth
   (Gate-1 = D1), exposed as `genome calibrate compute-tier`; the `scope-dispatcher` now RUNS it and

@@ -16,7 +16,7 @@ handoff → **Gate 2** → post-merge anchor re-lock.
 |---|---|
 | **0 · Intake** + **1 · Plan** | **Built** (`../workflows/plan-phase.js`) |
 | **2 · Implement** + **3 · Review** | **Built** (`../workflows/implement-review.js`) |
-| **4 · Handoff** | **Built** (`handoff-assembler.md`) |
+| **4 · Handoff** | **Built + wired** (`handoff-assembler.md`, now invoked by `../workflows/implement-review.js` on the `go` path) |
 | **5 · Close** | **Built** (`../workflows/close.js`) |
 
 Every stage is in-loop; both gates are out-of-loop and human. The team produces the
@@ -99,10 +99,13 @@ member is useful on its own before the orchestrator runs.
 
 **Orchestrated — two paths, same members/depth/gates:**
 
-*(a) Model-driven — `/scope-run PR-6` (`../commands/scope-run.md`).* The runnable-today
-path: the lead session spawns members via the Task tool and routes by the command's rules,
-stopping at each gate (resume with `--from <stage>`). Flexible, non-deterministic, no
-dependency on the workflow runtime — use as the default and the fallback.
+*(a) Model-driven — `/scope-run PR-6` (`../commands/scope-run.md`).* The lead session
+spawns members via the Task tool and routes by the command's rules, stopping at each gate
+(resume with `--from <stage>`). Flexible, non-deterministic, no dependency on the workflow
+engine. Since Sub Project C2-D (`finding-034` / `DEC-0099`) this is **retained as the
+conductor** — the by-name segment launcher that pauses for the human between segments — and
+as the **headless/cron fallback** whenever the dynamic-workflows engine is unavailable; the
+deterministic engine workflows in (b) are now the preferred path.
 
 *(b) Deterministic — three **segmented** dynamic-workflow scripts in `../workflows/`*, split
 **by the two human gates** (a single auto-run cannot cross a human decision):
@@ -119,16 +122,21 @@ revise/fix-first loops ×2), receives input via the runtime global `args`, and i
 via the Task/Agent tool. None is wired into `settings.json`, and none auto-approves or
 auto-merges: the lifecycle ends at VSC-User's two unchanged human gates.
 
-> **One runtime caveat (all three scripts).** The dynamic-workflows JS *authoring* API
-> (the exact subagent-invocation primitive) is not part of Claude Code's public docs. Each
-> script isolates that single call behind one `runAgent()` helper that probes the known
-> primitive names and throws a loud, actionable error if none resolve — so adapting to a
-> given runtime is a one-line change in one place. The orchestration logic itself
-> (fan-out, tier gating, verify, synthesis, the bounded loops) is runtime-agnostic and
-> `node --check`-clean; it is **not** end-to-end executed here because that primitive is
-> environment-provided. `/code-review` and `/security-review` are **skills**, not
-> subagents — `implement-review.js` composes them as review lenses and surfaces them in
-> the package for the operator/runtime to dispatch.
+> **Runtime model (all three scripts).** Since Sub Project C2-D (`finding-034` /
+> `DEC-0099`) the three scripts are written in the **dynamic-workflows engine dialect**,
+> empirically confirmed against the live engine. The engine loads a workflow by reading the
+> pure-literal `export const meta` and wrapping the rest of the body in an async function
+> with the hooks `agent · parallel · pipeline · log · phase · budget · workflow · args`
+> injected as parameters; each script is **self-contained** (no `import`, no Node API) and
+> ends with a top-level `return pkg`. Subagents are invoked through an inline `call()` seam
+> over `agent(prompt, {agentType, schema})`: a `schema` returns a validated object (so there
+> is no hand-rolled JSON coercion), and a schema-less call returns prose (e.g.
+> `handoff-assembler`). The per-script syntax gate is therefore an **AsyncFunction
+> construct-check** — extract `meta`, wrap the body with the injected hooks, assert it builds
+> (exactly how the engine loads it) — not `node --check`, which rejects the dialect.
+> `/code-review` and `/security-review` are **skills**, not subagents — `implement-review.js`
+> composes them as review lenses and surfaces them in the package for the operator/runtime to
+> dispatch.
 
 ## Guardrails
 
