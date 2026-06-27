@@ -5,15 +5,23 @@ Stage-0.5 micro-gate shipped clean; these are Stage-3 review residuals captured 
 lost. None gates any other work. Durable rationale for the scope lives in
 [`finding-039`](../findings/finding-039-scope-split-smart-cut.md).
 
-- [ ] **LSP coupling engine (design-fidelity)** — the spec headlined an LSP call-graph as the
-  primary coupling signal with git-grep as fallback; Phase 1 ships git-grep as primary (the veto is
-  correct *as a git-grep veto*, but lower-fidelity than "smart-cut" implies). Decide whether to add
-  an `LspCallGraphCouplingBuilder` (the `make_coupling_builder` Protocol seam is ready) or formally
-  accept git-grep-as-primary in finding-039's DECISION 1.
+- [x] **LSP coupling engine (design-fidelity)** — **done (2026-06-27 Wave 3): formally accept
+  git-grep-as-primary.** Resolved finding-039 DECISION 1 in favor of git-grep-as-primary, with the
+  calibration back-test as evidence (the partition is **manifest-primary**; git-grep is a veto-only
+  backstop that the back-test shows fires correctly on real coupling — an LSP call-graph adds no
+  fidelity the oracle reproduction requires). The `LspCallGraphCouplingBuilder` is **declined for
+  Phase 1** and stays the deferred-supersession option on the ready `make_coupling_builder` seam.
+  Recorded as `DEC-0119`; see finding-039 "DECISION 1 — coupling-signal resolution".
 
-- [ ] **Calibration back-test** — `MAX_CUT_COST=0.25` / `MIN_SUBSCOPE_SHRINK=0.34` are unvalidated
-  dials; back-test against ROADMAP's 13-PR pre-Phase-6 sequence (the hand-authored decomposition the
-  detector aims to reproduce) to confirm they neither over- nor under-split.
+- [x] **Calibration back-test** — **done (2026-06-27 Wave 3): dials validated, no retune.**
+  `backend/tests/test_scope_split_calibration_backtest.py` runs the real git-grep detector against
+  ROADMAP's pre-Phase-6 14-PR oracle reconstructed from real `annotate`/`imputation` modules: it
+  reproduces the decomposition without over- or under-splitting (over-split = 0 — the S=8 PR 3 and
+  S=7 PR 5a "big but atomic" traps stay atomic; the separable mega-scope splits schema-first; the
+  veto fires on the real `strand_collapse → canonicalize` edge above `MAX_CUT_COST`). Verdict:
+  `MAX_CUT_COST=0.25` / `MIN_SUBSCOPE_SHRINK=0.34` hold. Reconstruction is a documented loose bound,
+  not an exact-match assertion (the detector is change-class-primary + depth-capped, so it coarsens
+  the 14-way hand cut by design). Folded into `DEC-0119`.
 
 - [x] **finding-039 doc↔code wording** — **done (2026-06-26 Wave-1 docs sweep): wording
   reconciled.** DECISION 1's veto prose + the reduction-order line now describe the as-built
