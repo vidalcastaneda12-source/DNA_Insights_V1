@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, TypedDict
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -99,6 +99,82 @@ MAX_RESPLIT_DEPTH: int = 1
 #: (DECISION 1): it is dropped from / down-weighted to 0 in the coupling graph so a common
 #: dependency does not fuse otherwise-independent clusters into one component.
 SHARED_HELPER_FANIN: int = 3
+
+
+# ── Closed risk-tier domain ──────────────────────────────────────────────────
+
+#: The closed set of risk tiers the dispatcher S-formula bands to (scope-dispatcher.md): 0, 1, or
+#: 2. A ``Literal`` alias so ``mypy --strict`` rejects a stray tier at the computed-tier surface
+#: (:func:`tier_from_S` / :func:`est_risk_tier` / :attr:`SubScope.est_risk_tier`). The raw manifest
+#: input :attr:`ScopeManifestInput.risk_tier` stays a plain ``int`` — narrowing it would add a new
+#: fail-closed check at :meth:`ScopeManifestInput.from_json`, a behavior change.
+RiskTier = Literal[0, 1, 2]
+
+
+# ── JSON serialization shapes (the typed to_json() output contracts) ──────────
+
+
+# The SubScope.to_json shape.
+class SubScopeJSON(TypedDict):
+    sub_scope_id: str
+    origin_scope: str
+    change_class: list[str]
+    est_imports_touched: int
+    applicable_anchors: list[str]
+    est_risk_tier: int
+    depends_on: list[str]
+    rationale: str
+
+
+# The CutQuality.to_json shape.
+class CutQualityJSON(TypedDict):
+    cut_cost: float
+    max_tier_before: int
+    max_tier_after: int
+    min_subscope_shrink: float
+    clean: bool
+
+
+# The atomic-branch SplitResult.to_json shape — EXACTLY these two keys (the check --json contract).
+class AtomicResultJSON(TypedDict):
+    atomic: bool
+    reason: str
+
+
+# The split-branch SplitResult.to_json shape (the full proposal).
+class SplitProposalJSON(TypedDict):
+    atomic: bool
+    reason: str
+    sub_scopes: list[SubScopeJSON]
+    order: list[str]
+    cut_quality: CutQualityJSON | None
+
+
+# The nested ``blast_radius`` sub-object of ScopeManifestInput.to_json.
+class _BlastRadiusJSON(TypedDict):
+    imports_touched: list[str]
+    tests_covering: list[str]
+
+
+# The nested ``risk_breakdown`` sub-object (the dispatcher's capital-``S`` additive score).
+class _RiskBreakdownJSON(TypedDict):
+    S: int | None
+
+
+# The ScopeManifestInput.to_json shape (the flattened splitter manifest).
+class ManifestJSON(TypedDict):
+    scope_id: str
+    title: str
+    change_class: list[str]
+    depends_on: list[str]
+    blast_radius: _BlastRadiusJSON
+    applicable_anchors: list[str]
+    out_of_scope_candidates: list[str]
+    precedent: list[str]
+    freshness_flags: list[str]
+    open_questions: list[str]
+    risk_tier: int
+    risk_breakdown: _RiskBreakdownJSON
 
 
 # ── Frozen records ───────────────────────────────────────────────────────────
@@ -199,7 +275,7 @@ class ScopeManifestInput:
             risk_score_S=_as_opt_int(risk_breakdown.get("S")),
         )
 
-    def to_json(self) -> dict[str, object]:
+    def to_json(self) -> ManifestJSON:
         """Serialize to a JSON-ready mapping in the flattened splitter shape.
 
         Not a byte-exact inverse of the nested dispatcher manifest (the splitter flattens
@@ -245,14 +321,14 @@ class SubScope:
     """Estimated footprint — the count of footprint modules landing in this cluster."""
     applicable_anchors: tuple[str, ...]
     """Anchor names this sub-scope exposes (drives its re-scored Tier-2 floor)."""
-    est_risk_tier: int
+    est_risk_tier: RiskTier
     """Re-scored risk tier for this cluster slice (:func:`est_risk_tier`)."""
     depends_on: tuple[str, ...]
     """Other sub-scope ids (or parent ``depends_on``) this one must follow (topo order)."""
     rationale: str
     """Human-readable justification for carving this sub-scope (rendered in the proposal)."""
 
-    def to_json(self) -> dict[str, object]:
+    def to_json(self) -> SubScopeJSON:
         """Serialize to a JSON-ready mapping."""
         return {
             "sub_scope_id": self.sub_scope_id,
@@ -287,7 +363,7 @@ class CutQuality:
     clean: bool
     """``True`` iff the cut passed every quality-gate term."""
 
-    def to_json(self) -> dict[str, object]:
+    def to_json(self) -> CutQualityJSON:
         """Serialize to a JSON-ready mapping."""
         return {
             "cut_cost": self.cut_cost,
@@ -345,7 +421,7 @@ class SplitResult:
             msg = "non-atomic SplitResult must carry at least one sub-scope"
             raise ValueError(msg)
 
-    def to_json(self) -> dict[str, object]:
+    def to_json(self) -> AtomicResultJSON | SplitProposalJSON:
         """Serialize to a JSON-ready mapping (two-branch, mech #3).
 
         Atomic → exactly ``{"atomic": true, "reason": str}`` with no other keys (the
@@ -424,7 +500,7 @@ def scope_S(  # noqa: N802 - mirrors the dispatcher's capital-S score name
     return _c_score(change_class) + _b_score(imports_touched) + precedent_surprise
 
 
-def tier_from_S(s: int) -> int:  # noqa: N802 - mirrors the dispatcher's capital-S score name
+def tier_from_S(s: int) -> RiskTier:  # noqa: N802 - mirrors the dispatcher's capital-S score name
     """Band the additive score to a tier: ``0->0, 1-4->1, >=5->2`` (scope-dispatcher.md)."""
     if s <= 0:
         return 0
@@ -438,7 +514,7 @@ def est_risk_tier(
     applicable_anchors: tuple[str, ...],
     imports_touched: int,
     precedent_surprise: int = 0,
-) -> int:
+) -> RiskTier:
     """Re-score a (sub-)scope's risk tier via the dispatcher floor formula (scope-dispatcher.md).
 
     ``floor = 2`` iff a structural change (``schema`` / ``ddl`` in ``change_class``) **or** any
@@ -448,9 +524,14 @@ def est_risk_tier(
     own); it is the dispatcher's job on the parent.
     """
     structural = bool({"schema", "ddl"} & set(change_class))
-    floor = 2 if (structural or len(applicable_anchors) >= 1) else 0
-    s = scope_S(change_class, imports_touched, precedent_surprise)
-    return max(floor, tier_from_S(s))
+    banded = tier_from_S(scope_S(change_class, imports_touched, precedent_surprise))
+    # The dispatcher tier is the conservative max(floor, banded) where floor is 2 (structural or
+    # anchor-exposed) else 0. Since banded ∈ {0,1,2}: max(2, banded) is always 2 and max(0, banded)
+    # is always banded — so this is exactly that max, written as a RiskTier-returning branch (a
+    # literal 2 / the RiskTier ``banded``) so mypy --strict does not widen a ``max(...)`` to int.
+    if structural or len(applicable_anchors) >= 1:
+        return 2
+    return banded
 
 
 # ── Footprint-name validation (the git-pathspec safety guard, W2 / phi-1) ─────

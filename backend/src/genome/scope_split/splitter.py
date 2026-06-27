@@ -19,8 +19,8 @@ call short-circuits cheaply, before any partition work):
    more than :data:`~genome.scope_split.model.MAX_CUT_COST` of the *total* (non-infra) coupling
    weight — i.e. ``graph.cut_cost(partition) > MAX_CUT_COST`` — the cut is too entangled and is
    vetoed → atomic (the PR-3 / PR-5a tight-cluster rule).
-#. **Topo-order** — rank by :data:`~genome.scope_split.model.SCHEMA_FIRST_ORDER` + ``depends_on``;
-   a cycle → atomic.
+#. **Topo-order** — rank the clusters by :data:`~genome.scope_split.model.SCHEMA_FIRST_ORDER`;
+   a self-dependency cycle (``scope_id in depends_on``) → atomic.
 #. **Quality gate** — atomic UNLESS every sub-scope shrink ≥
    :data:`~genome.scope_split.model.MIN_SUBSCOPE_SHRINK` AND ``max_tier_after <= max_tier_before``
    AND total work strictly shrinks; the failing metric is named in the reason.
@@ -267,7 +267,10 @@ def _veto_graph(manifest: ScopeManifestInput, builder: CouplingGraphBuilder) -> 
     Delegates the scan to ``builder`` over the footprint modules, then removes the infra-helper
     nodes (and their incident edges) so a shared dependency does not fuse independent clusters.
     """
-    from genome.scope_split.graph import CouplingGraph  # noqa: PLC0415 - avoid runtime cycle
+    from genome.scope_split.graph import (  # noqa: PLC0415 - runtime cycle
+        CouplingEdge,
+        CouplingGraph,
+    )
 
     raw = builder.build(manifest.imports_touched)
     infra = _infra_helpers(raw)
@@ -275,7 +278,7 @@ def _veto_graph(manifest: ScopeManifestInput, builder: CouplingGraphBuilder) -> 
         return raw
     kept_nodes = frozenset(n for n in raw.nodes if n not in infra)
     kept_edges = frozenset(
-        (a, b, w) for (a, b, w) in raw.edges if a not in infra and b not in infra
+        CouplingEdge(a, b, w) for (a, b, w) in raw.edges if a not in infra and b not in infra
     )
     # Carry the unresolved set through the infra-drop — it is a property of the scan's coverage,
     # not of any edge, so it must survive into the veto's fail-closed check.
@@ -337,37 +340,31 @@ def _topo_order(
     manifest: ScopeManifestInput,
     clusters: tuple[tuple[str, ...], ...],
 ) -> tuple[int, ...] | None:
-    """Step 5 — order the clusters schema-first + by ``depends_on``; cycle → ``None``.
+    """Step 5 — order the clusters schema-first; a self-cycle → ``None``.
 
-    Ranks clusters by their earliest change class in :data:`SCHEMA_FIRST_ORDER`. A self-cycle
-    (the scope depends on itself) or a ``depends_on`` edge between two clusters' modules that
-    contradicts the schema-first rank is a cycle (undecidable) → ``None``. With only the
-    schema-first rank (the common case) the order is a stable sort and never cyclic.
+    Ranks clusters by their earliest change class in :data:`SCHEMA_FIRST_ORDER` and returns a
+    stable sort of cluster indices. The only cycle the manifest can express is a scope that
+    depends on itself (``scope_id in depends_on``) → ``None``; the schema-first rank sort is
+    otherwise always acyclic (see the inter-cluster-cycle note below).
     """
     # A scope that depends on itself is the minimal cycle — fail closed.
     if manifest.scope_id in manifest.depends_on:
         return None
 
+    # No inter-cluster cycle check is needed: such a cycle is structurally impossible here.
+    # (a) Clusters are ordered by the fixed SCHEMA_FIRST_ORDER total order — a stable sort, never
+    #     cyclic — and ``manifest.depends_on`` carries external scope-ids, never THIS scope's own
+    #     footprint module names, so no ``depends_on`` entry can point between two of this scope's
+    #     clusters. (b) Even if one coincided with a footprint module name, ``_primary_partition``
+    #     places each module in exactly one cluster, so it could never appear in a *different*
+    #     cluster to invert the rank. A prior branch probed a module->cluster map with scope-ids
+    #     and so never fired; it was removed (finding-039 deferred follow-up).
     ranks = [
         SCHEMA_FIRST_ORDER.index(_cluster_class(manifest, c))
         if _cluster_class(manifest, c) in SCHEMA_FIRST_ORDER
         else len(SCHEMA_FIRST_ORDER)
         for c in clusters
     ]
-    # Detect a contradiction: depends_on naming a module in a later-ranked cluster would invert
-    # the schema-first order. Build module→cluster placement and check each depends_on target.
-    placement: dict[str, int] = {}
-    for index, cluster in enumerate(clusters):
-        for module in cluster:
-            placement[module] = index
-    for dep in manifest.depends_on:
-        target = placement.get(dep)
-        if target is None:
-            continue
-        # A cluster depending on a strictly-later-ranked cluster inverts the order → cycle.
-        for index, rank_value in enumerate(ranks):
-            if index != target and ranks[target] > rank_value and dep in clusters[index]:
-                return None
     return tuple(sorted(range(len(clusters)), key=lambda i: (ranks[i], min(clusters[i]))))
 
 

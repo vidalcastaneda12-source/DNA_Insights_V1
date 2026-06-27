@@ -23,17 +23,24 @@ lost. None gates any other work. Durable rationale for the scope lives in
   retained graph primitive); wiring it in remains a separate deferred code task, not this docs
   reconcile.
 
-- [ ] **Dead inter-cluster cycle branch** in `splitter._topo_order` — keyed by module names but
-  probed with `depends_on` scope-ids, so it never fires (harmless — the schema-first sort is
-  acyclic). Remove or re-key.
+- [x] **Dead inter-cluster cycle branch** in `splitter._topo_order` — **done (2026-06-26, PR #115):
+  removed.** The branch keyed a module→cluster map but probed it with `depends_on` scope-ids, so it
+  never fired; confirmed structurally unreachable (`depends_on` carries external scope-ids, and
+  `_primary_partition` places each module in exactly one cluster) and removed with a comment
+  recording why. The reachable self-cycle guard (`scope_id in depends_on`) stays.
 
-- [ ] **Type-design nits** (deferred, same class as the fast-follow PR) — `Literal`/enum for
-  `tier` / `source` / `termination` / engine; a `TriageCounts`-style `TypedDict`; a sealed
-  `AtomicResult | SplitProposal` union for `SplitResult`; a `CouplingEdge` value type.
+- [x] **Type-design nits** — **done (2026-06-26, PR #115).** Landed `RiskTier = Literal[0, 1, 2]`
+  (computed-tier domain), a `CouplingEdge` `NamedTuple` value type, and `TypedDict` shapes for the
+  four `to_json()` serializers (`engine` was already the `CouplingEngine` `Literal`). The sealed
+  `AtomicResult | SplitProposal` union was **consciously declined** — the existing
+  `SplitResult.__post_init__` guard already makes the illegal two-shape states unconstructable, and
+  the union would have broken ~9 test constructions + 3 rejection tests against the
+  behavior-preserving constraint. `source` / `termination` have no referent in `scope_split`.
 
-- [ ] **Test-coverage nits** — shrink-gate boundary (`achieved_shrink == MIN_SUBSCOPE_SHRINK`),
-  `format_roadmap_block` direct unit test, `out_of_scope_candidates` peeling, `--manifest <file-path>`
-  success path, `_grep_count_line` bare/unparsable paths, extraction-guard AND semantics.
+- [x] **Test-coverage nits** — **done (2026-06-26, PR #115): all six added.** Shrink-gate
+  `<`-strict boundary, a direct `format_roadmap_block` unit, `out_of_scope_candidates` peeling, the
+  `--manifest <file-path>` success path, `_grep_count_line` bare/unparsable paths, and
+  extraction-guard AND semantics — each in its matching `test_scope_split_*.py`.
 
 - [ ] **Phase 2 (genome.campaign orchestrator + multi-session resumability)** — the larger half of
   B2: the persistent campaign state machine that sequences sub-scope `/scope-run`s through the two

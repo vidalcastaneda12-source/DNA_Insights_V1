@@ -279,3 +279,20 @@ def test_write_roadmap_atomic_scope_echoes_sentinel_and_writes_nothing(tmp_path:
     assert result.exit_code == 0, result.output
     assert ATOMIC_SENTINEL in result.output
     assert roadmap.read_text(encoding="utf-8") == original, "atomic scope must not touch ROADMAP"
+
+
+def test_check_reads_manifest_from_file_path(tmp_path: Path) -> None:
+    """from: B2-Phase1 deferred follow-up #6 (test-coverage nit) — the ``--manifest <file>``
+    (non-stdin) success path of ``_read_manifest_text`` (existing tests cover only ``-``/stdin and
+    the missing-file error).
+
+    A valid manifest written to a real file is read, parsed, and produces a clean (exit 0) check.
+    """
+    manifest_file = tmp_path / "manifest.json"
+    manifest_file.write_text(json.dumps(_atomic_manifest()), encoding="utf-8")
+    result = CliRunner().invoke(
+        scope_split_app,
+        ["check", "--manifest", str(manifest_file), "--engine", "static"],
+    )
+    assert result.exit_code == 0, result.output
+    assert not isinstance(result.exception, NotImplementedError), result.exception
