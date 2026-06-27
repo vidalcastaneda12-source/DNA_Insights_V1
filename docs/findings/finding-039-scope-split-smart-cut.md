@@ -66,6 +66,26 @@ severed-weight fraction.
 > [`sub-project-B2-phase1-deferred-followups.md`](../plans/sub-project-B2-phase1-deferred-followups.md)),
 > not a prose change.
 
+> **DECISION 1 — coupling-signal resolution (2026-06-27, Wave 3).** The open choice this decision
+> recorded — adopt **git-grep-as-primary**, or build an `LspCallGraphCouplingBuilder` on the ready
+> `make_coupling_builder` seam (the B2 spec headlined an LSP call-graph as *primary* with git-grep
+> as fallback; Phase 1 shipped git-grep as primary) — is **resolved in favor of git-grep-as-primary**.
+> Evidence: the calibration back-test (`backend/tests/test_scope_split_calibration_backtest.py`) runs
+> the real git-grep detector against ROADMAP's hand-authored pre-Phase-6 14-PR oracle and reproduces
+> it without over- or under-splitting — **over-split = 0** (every oracle-atomic PR returns atomic,
+> including the S=8 PR 3 and S=7 PR 5a "big but atomic" traps), the separable annotate+imputation
+> mega-scope **splits** schema-first, and git-grep's measured coupling on the one real import edge
+> (`strand_collapse → canonicalize.take_snapshot`) **exceeds `MAX_CUT_COST`**, so the veto is a live
+> gate, not dead code. The decisive observation is that the partition is **manifest-primary**: the
+> atomic decisions come from the `change_class` `MIN_CLUSTERS` signal, not git-grep — PR 3's two
+> modules share *no* import edge yet are correctly kept together by their shared change class — and
+> git-grep is decisive only at the veto margin, exactly where it correctly fires. An LSP call-graph
+> would add no fidelity the oracle reproduction requires, so it stays the deferred-supersession option
+> (LIFECYCLE below). The `MAX_CUT_COST=0.25` / `MIN_SUBSCOPE_SHRINK=0.34` dials are therefore
+> **validated against the oracle, no retune** (calibration item 2). `DEC-0119` records this; both
+> [`sub-project-B2-phase1-deferred-followups.md`](../plans/sub-project-B2-phase1-deferred-followups.md)
+> items 1 & 2 are now closed.
+
 ### Fail-closed atomic guard (the safety invariant)
 
 `splitter.propose_split` is a flat reducer (mirroring `verify_gate.verdict`) with **atomic** as
@@ -123,10 +143,14 @@ three categories:
 - **RETRIEVAL** — a `plan-premortem` / `regression-hunter` can cite `finding-039` for the
   smart-cut detector's design and its safety invariant; the named constants
   (`MAX_CUT_COST=0.25`, `MIN_SUBSCOPE_SHRINK=0.34`, `MIN_CLUSTERS=2`, `MAX_RESPLIT_DEPTH=1`,
-  `SHARED_HELPER_FANIN=3`) are the tunable knobs.
-- **LIFECYCLE** — `status: active`; a future change to the cut policy (e.g. an LSP coupling
-  adapter, recursive re-split, or Phase 2 `genome.campaign`) is an insert-then-flip supersession,
-  never an in-place edit.
+  `SHARED_HELPER_FANIN=3`) are the tunable knobs. The first two are **back-test-validated** against
+  ROADMAP's pre-Phase-6 oracle (2026-06-27, `DEC-0119`;
+  `backend/tests/test_scope_split_calibration_backtest.py`) — a drift in either is a regression
+  signal against that oracle reproduction.
+- **LIFECYCLE** — `status: active`; DECISION 1's coupling-signal choice is **resolved to
+  git-grep-as-primary** (2026-06-27, `DEC-0119`; see the resolution note above). A future change to
+  the cut policy (e.g. swapping in the deferred LSP coupling adapter, recursive re-split, or Phase 2
+  `genome.campaign`) is an insert-then-flip supersession, never an in-place edit.
 
 ## Consequences / follow-ups
 

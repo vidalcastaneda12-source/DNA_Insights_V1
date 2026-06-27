@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Sub Project B2 Phase 1 scope-split calibration + coupling-signal decision (deferred follow-ups
+  1 & 2, finding-039 / `DEC-0119`). **Validation + a recorded design decision, NOT a behavior
+  change** — the detector's atomic/split logic and the `MAX_CUT_COST=0.25` / `MIN_SUBSCOPE_SHRINK=0.34`
+  dials are byte-unchanged (the back-test *validates* them, it does not retune), so every scope-split
+  anchor holds and `mypy --strict backend/src` stays clean. **(1)** New
+  `backend/tests/test_scope_split_calibration_backtest.py` runs the real git-grep detector against
+  ROADMAP's hand-authored pre-Phase-6 14-PR oracle (reconstructed from real `annotate`/`imputation`
+  modules) and confirms it reproduces the decomposition without over- or under-splitting: over-split
+  = 0 (the S=8 PR 3 and S=7 PR 5a "big but atomic" traps stay atomic), the separable mega-scope
+  splits schema-first, and the coupling veto fires on the real `strand_collapse → canonicalize`
+  import edge above `MAX_CUT_COST` — a documented loose-bound probe, not a brittle exact-match.
+  **(2)** Resolves finding-039 DECISION 1 in favor of **git-grep-as-primary** (the partition is
+  manifest-primary; git-grep is a veto-only backstop the back-test shows fires correctly, so an LSP
+  call-graph adds no fidelity the oracle reproduction requires) — the `LspCallGraphCouplingBuilder`
+  is declined for Phase 1 and kept as the deferred-supersession option on the `make_coupling_builder`
+  seam. Records `DEC-0119`; ticks the deferred-followups plan items 1 & 2. Docs + test only — no
+  `docs/schemas`/`ddl` change, no DB write. (#116)
 - `genome.scope_split` code-quality cleanup (Sub Project B2 Phase 1 deferred review residuals
   4/5/6, finding-039; CODE change but **behavior-preserving** — the detector's atomic/split
   decisions and the CLI `check --json` / `--dry-run` output shape are byte-unchanged, so every

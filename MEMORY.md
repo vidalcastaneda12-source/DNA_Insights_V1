@@ -174,13 +174,14 @@ back-pointer; `DEC-0002` is the live decision.
 | DEC-0116 | tactical | 2026-06-26 | active | — | VSC-User, ClaudeCodeDevelopment | PR #111 | docs(fast-follow): drain B2-Phase1 ROADMAP checkbox + PR #98 CHANGELOG entry | https://github.com/vidalcastaneda12-source/DNA_Insights_V1/pull/111 |
 | DEC-0117 | tactical | 2026-06-26 | active | — | VSC-User, ClaudeCodeDevelopment | PR #112 | chore(repo-sweep): prune 3 implemented plans, slot untracked work, drain 4 fast-follow items | https://github.com/vidalcastaneda12-source/DNA_Insights_V1/pull/112 |
 | DEC-0118 | tactical | 2026-06-26 | active | — | VSC-User, ClaudeCodeDevelopment | PR #113 | docs(fast-follow): drain 8 post-#112 doc-staleness residuals | https://github.com/vidalcastaneda12-source/DNA_Insights_V1/pull/113 |
+| DEC-0119 | architectural | 2026-06-27 | active | — | VSC-User, ClaudeCodeDevelopment | finding-039 | B2 Phase 1 scope-split DECISION 1 resolved to **git-grep-as-primary** (the `LspCallGraphCouplingBuilder` is declined for Phase 1 and kept as the deferred-supersession option on the `make_coupling_builder` seam): the partition is manifest-primary and git-grep is a veto-only backstop, so its lower fidelity vs an LSP call-graph matters only at the veto margin. The `MAX_CUT_COST=0.25` / `MIN_SUBSCOPE_SHRINK=0.34` dials are validated (no retune) by the calibration back-test against ROADMAP's pre-Phase-6 14-PR oracle — over-split 0 (PR 3 S=8 / PR 5a S=7 traps stay atomic), the separable mega-scope splits schema-first, and the veto fires on the real `strand_collapse → canonicalize` edge above `MAX_CUT_COST`. Closes B2-Phase1 deferred follow-ups 1 & 2 | docs/findings/finding-039-scope-split-smart-cut.md |
 
 <!-- END decision-ledger -->
 
 _**Backfill status:** `DEC-0001 … DEC-0021` are the curated decision-finding rows (every
 `type: decision`/`both` finding). `DEC-0022 … DEC-0084` and `DEC-0100 … DEC-0118` are the **per-PR-history retrospective** —
 one row per merged PR in `main`'s history, the squash-merge subject git-verbatim as the decision
-(`DEC-0085 … DEC-0099` in between are decision-finding rows, not per-PR history).
+(`DEC-0085 … DEC-0099` in between, and `DEC-0119`, are decision-finding rows, not per-PR history).
 **Declared complete: PRs #19 … #113** (82 PR-referenced commits, the full PR history
 in the current `main` lineage; any pre-#19 PRs predate this lineage). New PRs append the next row
 at the `/handoff` or Stage-5 checkpoint._
