@@ -74,6 +74,21 @@ ClaudeCodeVerification / ClaudeCodePlanning (no code was written that session).
 > trigger-gated Stage-2 writers) and **arch-1** (exhaustive harness `parallel`/`pipeline` fan-out
 > coverage) — land in PR 3, which also flips the ROADMAP slot to close Sub Project C2+D.
 
+> **Amendment (Sub Project C2-D Phase 2 close, 2026-06-28 — `finding-034` / `DEC-0122`).** PR 3
+> resolves the final two residuals and **closes Sub Project C2+D**. **D7** — a live-engine probe
+> ([`c2d-d7-probe-wf_f3e8d649-a1a.js`](c2d-d7-probe-wf_f3e8d649-a1a.js), run `wf_f3e8d649-a1a`) ran
+> all four trigger-gated Stage-2 writers (`schema-change-executor`, `fan-out-implementer`,
+> `test-triage`, `deep-debugger`) through `parallel()` on the real engine; all four resolved their
+> agentType and returned a StructuredOutput-validated object (`all_resolved: true`,
+> `parallel_fanout_ok: true`) — the live-engine RUN semantics the harness could only cover on
+> synthetic manifests. (A probe by design: it validates resolution + schema-validation, not each
+> writer's full real work.) **arch-1** — the harness `parallel`/`pipeline` fan-out semantics
+> (null-on-async-rejection / propagate-on-sync-throw) are now exhaustively pinned by
+> `harness-fanout-semantics.test.mjs` (8 tests; the harness is **95 pass · 0 skip**). The ROADMAP
+> "Sub Project C2+D" Phase 2 slot is flipped to `[x]` (sub-project complete) and the superseded
+> maximalist migration plan (`docs/plans/sub-project-C2-D-workflow-engine-migration.md`, whose §4
+> "migrate A/B/B2/C1" framing is descoped and **not** re-proposed) is pruned.
+
 Decisions locked this session:
 
 - The planner uses **Option B** — a judge-panel of *diverse* candidate plans, not a
@@ -1467,6 +1482,11 @@ loader — which is why the Amendment records the dialect as empirically confirm
 documented.
 
 ## C2D-Phase1 residual risk (deferred-unverified — carried to Phase 2)
+
+> **Resolved 2026-06-28 (Sub Project C2+D Phase 2 — `DEC-0122`).** All three items below are now
+> **closed**: the reversal-gate landed (PR 1 + PR 2), and D7 + arch-1 closed in PR 3 — see the
+> Phase-2 amendments at the top of this finding. This section is retained as the historical Stage-5
+> ledger of what Phase 1 deferred.
 
 Phase 1 (PR #109 / `866d255`) is gate-GREEN under the deterministic EC1–EC5 checks
 ([`verification.md`](../runbooks/verification.md) "C2+D Phase 1 gate (engine-dialect workflow

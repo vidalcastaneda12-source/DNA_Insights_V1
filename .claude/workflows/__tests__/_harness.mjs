@@ -590,8 +590,9 @@ function makeBudget(hooks) {
 }
 
 // The eight injected hooks, recording into shared arrays. parallel/pipeline mirror the
-// probe: NULL on async rejection, PROPAGATE on a synchronous throw.
-function makeRecorder(hooks) {
+// probe: NULL on async rejection, PROPAGATE on a synchronous throw. Exported so the arch-1
+// drift-guard suite (harness-fanout-semantics.test.mjs) can exercise those seams directly.
+export function makeRecorder(hooks) {
   const calls = [];
   const logs = [];
   const phases = [];
