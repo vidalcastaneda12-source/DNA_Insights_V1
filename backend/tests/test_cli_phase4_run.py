@@ -35,7 +35,7 @@ def test_run_help_lists_all_flags(
     isolated_settings: dict[str, str],  # noqa: ARG001
 ) -> None:
     runner = CliRunner()
-    result = runner.invoke(app, ["imputation", "run", "--help"])
+    result = runner.invoke(app, ["imputation", "run", "--help"], env={"TERM": "dumb"})
     assert result.exit_code == 0
     for flag in ("--chromosomes", "--threads", "--memory-gb", "--ne", "--force"):
         assert flag in result.output, f"{flag!r} missing from `imputation run --help`"

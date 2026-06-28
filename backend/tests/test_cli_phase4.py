@@ -120,7 +120,7 @@ def test_config_set_requires_value_type_for_new_key(
 ) -> None:
     init_databases()
     runner = CliRunner()
-    result = runner.invoke(app, ["config", "set", "brand_new_key", "x"])
+    result = runner.invoke(app, ["config", "set", "brand_new_key", "x"], env={"TERM": "dumb"})
     assert result.exit_code != 0
     assert "value-type" in result.output.lower() or "value-type" in str(result.exception).lower()
 
@@ -182,7 +182,7 @@ def test_imputation_import_help_lists_all_operational_flags(
 ) -> None:
     """``genome imputation import --help`` exposes every operational flag."""
     runner = CliRunner()
-    result = runner.invoke(app, ["imputation", "import", "--help"])
+    result = runner.invoke(app, ["imputation", "import", "--help"], env={"TERM": "dumb"})
     assert result.exit_code == 0
     for flag in (
         "--r2-threshold",
