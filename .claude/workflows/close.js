@@ -96,8 +96,8 @@ async function call(agentType, input, opts) {
 // Output-shape contracts. Each `required` list is a subset of that member's documented
 // "Output" JSON keys (.claude/agents/<name>.md); the engine validates against it.
 const SCHEMAS = {
-  repoSweep: { required: ['fruit'] },
-  knowledgeCurator: { required: ['relocks', 'cross_check_passed'] },
+  repoSweep: { type: 'object', properties: { fruit: {} }, required: ['fruit'], additionalProperties: true },
+  knowledgeCurator: { type: 'object', properties: { relocks: {}, cross_check_passed: {} }, required: ['relocks', 'cross_check_passed'], additionalProperties: true },
 };
 
 // `args` may be a bare scope id, a JSON string (the engine stringifies an object arg),

@@ -68,18 +68,18 @@ const SKEPTIC_ANGLES = ['reproduce', 'reachable', 'documented-exception'];
 // = the keys the consuming code reads. Schema-LESS calls (interface-freeze, in-loop
 // silent-failure-hunter, the PROSE handoff-assembler) are absent here on purpose (D1).
 const SCHEMAS = {
-  implementer: { required: ['ready_for_review'] },
-  testAuthor: { required: ['tests'] },
-  fanOutImplementer: { required: ['ready_for_review'] },
-  schemaChangeExecutor: { required: ['escalate'] },
-  planAdherenceSentinel: { required: ['verdict'] },
-  greenKeeper: { required: ['loop', 'escalate'] },
-  testTriage: { required: ['failures'] },
-  deepDebugger: { required: ['escalate'] },
-  findingVerifier: { required: ['survives'] },
-  completenessCritic: { required: ['converged'] },
-  reviewSynthesizer: { required: ['verdict'] },
-  lens: { required: ['findings'] },
+  implementer: { type: 'object', properties: { ready_for_review: {} }, required: ['ready_for_review'], additionalProperties: true },
+  testAuthor: { type: 'object', properties: { tests: {} }, required: ['tests'], additionalProperties: true },
+  fanOutImplementer: { type: 'object', properties: { ready_for_review: {} }, required: ['ready_for_review'], additionalProperties: true },
+  schemaChangeExecutor: { type: 'object', properties: { escalate: {} }, required: ['escalate'], additionalProperties: true },
+  planAdherenceSentinel: { type: 'object', properties: { verdict: {} }, required: ['verdict'], additionalProperties: true },
+  greenKeeper: { type: 'object', properties: { loop: {}, escalate: {} }, required: ['loop', 'escalate'], additionalProperties: true },
+  testTriage: { type: 'object', properties: { failures: {} }, required: ['failures'], additionalProperties: true },
+  deepDebugger: { type: 'object', properties: { escalate: {} }, required: ['escalate'], additionalProperties: true },
+  findingVerifier: { type: 'object', properties: { survives: {} }, required: ['survives'], additionalProperties: true },
+  completenessCritic: { type: 'object', properties: { converged: {} }, required: ['converged'], additionalProperties: true },
+  reviewSynthesizer: { type: 'object', properties: { verdict: {} }, required: ['verdict'], additionalProperties: true },
+  lens: { type: 'object', properties: { findings: {} }, required: ['findings'], additionalProperties: true },
 };
 
 // Skill-backed review lenses (composed, not subagents). The runtime/operator dispatches

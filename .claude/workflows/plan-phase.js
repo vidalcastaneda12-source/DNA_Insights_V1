@@ -84,13 +84,13 @@ const MAX_REVISE_CYCLES = 2; // bounded loop; then escalate to VSC-User.
 // "Output" JSON keys (../agents/<name>.md); the engine validates against it (replacing
 // the old coerceJson + requireKeys). `required` = the keys the consuming code reads.
 const SCHEMAS = {
-  scopeDispatcher: { required: ['scope_id', 'change_class', 'risk_tier', 'reading_list'] },
-  planner: { required: ['implementation_plan', 'verification', 'confidence'] },
-  planJudges: { required: ['scores'] },
-  planSynthesizer: { required: ['synthesized_plan', 'divergence', 'riskiest_assumptions'] },
-  planPremortem: { required: ['recommend'] },
-  planAuditor: { required: ['verdict'] },
-  architectReviewer: { required: ['findings'] },
+  scopeDispatcher: { type: 'object', properties: { scope_id: {}, change_class: {}, risk_tier: {}, reading_list: {} }, required: ['scope_id', 'change_class', 'risk_tier', 'reading_list'], additionalProperties: true },
+  planner: { type: 'object', properties: { implementation_plan: {}, verification: {}, confidence: {} }, required: ['implementation_plan', 'verification', 'confidence'], additionalProperties: true },
+  planJudges: { type: 'object', properties: { scores: {} }, required: ['scores'], additionalProperties: true },
+  planSynthesizer: { type: 'object', properties: { synthesized_plan: {}, divergence: {}, riskiest_assumptions: {} }, required: ['synthesized_plan', 'divergence', 'riskiest_assumptions'], additionalProperties: true },
+  planPremortem: { type: 'object', properties: { recommend: {} }, required: ['recommend'], additionalProperties: true },
+  planAuditor: { type: 'object', properties: { verdict: {} }, required: ['verdict'], additionalProperties: true },
+  architectReviewer: { type: 'object', properties: { findings: {} }, required: ['findings'], additionalProperties: true },
 };
 
 // ── Inlined agent seam (self-contained; no sibling import). ──────────────────

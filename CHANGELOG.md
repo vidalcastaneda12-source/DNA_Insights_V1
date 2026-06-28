@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- **Sub Project C2+D Phase 2 (PR 1) — per-scope-team workflow StructuredOutput schema 400-fix**
+  (finding-034). The three engine-dialect team workflows
+  (`.claude/workflows/{plan-phase,implement-review,close}.js`) declared each per-agent
+  StructuredOutput schema as a bare `{ required: [...] }` with no top-level `type: 'object'`; the
+  real Workflow engine passes `opts.schema` straight through as the Anthropic StructuredOutput
+  `input_schema`, which the API rejects (`400 … input_schema.type: Field required`) — so
+  `/scope-run`, `/plan-phase`, `/implement-review`, `/close` failed on the real engine and only ran
+  via an ephemeral-patched run copy (memory note `agent-team-workflows-missing-type-object`). All 21
+  `SCHEMAS` entries are now valid JSON Schema (`type: 'object'` + `properties` +
+  `additionalProperties: true`; `required` unchanged — permissive `{}` property values so the engine
+  never over-constrains an agent's real return). Verified on the real engine (schema-shape smoke,
+  run `wf_812305d6-ef9`: schema accepted, StructuredOutput called). The `node:test` harness stays
+  green (87 tests · 86 pass · 1 intentional skip · 0 fail — additive change); **JS-only — no Python
+  / `docs/schemas` / `ddl` / DB change**. (#TBD)
 - **ROADMAP — surfaced the two Sub Project B2 Phase-2 deferred items** (Gate-1 fail-closed token core for `approve-plan`; engine-primary `/campaign-run` conductor) in the pre-Phase-6 "Deliberately deferred" list, both gated on Sub Project C2+D Phase 2 (finding-041 / `DEC-0121`). Docs-only tracking change. (#120)
 - **Sub Project B2 Phase 2 (PR 2) — `genome.campaign` live-launch** (finding-041 / `DEC-0121`).
   CLI-wires the PR-1 campaign-advancement reducers as human-gate-event-recording commands —
