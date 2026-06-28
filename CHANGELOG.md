@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never over-constrains an agent's real return). Verified on the real engine (schema-shape smoke,
   run `wf_812305d6-ef9`: schema accepted, StructuredOutput called). The `node:test` harness stays
   green (87 tests · 86 pass · 1 intentional skip · 0 fail — additive change); **JS-only — no Python
-  / `docs/schemas` / `ddl` / DB change**. (#TBD)
+  / `docs/schemas` / `ddl` / DB change**. (#121)
 - **ROADMAP — surfaced the two Sub Project B2 Phase-2 deferred items** (Gate-1 fail-closed token core for `approve-plan`; engine-primary `/campaign-run` conductor) in the pre-Phase-6 "Deliberately deferred" list, both gated on Sub Project C2+D Phase 2 (finding-041 / `DEC-0121`). Docs-only tracking change. (#120)
 - **Sub Project B2 Phase 2 (PR 2) — `genome.campaign` live-launch** (finding-041 / `DEC-0121`).
   CLI-wires the PR-1 campaign-advancement reducers as human-gate-event-recording commands —
