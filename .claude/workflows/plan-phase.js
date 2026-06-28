@@ -96,6 +96,7 @@ const SCHEMAS = {
 // ── Inlined agent seam (self-contained; no sibling import). ──────────────────
 const RETRY_LIMIT = 2; // bounded retry on a transient agent/validation failure.
 
+// agent-seam:start
 async function withRetry(thunk, who) {
   let lastErr;
   for (let attempt = 1; attempt <= RETRY_LIMIT; attempt++) {
@@ -112,8 +113,8 @@ async function withRetry(thunk, who) {
 }
 
 /**
- * Invoke one `.claude/agents/<name>.md` subagent with a JSON-bearing prompt. With
- * `opts.schema` the engine returns a schema-validated object; without it, prose.
+ * Invoke a `.claude/agents/<name>.md` subagent. With `opts.schema` the engine returns
+ * a schema-validated object; without it, the member's prose (e.g. handoff-assembler).
  */
 async function call(agentType, input, opts) {
   const { schema, label, isolation } = opts || {};
@@ -130,6 +131,7 @@ async function call(agentType, input, opts) {
   if (isolation) agentOpts.isolation = isolation; // isolation:'worktree' → engine worktree directive; NOT probe/harness-exercised (deferred-unverified, D7/suite7). Only the fan-out writer passes it.
   return withRetry(() => agent(prompt, agentOpts), agentType);
 }
+// agent-seam:end
 
 // ── Budget helpers. `budget.total` is null when no target (the default path; the
 // C2D-Phase1 probe confirmed this) → remaining is Infinity → guards are no-ops. ──

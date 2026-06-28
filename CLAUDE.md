@@ -170,6 +170,7 @@ VSC-User runs the canonical verification independently against the pushed branch
 - Lint: `ruff check && ruff format --check`
 - Types: `mypy --strict backend/src`
 - Decision gate: `genome docs check` — validates the `MEMORY.md` ledger + finding frontmatter (CAPTURE / RETRIEVAL / LIFECYCLE). DB-free: runs on a fresh checkout with no SQLCipher built. See finding-036.
+- Reversal-gate: `genome workflows check` — validates the three per-scope-team dynamic workflows (`.claude/workflows/{plan-phase,implement-review,close}.js`): seam-drift (the duplicated `agent()`/retry seam stays logically identical under GT-1) + schema-validity (every `SCHEMAS` entry declares `type:'object'`), fail-closed. DB-free. See finding-034 / `DEC-0122`.
 - Dev API (later phases): `uvicorn genome.api.main:app --reload`
 - Frontend (later phases): `cd frontend && pnpm dev`
 

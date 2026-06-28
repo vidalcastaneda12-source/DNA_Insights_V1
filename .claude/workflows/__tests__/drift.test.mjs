@@ -108,7 +108,19 @@ test('GT-1: the inlined agent()/retry seam LOGIC is identical across plan-phase 
   assert.equal(b.norm, c.norm, `agent()/retry seam LOGIC drifted between ${b.stem}.js and ${c.stem}.js (GT-1 requires the inlined copies to stay logically identical; only the per-workflow name label may differ)`);
 });
 
-// Reversal-gate (EC5): `genome docs check` exit 0 (+ the DEC-0099 pure-append ledger row)
-// is a PYTHON-CLI gate the green-keeper runs as part of the dev-loop, not a JS check — it
-// is asserted there, not here. Skipped on purpose with the provenance recorded.
-test('reversal-gate: genome docs check exit 0 is verified by the Python dev-loop (green-keeper)', { skip: 'Python-CLI gate (EC5: `genome docs build-index && genome docs check` exit 0 + DEC-0099 pure-append) — run by the green-keeper, not the JS suite' }, () => {});
+// Reversal-gate (EC5) — LANDED in C2+D Phase 2 PR 2 (finding-034 / DEC-0122). The Python-CLI
+// gate `genome workflows check` (seam-drift + schema-validity, fail-closed) is the enforcement
+// surface the green-keeper runs in the dev-loop; this suite is its NODE MIRROR. The GT-1 test
+// above mirrors the seam-drift comparison; the test below asserts the precondition the Python
+// gate's deterministic primary path depends on — every seam is sentinel-delimited.
+test('reversal-gate (node mirror): the agent()/retry seam is sentinel-delimited in all three workflows', () => {
+  for (const p of WORKFLOW_PATHS) {
+    const { body } = loadParts(readWorkflowText(p));
+    const s = extractSeam(body);
+    assert.equal(
+      s.how,
+      'sentinel',
+      `${stemOf(p)}.js: the agent()/retry seam must be delimited with // agent-seam:start / // agent-seam:end — the Python reversal-gate (genome workflows check) requires the sentinel convention and fails closed without it`,
+    );
+  }
+});

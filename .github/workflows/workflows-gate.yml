@@ -1,0 +1,31 @@
+name: workflows-gate
+
+# Engine-primary reversal-gate (C2+D Phase 2 / finding-034 / DEC-0122): run
+# `genome workflows check` on every push to main and every PR. The gate validates the three
+# self-contained per-scope-team dynamic workflows (.claude/workflows/{plan-phase,implement-review,
+# close}.js) — seam-drift (the duplicated agent()/retry seam stays logically identical under GT-1)
+# and schema-validity (every SCHEMAS entry declares type:'object'). It is DB-free and config-free
+# (needs no APP_DB_PASSPHRASE), mirroring docs-gate.yml.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  workflows-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      # Skip the two packages that need from-source builds + system libraries absent on the
+      # runner: cyvcf2 (htslib/libcurl) and pysqlcipher3 (SQLCipher headers). The gate is DB-free
+      # + config-free and `genome.cli` is pysqlcipher3-lazy, so it imports neither; dropping them
+      # keeps CI fast and toolchain-free.
+      - name: Sync dependencies (without cyvcf2 or pysqlcipher3)
+        run: uv sync --no-install-package cyvcf2 --no-install-package pysqlcipher3
+      # The gate's non-zero exit fails this step (and the job). No `|| true`, no
+      # `continue-on-error` — a swallowed exit would make the gate enforcement theatre.
+      - name: Reversal-gate (genome workflows check)
+        run: uv run --no-sync genome workflows check
