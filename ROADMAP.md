@@ -303,7 +303,7 @@ is it, added at Stage-5 close.
   Python / schema / DB change (the dev-loop stayed byte-unchanged; `manifest.applicable_anchors`
   was `[]`, no real-data anchors). Gate recipe: verification.md "C2+D Phase 1 gate
   (engine-dialect workflow port)".
-- [x] **Phase 2** (PR #121 + #122 + #TBD) — the engine-primary CLI (`genome workflows`) + the
+- [x] **Phase 2** (PR #121 + #122 + #123) — the engine-primary CLI (`genome workflows`) + the
   DB-free, fail-closed **reversal-gate** (`genome workflows check`: seam-drift + schema-validity),
   **closing Sub Project C2+D** (finding-034 Phase-2 amendments / `DEC-0122`). **PR 1 (#121)** fixed
   the latent StructuredOutput 400 — all 21 `SCHEMAS` entries are now valid JSON Schema
@@ -311,7 +311,7 @@ is it, added at Stage-5 close.
   `genome workflows` CLI + the reversal-gate (mirrors `genome docs check`; own
   `model`/`seam`/`schemas`/`validator`/`cli`, DB-free + config-free), the `// agent-seam:start`/
   `:end` sentinels, the un-skipped `drift.test.mjs` (harness 0-skip), and the `workflows-gate` CI
-  workflow. **PR 3 (#TBD)** closed the two Phase-1 residuals: **D7** — a live-engine probe
+  workflow. **PR 3 (#123)** closed the two Phase-1 residuals: **D7** — a live-engine probe
   ([`c2d-d7-probe-wf_f3e8d649-a1a.js`](docs/findings/c2d-d7-probe-wf_f3e8d649-a1a.js), run
   `wf_f3e8d649-a1a`) ran all four trigger-gated Stage-2 writers through `parallel()` on the real
   engine (all resolved, schema-validated) — and **arch-1** — exhaustive harness

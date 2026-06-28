@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pass · 0 skip). Flips the ROADMAP "Sub Project C2+D" Phase 2 slot to `[x]` and prunes the
   superseded maximalist migration plan (`docs/plans/sub-project-C2-D-workflow-engine-migration.md`,
   §4 "migrate A/B/B2/C1" descoped). Test + docs only — **no `docs/schemas`/`ddl`/DB change**,
-  `applicable_anchors = []`. (#TBD)
+  `applicable_anchors = []`. (#123)
 - **Sub Project C2+D Phase 2 (PR 2) — engine-primary CLI + reversal-gate** (finding-034 /
   `DEC-0122`). New DB-free `genome workflows` command group whose `genome workflows check` is a
   fail-closed **reversal-gate** over the three self-contained per-scope-team workflows:
