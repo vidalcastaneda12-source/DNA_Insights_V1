@@ -177,7 +177,7 @@ def test_annotate_refresh_help_documents_skip_if_same_version_flag(
     can discover the flag without diffing the source.
     """
     runner = CliRunner()
-    result = runner.invoke(app, ["annotate", "refresh", "--help"])
+    result = runner.invoke(app, ["annotate", "refresh", "--help"], env={"TERM": "dumb"})
     assert result.exit_code == 0
     assert "--skip-if-same-version" in result.output
 
