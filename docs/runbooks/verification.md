@@ -532,6 +532,75 @@ The `apply_revalidation` decision+kwargs type-tightening (overloads / discrimina
 deferred design-quality nit. See
 [`finding-041`](../findings/finding-041-campaign-orchestrator.md) "Consequences / follow-ups".
 
+## Sub Project B2 Phase 2 campaign gate (PR 2 — live-launch)
+
+This gate covers Sub Project B2 Phase 2 PR 2
+([`finding-041`](../findings/finding-041-campaign-orchestrator.md) "PR 2 — live-launch as-built" /
+`DEC-0121`): the four human-gate-event-recording `genome campaign` commands (`revalidate`,
+`approve-plan`, `record-merge`, `show`) wired onto the PR-1 reducers, plus the new `/campaign-run`
+model-driven conductor. The DB-free core stays byte-frozen (all new code in `cli.py` + markdown), so
+this is again a **new-CLI + docs change** with `manifest.applicable_anchors = []` — **no genome
+real-data anchors** — and the "Core commands" Python protocol runs as a **negative control** (it
+must stay byte-unchanged). Run from the repo root.
+
+**CP1 — full dev-loop green; campaign suite grows 70 → 87.**
+
+```
+uv run pytest                       # full suite green (0 fail, 0 newly-skipped)
+uv run ruff check                   # All checks passed!
+uv run ruff format --check          # all files already formatted
+uv run mypy --strict backend/src    # Success: no issues found
+```
+
+The campaign suite is the DB-free regression signal: `uv run pytest backend/tests/test_campaign_*.py`
+→ **87 passed** (PR 1's 70 + 17 live-launch tests; deterministic — no tolerance band), and the PR-1
+clean-subprocess guard still holds (`uv run pytest backend/tests/test_campaign_no_db_import.py`).
+
+**CP2 — the no-autonomous-gate guarantee (the two HEADLINE checks).** Each gate command run WITHOUT
+its confirmation flag exits non-zero **and** leaves the append-only ledger byte-unchanged — a gate
+is never crossed autonomously:
+
+```
+uv run pytest backend/tests/test_campaign_live_launch.py
+# approve-plan WITHOUT --approved   → exit ≠ 0, ledger byte-unchanged   [HEADLINE Gate 1: the core refuses]
+# record-merge WITHOUT --merged     → exit ≠ 0, ledger byte-unchanged   [HEADLINE Gate 2, GAP-C: advance_on_merge
+#                                       hard-codes external_event=True, so the CLI --merged guard is the SOLE enforcer]
+```
+
+**CP3 — the multi-session live-loop.** Start a two-cluster campaign, then for each sub-scope run
+`revalidate still_needed → approve-plan --approved → record-merge --merged` as SEPARATE CLI
+invocations that reload the ledger from disk between every step (no in-memory carryover), driving the
+campaign to completion:
+
+```
+uv run pytest backend/tests/test_campaign_live_launch.py
+# reload-from-disk between steps → the next sub-scope tees up → load_campaign().is_done() is True;
+# all sub-scopes MERGED; the ledger is strictly append-only (record count grows monotonically);
+# ROADMAP shows both sub-scopes [x] merged.
+```
+
+**CP4 — negative control (no schema / DDL / DB / CLAUDE.md-digit change; applicable_anchors = []).**
+The change is new CLI + tests + markdown only:
+
+```
+{ git diff --name-only main; git ls-files --others --exclude-standard; } | grep -E '^(ddl/|docs/schemas/)'   # → empty
+git diff --stat main -- CLAUDE.md                                                                            # → empty (no real-data digit moved)
+```
+
+No `data/` write: the campaign ledger home `data/campaign/` is gitignored runtime state, untouched
+by the gate; the DuckDB / SQLite databases are untouched. `manifest.applicable_anchors = []` — any
+real-data / DB anchor appearing in this PR is a design smell, not an expected lock.
+
+**CP5 — decision-tracking gate.** finding-041 carries the "PR 2 — live-launch as-built" section and
+`DEC-0121` is linked, pure-append:
+
+```
+uv run genome docs check          # exit 0 — capture + retrieval + lifecycle all hold
+```
+
+`DEC-0121` is the **last in-table ledger row**, recorded pure-append; finding-041 is its
+`detail-link`.
+
 ## When the protocol fails
 
 If any step fails, do not attempt to fix the failure locally before

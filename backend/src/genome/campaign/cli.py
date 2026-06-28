@@ -1,7 +1,10 @@
 """Typer subcommands for ``genome campaign`` (``finding-041``; B2 Phase 2).
 
-The advisory surface over the campaign core — it SEQUENCES, TRACKS, and TEES-UP, but **never**
-launches ``/scope-run`` and **never** crosses a human gate (PR 1; the live launch is PR 2):
+The live-launch surface over the campaign core — it SEQUENCES, TRACKS, TEES-UP, and **records**
+each human-authorized gate crossing, but it **never** crosses a gate AUTONOMOUSLY (every
+gate-recording command requires an explicit operator flag and refuses, with no ledger write,
+without it) and the CLI itself **never** launches ``/scope-run`` (the ``/campaign-run`` conductor
+skill drives that — PR 2 / ``finding-041``):
 
 * ``campaign start`` — read a dispatcher manifest, ``propose_split``, and (if non-atomic) seed a
   campaign ledger + tee up the deps-free head + reflect the live state into the ROADMAP managed
@@ -13,6 +16,16 @@ launches ``/scope-run`` and **never** crosses a human gate (PR 1; the live launc
   deletes the ledger).
 * ``campaign write-roadmap`` — re-reflect the current state into the ROADMAP managed block
   (read / pure-transform / write-if-changed, idempotent).
+* ``campaign revalidate`` — re-validate a ``READY`` sub-scope immediately before it runs
+  (``still_needed`` / ``moot`` / ``changed`` / ``grown``) and bundle the resulting tee-up; this is
+  the campaign's own autonomous sequencing decision, never a human gate.
+* ``campaign approve-plan`` — record **Gate 1** (plan approval; ``planning → implementing``); the
+  core refuses the crossing unless ``--approved`` is given.
+* ``campaign record-merge`` — record **Gate 2** (the merge ``/verify-and-merge`` performed;
+  ``implementing → merged``) and tee up the next dependent; refuses unless ``--merged`` is given
+  (the sole structural Gate-2 enforcer — GAP-C).
+* ``campaign show`` — read-only: dump one sub-scope's active record (status / deps / origin /
+  manifest snapshot); ``--json`` emits the machine record the conductor feeds ``/scope-run``.
 
 Every ``--manifest`` accepts a path **or** ``-`` (stdin), and ROADMAP reflection goes ONLY through
 the reused :func:`genome.scope_split.roadmap_writer.append_roadmap_block` into the existing
@@ -33,6 +46,7 @@ import structlog
 import typer
 
 from genome.campaign.formatter import format_campaign_roadmap_block, format_campaign_status
+from genome.campaign.model import CampaignStatus, RevalidationDecision
 from genome.campaign.persistence import (
     DEFAULT_CAMPAIGN_DIR,
     _validate_campaign_id,
@@ -41,10 +55,13 @@ from genome.campaign.persistence import (
     load_history,
 )
 from genome.campaign.state_machine import (
+    advance_on_merge,
+    apply_revalidation,
     cancel_campaign,
     next_ready,
     seed_campaign,
     tee_up,
+    transition,
 )
 from genome.scope_split.formatter import ATOMIC_SENTINEL
 from genome.scope_split.graph import CouplingEngine, CouplingGraphBuilder, make_coupling_builder
@@ -57,7 +74,10 @@ from genome.scope_split.roadmap_writer import (
 from genome.scope_split.splitter import propose_split
 
 if TYPE_CHECKING:
-    from genome.campaign.model import CampaignState
+    from collections.abc import Callable
+
+    from genome.campaign.model import CampaignState, SubScopeState
+    from genome.scope_split.model import SubScope
 
 logger = structlog.get_logger(__name__)
 
@@ -67,8 +87,11 @@ campaign_app = typer.Typer(
     help=(
         "Campaign orchestrator: drive a non-atomic scope-split's ordered sub-scopes through "
         "/scope-run as a persistent, resumable campaign. 'start' seeds it, 'dry-run' previews "
-        "the order, 'status'/'resume' track it, 'cancel' ejects it, 'write-roadmap' reflects it. "
-        "Advisory only — never launches a sub-scope and never crosses a human gate."
+        "the order, 'status'/'resume' track it, 'revalidate'/'approve-plan'/'record-merge' drive "
+        "the live loop, 'show' inspects one sub-scope, 'cancel' ejects it, 'write-roadmap' "
+        "reflects it. Records human-authorized gate events but never crosses a gate AUTONOMOUSLY "
+        "(each gate-recording command requires an explicit flag) and never launches a sub-scope "
+        "itself (the /campaign-run conductor skill does that)."
     ),
 )
 
@@ -113,6 +136,48 @@ _RoadmapOption = Annotated[
     typer.Option("--roadmap", help="Path to the ROADMAP.md to reflect the managed block into."),
 ]
 
+#: ``--sub-scope`` — the placeholder sub-scope id (``<origin>-sN``) a live-launch command acts on.
+_SubScopeOption = Annotated[
+    str,
+    typer.Option("--sub-scope", help="The sub-scope id (the campaign placeholder <origin>-sN)."),
+]
+
+#: ``--decision`` — the re-validation verdict (Typer narrows the value to the enum member).
+_DecisionOption = Annotated[
+    RevalidationDecision,
+    typer.Option(
+        "--decision",
+        help="Re-validation verdict: still_needed | moot | changed | grown.",
+    ),
+]
+
+#: ``--manifest`` for ``revalidate`` — OPTIONAL (only ``changed`` / ``grown`` need it).
+_RevalManifestOption = Annotated[
+    str | None,
+    typer.Option(
+        "--manifest",
+        help="Re-proposed manifest JSON path or '-' (required for --decision changed / grown).",
+    ),
+]
+
+#: ``--approved`` — the operator's Gate-1 act; maps straight to the core's external-event guard.
+_ApprovedOption = Annotated[
+    bool,
+    typer.Option("--approved", help="Record the operator's Gate-1 plan approval (required)."),
+]
+
+#: ``--merged`` — the operator's Gate-2 act; the SOLE structural enforcer of Gate 2 (GAP-C).
+_MergedOption = Annotated[
+    bool,
+    typer.Option("--merged", help="Record that the Gate-2 merge (/verify-and-merge) happened."),
+]
+
+#: ``--json`` — emit a single machine-readable record (the GAP-A seam into ``/scope-run``).
+_JsonOption = Annotated[
+    bool,
+    typer.Option("--json", help="Emit the active record as one JSON object (machine-readable)."),
+]
+
 
 def _read_manifest_text(manifest: str) -> str:
     """Read the manifest JSON text from a path or stdin (``-``); a bad path is a BadParameter."""
@@ -142,6 +207,26 @@ def _load_manifest(manifest: str) -> ScopeManifestInput:
     except (ValueError, TypeError) as exc:
         msg = f"manifest is malformed: {exc}"
         raise typer.BadParameter(msg) from exc
+
+
+def _read_manifest_snapshot(manifest: str) -> dict[str, object]:
+    """Read + parse a manifest to its RAW JSON object — opaque ``CHANGED`` provenance, not narrowed.
+
+    The ``revalidate --decision changed`` path stores the re-proposed manifest verbatim as the new
+    ``manifest_snapshot`` (provenance #8), so it keeps the raw dispatcher dict rather than the
+    flattened :class:`ScopeManifestInput`. Malformed JSON / a non-object is a clean BadParameter
+    (mirroring :func:`_load_manifest`'s ingress checks).
+    """
+    text = _read_manifest_text(manifest)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        msg = f"manifest is not valid JSON: {exc}"
+        raise typer.BadParameter(msg) from exc
+    if not isinstance(data, dict):
+        msg = f"manifest must be a JSON object, got {type(data).__name__}"
+        raise typer.BadParameter(msg)
+    return data
 
 
 def _make_builder(engine: CouplingEngine) -> CouplingGraphBuilder:
@@ -189,6 +274,72 @@ def _reflect_roadmap(state: CampaignState, roadmap_path: Path) -> None:
         return
     roadmap_path.write_text(updated, encoding="utf-8")
     typer.echo(f"reflected campaign state to {roadmap_path}")
+
+
+def _apply_event(
+    campaign: str,
+    campaign_dir: Path,
+    roadmap: Path,
+    build_records: Callable[[list[SubScopeState]], list[SubScopeState]],
+) -> CampaignState:
+    """Re-read the ledger, build a transition's records, append them, and reflect to ROADMAP.
+
+    The shared shell for every live-launch event (``revalidate`` / ``approve-plan`` /
+    ``record-merge``). ``build_records`` is the per-command reducer-call closure: it receives the
+    freshly-loaded history (multi-session resumable — no in-memory carryover, constraint 5) and
+    returns the records to append. CRUCIALLY it is invoked **before** :func:`append_records`, so a
+    rejected gate crossing (a ``ValueError`` from the core's gate guard / READY precondition /
+    unknown sub-scope, or the CLI's own flag / re-split guards) is surfaced as a clean
+    :class:`typer.BadParameter` with the ledger byte-untouched — the no-autonomous-gate guarantee
+    (constraint 3). On success the records are written in one atomic append (locked #7), then the
+    reduced state is reflected into the ROADMAP managed block.
+    """
+    campaign = _checked_campaign_id(campaign)
+    history = load_history(campaign, campaign_dir=campaign_dir)
+    try:
+        records = build_records(history)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    append_records(campaign, records, campaign_dir=campaign_dir)
+    state = load_campaign(campaign, campaign_dir=campaign_dir)
+    _reflect_roadmap(state, roadmap)
+    return state
+
+
+def _resolve_resplit_children(
+    history: list[SubScopeState],
+    manifest: str,
+    engine: CouplingEngine,
+) -> tuple[SubScope, ...]:
+    """Re-split a GROWN manifest and apply the §4.3 CLI-boundary guard (collision / dangling dep).
+
+    Runs :func:`propose_split` over the re-proposed manifest, then rejects — with a clean
+    ``ValueError`` (surfaced by :func:`_apply_event` as a BadParameter, NO ledger write) — any
+    re-split child whose id collides with an existing campaign sub-scope, or whose ``depends_on``
+    names an id outside the existing campaign ids and the new sibling ids. That dangling-dep pair
+    is the one footgun a live GROWN carve introduces (a seed reusing an active id tears the
+    append-only view; a dangling dep blocks its dependents forever — violating fail-loud). An
+    atomic / empty re-split returns ``()`` so the pure core ejects-loud rather than carving.
+    """
+    parsed = _load_manifest(manifest)
+    result = propose_split(parsed, _make_builder(engine))
+    existing_ids = {record.sub_scope_id for record in history}
+    sibling_ids = {child.sub_scope_id for child in result.sub_scopes}
+    for child in result.sub_scopes:
+        if child.sub_scope_id in existing_ids:
+            msg = (
+                f"re-split child {child.sub_scope_id!r} collides with an existing campaign "
+                "sub-scope — refusing the carve (it would tear the append-only ledger)"
+            )
+            raise ValueError(msg)
+        for dep in child.depends_on:
+            if dep not in existing_ids and dep not in sibling_ids:
+                msg = (
+                    f"re-split child {child.sub_scope_id!r} has a dangling depends_on {dep!r} "
+                    "(neither an existing campaign sub-scope nor a sibling) — refusing the carve"
+                )
+                raise ValueError(msg)
+    return result.sub_scopes
 
 
 @campaign_app.command("start")
@@ -330,3 +481,165 @@ def write_roadmap_cmd(
     state = load_campaign(campaign, campaign_dir=campaign_dir)
     _reflect_roadmap(state, roadmap)
     logger.info("campaign.cli.write_roadmap", campaign=campaign, sub_scopes=len(state.sub_scopes))
+
+
+@campaign_app.command("revalidate")
+def revalidate_cmd(  # noqa: PLR0913 — irreducible CLI surface (each option is a distinct flag)
+    *,
+    campaign: _CampaignOption,
+    sub_scope: _SubScopeOption,
+    decision: _DecisionOption,
+    manifest: _RevalManifestOption = None,
+    engine: _EngineOption = "auto",
+    campaign_dir: _CampaignDirOption = DEFAULT_CAMPAIGN_DIR,
+    roadmap: _RoadmapOption = DEFAULT_ROADMAP_PATH,
+) -> None:
+    """Re-validate a READY sub-scope right before it runs — autonomous, never a gate (§4.1a).
+
+    Dispatches on ``--decision``: ``still_needed`` (READY→PLANNING) / ``moot`` (READY→MOOT) /
+    ``changed`` (re-propose with a fresh ``--manifest`` snapshot, stays READY) / ``grown``
+    (re-split the ``--manifest`` into children at depth+1, eject the original — past the cap or with
+    no re-split it ejects-loud). The verdict is bundled with a :func:`tee_up` over
+    ``[*history, *verdict]`` and appended in ONE write, so a ``moot`` unblocks its dependent and a
+    ``grown`` readies the deps-free child in the same run. Re-validation is a READY-stage gate: the
+    core rejects a non-READY sub-scope (clean BadParameter, no write).
+    """
+
+    def build_records(history: list[SubScopeState]) -> list[SubScopeState]:
+        if decision in (RevalidationDecision.STILL_NEEDED, RevalidationDecision.MOOT):
+            verdict = apply_revalidation(history, sub_scope, decision)
+        elif decision is RevalidationDecision.CHANGED:
+            if manifest is None:
+                msg = "revalidate --decision changed requires --manifest (the re-proposed snapshot)"
+                raise ValueError(msg)
+            verdict = apply_revalidation(
+                history,
+                sub_scope,
+                decision,
+                updated_manifest_snapshot=_read_manifest_snapshot(manifest),
+            )
+        else:  # RevalidationDecision.GROWN
+            if manifest is None:
+                msg = "revalidate --decision grown requires --manifest (the manifest to re-split)"
+                raise ValueError(msg)
+            verdict = apply_revalidation(
+                history,
+                sub_scope,
+                decision,
+                resplit_children=_resolve_resplit_children(history, manifest, engine),
+            )
+        # Bundle the tee-up over the post-verdict history into the SAME atomic append, so a moot /
+        # grown verdict unblocks its dependents in one write (apply_revalidation does not tee up).
+        return [*verdict, *tee_up([*history, *verdict])]
+
+    _apply_event(campaign, campaign_dir, roadmap, build_records)
+    logger.info(
+        "campaign.cli.revalidate", campaign=campaign, sub_scope=sub_scope, decision=decision.value
+    )
+
+
+@campaign_app.command("approve-plan")
+def approve_plan_cmd(
+    *,
+    campaign: _CampaignOption,
+    sub_scope: _SubScopeOption,
+    approved: _ApprovedOption = False,
+    campaign_dir: _CampaignDirOption = DEFAULT_CAMPAIGN_DIR,
+    roadmap: _RoadmapOption = DEFAULT_ROADMAP_PATH,
+) -> None:
+    """Record Gate 1 — plan approval: PLANNING→IMPLEMENTING, only with ``--approved`` (§4.1b).
+
+    The ``--approved`` flag IS the operator's act: it maps straight to the core's ``external_event``
+    and the **core is the single enforcer** — ``PLANNING → IMPLEMENTING`` is a GATE_CROSSING, so
+    without the flag the core refuses and the CLI surfaces a clean BadParameter with NO ledger
+    write (the campaign never crosses a gate autonomously).
+    """
+
+    def build_records(history: list[SubScopeState]) -> list[SubScopeState]:
+        return [
+            transition(
+                history,
+                sub_scope,
+                CampaignStatus.IMPLEMENTING,
+                external_event=approved,
+                note="Gate 1: plan approved by operator",
+            )
+        ]
+
+    _apply_event(campaign, campaign_dir, roadmap, build_records)
+    logger.info(
+        "campaign.cli.approve_plan", campaign=campaign, sub_scope=sub_scope, approved=approved
+    )
+
+
+@campaign_app.command("record-merge")
+def record_merge_cmd(
+    *,
+    campaign: _CampaignOption,
+    sub_scope: _SubScopeOption,
+    merged: _MergedOption = False,
+    campaign_dir: _CampaignDirOption = DEFAULT_CAMPAIGN_DIR,
+    roadmap: _RoadmapOption = DEFAULT_ROADMAP_PATH,
+) -> None:
+    """Record Gate 2 — the merge already performed: IMPLEMENTING→MERGED, only with ``--merged``.
+
+    GAP-C asymmetry (§4.1c): :func:`advance_on_merge` hard-codes ``external_event=True`` internally,
+    so unlike Gate 1 the core CANNOT refuse this crossing — the ``if not merged`` check below is the
+    **sole structural enforcer** of Gate 2. With ``--merged`` it reuses ``advance_on_merge`` (the
+    MERGED record + any newly-unblocked dependents, teed up in one atomic batch); a non-IMPLEMENTING
+    sub-scope makes that transition reject → clean BadParameter.
+    """
+
+    def build_records(history: list[SubScopeState]) -> list[SubScopeState]:
+        if not merged:
+            # SOLE Gate-2 enforcer (GAP-C): advance_on_merge sets external_event=True itself, so the
+            # core cannot guard this edge — this flag check is the only backstop. Raised before any
+            # append → ledger byte-unchanged on rejection.
+            msg = (
+                "Gate 2 (record-merge) requires --merged — the campaign never crosses a gate "
+                "autonomously"
+            )
+            raise ValueError(msg)
+        return advance_on_merge(history, sub_scope)
+
+    _apply_event(campaign, campaign_dir, roadmap, build_records)
+    logger.info("campaign.cli.record_merge", campaign=campaign, sub_scope=sub_scope, merged=merged)
+
+
+@campaign_app.command("show")
+def show_cmd(
+    *,
+    campaign: _CampaignOption,
+    sub_scope: _SubScopeOption,
+    json_output: _JsonOption = False,
+    campaign_dir: _CampaignDirOption = DEFAULT_CAMPAIGN_DIR,
+) -> None:
+    """Show one sub-scope's active record — read-only; ``--json`` is the GAP-A seam (§4.1d).
+
+    ``--json`` emits the active :class:`~genome.campaign.model.SubScopeState` record as a single
+    JSON object (top-level ``status`` + the nested ``manifest_snapshot`` the conductor feeds
+    ``/scope-run`` as its Stage-0 manifest). Read-only: no ledger write, no ROADMAP reflection.
+    """
+    # --json is machine output: it must be PURE JSON on stdout. The group callback routes structlog
+    # into the captured stream the test harness folds into the combined output, and load_campaign
+    # logs internally, so silence structlog for this read before loading (no logger.info either).
+    if json_output:
+        structlog.configure(logger_factory=structlog.ReturnLoggerFactory())
+    campaign = _checked_campaign_id(campaign)
+    state = load_campaign(campaign, campaign_dir=campaign_dir)
+    record = state.by_id(sub_scope)
+    if record is None:
+        msg = f"no such sub-scope {sub_scope!r} in campaign {campaign!r}"
+        raise typer.BadParameter(msg)
+    if json_output:
+        typer.echo(json.dumps(record.to_json()))
+        return
+    deps = f"; depends_on: {', '.join(record.depends_on)}" if record.depends_on else ""
+    note = f" — {record.note}" if record.note else ""
+    typer.echo(
+        f"[{record.status.value}] {record.sub_scope_id} "
+        f"(origin_scope: {record.origin_scope}{deps}){note}"
+    )
+    logger.info(
+        "campaign.cli.show", campaign=campaign, sub_scope=sub_scope, status=record.status.value
+    )

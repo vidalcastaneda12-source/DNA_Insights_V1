@@ -50,11 +50,12 @@ lost. None gates any other work. Durable rationale for the scope lives in
   `--manifest <file-path>` success path, `_grep_count_line` bare/unparsable paths, and
   extraction-guard AND semantics — each in its matching `test_scope_split_*.py`.
 
-- [ ] **Phase 2 (genome.campaign orchestrator + multi-session resumability)** — the larger half of
+- [x] **Phase 2 (genome.campaign orchestrator + multi-session resumability)** — the larger half of
   B2: the persistent campaign state machine that sequences sub-scope `/scope-run`s through the two
   human gates. Deferred pending Sub Project C (its resumability infra is the campaign's first
   consumer); see finding-039 "Consequences / follow-ups".
-  **PR 1 (DB-free core + advisory CLI) in flight** (finding-041 / `DEC-0120`, branch
-  `b2-phase2-campaign`): the persistent state machine, supersession ledger, adaptive
-  re-validation, and multi-session resumability are built and tested. **PR 2** wires the live
-  `/scope-run` launch — ticks then.
+  **PR 1** shipped the DB-free core + advisory CLI (finding-041 / `DEC-0120`): the persistent state
+  machine, supersession ledger, adaptive re-validation, and multi-session resumability, built and
+  tested. **PR 2 (live-launch) shipped** — finding-041 / `DEC-0121`: the gate-event-recording
+  `revalidate` / `approve-plan` / `record-merge` / `show` commands + the `/campaign-run`
+  model-driven conductor.
