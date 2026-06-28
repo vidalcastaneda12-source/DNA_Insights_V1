@@ -211,6 +211,8 @@ hasn't arrived, tracked in findings for when it does:
 - Generalize the hash-match fallback into a shared helper
 - Hash-as-canonical-identity refactor
 - `annotate inspect --source URL` schema-inspection helper
+- Gate-1 fail-closed **token core** for `genome.campaign` `approve-plan` — a typed-token authorization mirroring Sub Project A's `verify_gate` `merge` token; the shipped `--approved` flag already suffices (the reducer refuses any GATE_CROSSING absent `external_event`), so this is future hardening, not a correctness gap. Gated on Sub Project C2+D Phase 2. ([`finding-041`](docs/findings/finding-041-campaign-orchestrator.md) "Gate-1 authorization — as taken" / `DEC-0121`)
+- Engine-primary `/campaign-run` conductor — the shipped conductor is **model-driven** (`DEC-0099`); the engine-primary launch path is gated on Sub Project C2+D Phase 2. ([`finding-041`](docs/findings/finding-041-campaign-orchestrator.md) D6 / `DEC-0121`)
 
 **Phase 6 entry is gated on:** the minimal `genes` seed (PR 6) — **now landed (#88)**,
 gate-confirmed `genes`=1153 unblocking the five `derived_*` / `pathway_genes` FKs (see

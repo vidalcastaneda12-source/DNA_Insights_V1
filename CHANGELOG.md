@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- **ROADMAP — surfaced the two Sub Project B2 Phase-2 deferred items** (Gate-1 fail-closed token core for `approve-plan`; engine-primary `/campaign-run` conductor) in the pre-Phase-6 "Deliberately deferred" list, both gated on Sub Project C2+D Phase 2 (finding-041 / `DEC-0121`). Docs-only tracking change. (#120)
 - **Sub Project B2 Phase 2 (PR 2) — `genome.campaign` live-launch** (finding-041 / `DEC-0121`).
   CLI-wires the PR-1 campaign-advancement reducers as human-gate-event-recording commands —
   `revalidate` / `approve-plan --approved` / `record-merge --merged` / `show` — and adds the new
