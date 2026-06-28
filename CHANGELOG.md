@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `drift.test.mjs` test (EC5) is **un-skipped** as the node mirror (harness now 87 pass · 0 skip).
   Anti-theatre: the gate's tests prove it CATCHES a seeded seam-drift / schema regression, not just
   that it exits 0. New module + tests + CI + docs only — **no `docs/schemas`/`ddl`/DB change**,
-  `applicable_anchors = []`. (#TBD)
+  `applicable_anchors = []`. (#122)
 - **Sub Project C2+D Phase 2 (PR 1) — per-scope-team workflow StructuredOutput schema 400-fix**
   (finding-034). The three engine-dialect team workflows
   (`.claude/workflows/{plan-phase,implement-review,close}.js`) declared each per-agent
