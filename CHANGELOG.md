@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the DB-free core (`model` / `state_machine` / `persistence` / `formatter`) is byte-unchanged — all
   new code is in `cli.py` + the `/campaign-run` skill. New CLI + tests + docs only — no
   `docs/schemas`/`ddl` change, no DB write, no CLAUDE.md real-data digit change. (#118)
+- **CI/test hygiene — CLI `--help` tests tolerant of click 8.3.x ANSI styling.** Four pre-existing `--help`/usage substring tests (`annotate refresh`, `config set`, `imputation import`/`run`) broke when click 8.3.x began ANSI-styling help output under `CliRunner`; they now invoke with `env={"TERM": "dumb"}` so the flag assertions match. Test-only — no behavior/schema/dependency change.
 - **Sub Project B2 Phase 2 (PR 1) — the `genome.campaign` campaign orchestrator core**
   (finding-041 / `DEC-0120`). New **DB-free** module that sequences the sub-scopes a non-atomic
   `scope-split` cut proposes through the two human gates as a persistent, resumable campaign: a
