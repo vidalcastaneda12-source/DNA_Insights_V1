@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- **Sub Project B2 Phase 2 (PR 2) — `genome.campaign` live-launch** (finding-041 / `DEC-0121`).
+  CLI-wires the PR-1 campaign-advancement reducers as human-gate-event-recording commands —
+  `revalidate` / `approve-plan --approved` / `record-merge --merged` / `show` — and adds the new
+  `/campaign-run` model-driven conductor that drives the readied sub-scopes through `/scope-run` and
+  the two human gates. **Both gate commands REQUIRE an explicit confirmation flag** and reject
+  (clean `BadParameter`, ledger byte-unchanged) without it, so a gate is never crossed autonomously;
+  the DB-free core (`model` / `state_machine` / `persistence` / `formatter`) is byte-unchanged — all
+  new code is in `cli.py` + the `/campaign-run` skill. New CLI + tests + docs only — no
+  `docs/schemas`/`ddl` change, no DB write, no CLAUDE.md real-data digit change. (#118)
 - **Sub Project B2 Phase 2 (PR 1) — the `genome.campaign` campaign orchestrator core**
   (finding-041 / `DEC-0120`). New **DB-free** module that sequences the sub-scopes a non-atomic
   `scope-split` cut proposes through the two human gates as a persistent, resumable campaign: a

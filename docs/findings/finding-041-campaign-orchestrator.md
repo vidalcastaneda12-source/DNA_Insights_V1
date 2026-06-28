@@ -2,7 +2,7 @@
 type: decision
 status: active
 actors: [VSC-User, ClaudeCodeDevelopment]
-date: 2026-06-27
+date: 2026-06-28
 supersedes: []
 superseded_by: []
 ---
@@ -14,17 +14,18 @@ superseded_by: []
 `/scope-run` enhancement sub-projects and the largest of them (a brand-new module). This is the
 durable provenance anchor for the `genome.campaign` core, the `genome campaign` sub-app, the
 `/campaign` skill, the campaign's reuse of the `scope_split` append-only ROADMAP managed block,
-and the ledger row `DEC-0120`. Delivered in **two PRs**:
+and the ledger rows `DEC-0120` / `DEC-0121`. Delivered in **two PRs**:
 
 - **PR 1 (this) — the DB-free campaign core + advisory CLI.** The state machine, the
   supersession ledger, the adaptive re-validation reducers, the append-only JSONL persistence, the
   ROADMAP reflection, and the `start / dry-run / status / resume / cancel / write-roadmap` CLI.
   **Ships with NO live launch** — it sequences, tracks, tees up, and reflects, but never runs a
   sub-scope and never crosses a human gate.
-- **PR 2 — the live-launch wiring** (deferred): drive the readied sub-scopes through the
-  model-driven `/scope-run` conductor and record the human-gate events back onto the ledger. The
-  reducers (`advance_on_merge`, `apply_revalidation`) are present + unit-tested in PR 1; only the
-  conductor wiring is deferred.
+- **PR 2 — the live-launch wiring** (delivered, `DEC-0121`): drives the readied sub-scopes through
+  the model-driven `/scope-run` conductor and records the human-gate events back onto the ledger.
+  The reducers (`advance_on_merge`, `apply_revalidation`) were present + unit-tested in PR 1; PR 2
+  CLI-wires them as the `revalidate` / `approve-plan` / `record-merge` / `show` commands plus the
+  new `/campaign-run` conductor. See "PR 2 — live-launch as-built".
 
 The synthesized plan artifact is transient (plans get pruned — see `DEC-0084`); this finding is
 where the design rationale lives.
@@ -143,11 +144,104 @@ folded into PR 1 (each with a regression test):
   resurrect a terminal (e.g. `merged`) sub-scope. `apply_revalidation` now rejects any non-`ready`
   current record (D4).
 
+## PR 2 — live-launch as-built
+
+PR 2 (`DEC-0121`) is the capstone completing Sub Project B2: it CLI-wires the PR-1 reducers as
+human-gate-event-recording commands and adds a model-driven conductor. The DB-free core
+(`model.py` / `state_machine.py` / `persistence.py` / `formatter.py`) stays **byte-frozen** — every
+new line is in `cli.py` plus the skill markdown, and the `test_campaign_no_db_import.py` guard still
+holds.
+
+### The four `genome campaign` commands
+
+- **`revalidate --sub-scope --decision {still_needed|moot|changed|grown}`** — autonomous (no verdict
+  is a gate crossing). It dispatches `apply_revalidation` (`still_needed → planning`, `moot → moot`,
+  `changed →` a fresh `manifest_snapshot`, `grown →` re-split into shell-supplied children), then
+  **bundles `tee_up`** over the post-verdict history in one append, so a `moot` unblocks its
+  dependents and a `grown` readies its deps-free children. `changed` / `grown` REQUIRE `--manifest`
+  (absent → clean `BadParameter`); `grown` re-runs `propose_split` and feeds `result.sub_scopes` as
+  the children (atomic / no-resplit → the core's eject-loud fires).
+- **`approve-plan --sub-scope --approved`** — Gate 1. Maps `--approved` straight to
+  `transition(..., IMPLEMENTING, external_event=approved)`. The **core is the single enforcer**:
+  `planning → implementing ∈ GATE_CROSSINGS`, so a missing `--approved` (→ `external_event=False`)
+  makes the core refuse → clean `BadParameter`, no write.
+- **`record-merge --sub-scope --merged`** — Gate 2. Reuses `advance_on_merge` (sets
+  `external_event=True` internally and tees up the next dependent in one atomic batch); journals the
+  merge `/verify-and-merge` already performed under its typed token.
+- **`show --sub-scope [--json]`** — read-only; dumps the active record's `manifest_snapshot` plus
+  status / deps / origin. `--json` is the conductor's machine seam (GAP-A, below). No write, no
+  ROADMAP touch.
+
+Every event flows through one `_apply_event` helper: load the ledger fresh → build records (any core
+`ValueError` → `typer.BadParameter`) → append → re-derive → reflect ROADMAP. The `BadParameter` is
+raised **before** the append, so a rejected command leaves the ledger **byte-unchanged** — the
+no-autonomous-gate guarantee, observable on disk.
+
+### DECISION 1 — separate verb-commands; each gate command requires an explicit flag
+
+The four are separate verb-commands, not one `advance --event`. The gate flag is **type-local** (a
+gate command carries `--approved` / `--merged` in its own signature; the autonomous `revalidate` has
+no such flag), so there is no shared dispatch branch to get wrong and the audit trail is one
+command = one recorded event. A gate command **without** its confirmation flag rejects with a clean
+`BadParameter` and never writes — a gate is never crossed autonomously.
+
+### DECISION 2 — a new `/campaign-run` model-driven conductor (not an extension of `/campaign`)
+
+The live loop is a **new** `.claude/commands/campaign-run.md` skill, paralleling `/scope-run`, not an
+extension of the advisory `/campaign`. It is a markdown procedure riding the Task tool (no new
+Python): `resume` (fresh from disk) → `revalidate` the next-ready sub-scope → on `still_needed` run
+`/scope-run` Stage 1 → STOP at Gate 1 and present the plan → on the human's explicit approval
+`approve-plan --approved` → `/scope-run` Stages 2–4 → STOP at Gate 2 = `/verify-and-merge` (its typed
+token) → on the ACTUAL merge `record-merge --merged` → `/scope-run` Stage 5 close → loop. Its
+headline invariant: **the flag is the HUMAN's act** — present gate evidence and STOP; never supply
+`--approved` / `--merged` itself; the CLI rejection is the backstop. It targets the model-driven
+conductor per `DEC-0099`; the engine-primary path stays deferred to Sub Project C2+D Phase 2 (D6).
+
+### The Gate-2 enforcement asymmetry (GAP-C)
+
+The two gates are enforced in **different layers**. `approve-plan` lets the CORE enforce: it passes
+`external_event=approved` straight through and `transition` rejects a non-external
+`planning → implementing`. But `advance_on_merge` **hard-codes `external_event=True` internally**, so
+the core cannot distinguish an operator-confirmed merge from an autonomous one — therefore the CLI
+`if not merged: raise BadParameter` is the **SOLE** structural enforcer of Gate 2. This asymmetry is
+called out in the command's docstring + an inline comment, and the headline test proves it
+(`record-merge` without `--merged` → exit ≠ 0, ledger byte-unchanged).
+
+### The manifest handoff (GAP-A)
+
+A campaign sub-scope has a `manifest_snapshot` (the scope_split mini-manifest) but **no ROADMAP
+slot**. The conductor bridges that gap by feeding the sub-scope's `manifest_snapshot` — read via
+`genome campaign show --sub-scope <id> --json` — to `/scope-run` as its Stage-0 manifest. The
+placeholder `<origin>-sN` stays the campaign key; minting a real `PR-N` id for the `/scope-run` run
+remains the human's micro-gate call (finding-039).
+
+### Fold dispositions
+
+- **Folded (CLI-boundary guard)** — the `grown` path rejects (clean `BadParameter`, no write) a
+  re-split child whose `sub_scope_id` collides with an active member, or whose `depends_on` names an
+  id outside `{existing ids} ∪ {sibling new child ids}` — the one footgun live `grown` introduces (a
+  dangling dep would make `_deps_satisfied` block forever, violating fail-loud). The pure core is
+  untouched.
+- **Deferred** — `apply_revalidation` decision↔kwargs type-tightening (`@overload` / discriminated
+  union; the runtime `ready` precondition of D4 already closes the correctness hole), `from_json`
+  `resplit_depth` validation, and the `SubScopeStateJSON` `Literal` / bounds tightening — all
+  cosmetic on the frozen core.
+
+### Gate-1 authorization — as taken
+
+VSC-User selected the **plain `--approved` flag** (the recommended option): Gate 1 is authorized by
+the explicit `--approved` flag now, and a Gate-1 **fail-closed token core** (mirroring Sub Project
+A's `verify_gate`) is **DEFERRED**. The flag-without-token approach suffices because the core already
+refuses the crossing absent `external_event`; the token core is future hardening, not a correctness
+gap.
+
 ## Consequences / follow-ups
 
-- **PR 2** wires `advance_on_merge` / `apply_revalidation` from the `/scope-run` conductor and
-  records the human-gate events onto the ledger; it ticks the ROADMAP "Sub Project B2 — Phase 2"
-  slot and deferred-followup item 7. Until then the CLI is advisory only.
+- **PR 2 (delivered, `DEC-0121`)** CLI-wired `advance_on_merge` / `apply_revalidation` (and
+  `transition` for Gate 1) as the `revalidate` / `approve-plan` / `record-merge` / `show` commands,
+  driven from the new `/campaign-run` conductor, recording the human-gate events onto the ledger; it
+  ticked the ROADMAP "Sub Project B2 — Phase 2" slot and deferred-followup item 7. See "PR 2 —
+  live-launch as-built" above.
 - **Engine-primary launch** is **Sub Project C2+D Phase 2** (D6), gated behind the Python-CLI
   reversal-gate.
 - **`apply_revalidation` type-tightening** (binding each `RevalidationDecision` to its legal kwargs

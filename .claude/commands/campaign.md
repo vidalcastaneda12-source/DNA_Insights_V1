@@ -17,10 +17,12 @@ decision #7); the skill is faithful plumbing.
    gate on its own: Gate 1 (plan approval, `planning → implementing`) and Gate 2
    (`/verify-and-merge`, `implementing → merged`) are both external-event-gated in the state
    machine. The campaign is advisory at the human boundary, always.
-2. **PR 1 does not auto-launch.** This phase plans, tracks, dry-runs, resumes, and reflects —
-   it does **not** launch `/scope-run` for you, and the CLI does not yet record gate events as a
-   sub-scope is driven (that live wiring is PR 2). `resume` *names* the next ready sub-scope; you
-   run it manually through `/scope-run` and its two gates.
+2. **Record gate events; never cross a gate autonomously.** The live loop (PR 2) *records* each
+   human-authorized gate crossing — `approve-plan --approved` (Gate 1) and `record-merge --merged`
+   (Gate 2) — but each command **refuses without its explicit flag** and writes nothing, so the
+   campaign never crosses a gate on its own. The `genome campaign` CLI still never launches
+   `/scope-run` itself; the **`/campaign-run`** conductor skill is the model-driven loop that drives
+   readied sub-scopes through `/scope-run` and stops at both gates.
 3. **Never hand-edit ROADMAP.** State is reflected only through the reused, clobber-guarded
    `append_roadmap_block` into the existing `<!-- B2-SUBSCOPES:BEGIN/END -->` managed region —
    `start` and `write-roadmap` are the only commands that touch it, and only that region. That
@@ -44,12 +46,23 @@ decision #7); the skill is faithful plumbing.
    current view (one line per sub-scope: status, deps, origin, plus the escalation note on any
    ejected one — never a silent drop). `genome campaign resume --campaign <scope_id>` names the
    next ready sub-scope to run via `/scope-run`, or reports the campaign done / blocked.
-4. **Re-validate before each sub-scope runs (model-driven).** Before launching the next ready
-   sub-scope, re-dispatch it and decide: **still needed** (run it), **moot** (skip → it resolves
-   its dependents), **changed** (re-propose with a fresh manifest snapshot), or **grown**
-   (re-split, capped at one level — past the cap it ejects + escalates to you). The *decision* is
-   yours (the re-dispatch is I/O); the pure transition is the core's. (In PR 1 these reducers are
-   built and tested but not yet wired to a CLI driver — they land live in PR 2.)
+4. **Drive the live loop (PR 2).** Four live-launch commands wire the reducers to the human gates;
+   the **`/campaign-run`** conductor skill sequences them end to end:
+   - `genome campaign revalidate --campaign <id> --sub-scope <sub> --decision <d>` — re-dispatch a
+     `ready` sub-scope and decide **still_needed** (run it), **moot** (skip → resolves its
+     dependents), **changed** (`--manifest -`, re-propose a fresh snapshot), or **grown**
+     (`--manifest -`, re-split capped at one level — past the cap it ejects + escalates). Autonomous
+     (no verdict is a gate); it bundles the resulting tee-up.
+   - `genome campaign approve-plan --campaign <id> --sub-scope <sub> --approved` — record **Gate 1**
+     (plan approval, `planning → implementing`). Refuses without `--approved`, no write.
+   - `genome campaign record-merge --campaign <id> --sub-scope <sub> --merged` — record **Gate 2**
+     (the merge `/verify-and-merge` performed, `implementing → merged`) and tee up the next
+     dependent. Refuses without `--merged`, no write.
+   - `genome campaign show --campaign <id> --sub-scope <sub> [--json]` — read-only inspect; `--json`
+     emits the mini-manifest the conductor feeds `/scope-run` (the GAP-A handoff).
+
+   The *decision* is yours (the re-dispatch is I/O); the pure transition is the core's; the gate flag
+   is the operator's act, never yours. See **`/campaign-run`** for the end-to-end live loop.
 5. **Reflect / cancel.** `genome campaign write-roadmap --campaign <scope_id>` re-reflects the
    current state into the managed block (idempotent — a no-op when already current).
    `genome campaign cancel --campaign <scope_id>` ejects every active sub-scope as appended
