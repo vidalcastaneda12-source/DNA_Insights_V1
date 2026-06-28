@@ -303,12 +303,24 @@ is it, added at Stage-5 close.
   Python / schema / DB change (the dev-loop stayed byte-unchanged; `manifest.applicable_anchors`
   was `[]`, no real-data anchors). Gate recipe: verification.md "C2+D Phase 1 gate
   (engine-dialect workflow port)".
-- [ ] **Phase 2** — the engine-primary CLI + the Python-CLI **reversal-gate** (the one
-  intentionally-skipped `drift.test.mjs` test — EC3's single skip). **Residual carried from
-  Phase 1:** the four trigger-gated Stage-2 writers are **deferred-unverified (D7)** (exercised
-  only on synthetic manifests; live-engine RUN semantics not yet validated), and the `arch-1`
-  drift-guard seam-coverage gap is latent/backlogged. See
-  [`finding-034`](docs/findings/finding-034-agent-team-plan-phase.md) "C2D-Phase1 residual risk".
+- [x] **Phase 2** (PR #121 + #122 + #TBD) — the engine-primary CLI (`genome workflows`) + the
+  DB-free, fail-closed **reversal-gate** (`genome workflows check`: seam-drift + schema-validity),
+  **closing Sub Project C2+D** (finding-034 Phase-2 amendments / `DEC-0122`). **PR 1 (#121)** fixed
+  the latent StructuredOutput 400 — all 21 `SCHEMAS` entries are now valid JSON Schema
+  (`type:'object'`), restoring the team workflows on the real engine. **PR 2 (#122)** added the
+  `genome workflows` CLI + the reversal-gate (mirrors `genome docs check`; own
+  `model`/`seam`/`schemas`/`validator`/`cli`, DB-free + config-free), the `// agent-seam:start`/
+  `:end` sentinels, the un-skipped `drift.test.mjs` (harness 0-skip), and the `workflows-gate` CI
+  workflow. **PR 3 (#TBD)** closed the two Phase-1 residuals: **D7** — a live-engine probe
+  ([`c2d-d7-probe-wf_f3e8d649-a1a.js`](docs/findings/c2d-d7-probe-wf_f3e8d649-a1a.js), run
+  `wf_f3e8d649-a1a`) ran all four trigger-gated Stage-2 writers through `parallel()` on the real
+  engine (all resolved, schema-validated) — and **arch-1** — exhaustive harness
+  `parallel`/`pipeline` fan-out coverage (`harness-fanout-semantics.test.mjs`; harness 95 pass ·
+  0 skip). The superseded maximalist migration plan
+  (`docs/plans/sub-project-C2-D-workflow-engine-migration.md`, §4 "migrate A/B/B2/C1" descoped,
+  **not** re-proposed) is pruned. JS-orchestration + a new DB-free Python gate + docs only — no
+  Python schema / `ddl` / DB change; `manifest.applicable_anchors` `[]`. Gate recipe:
+  verification.md "C2+D Phase 2 gate (reversal-gate + engine-primary CLI)".
 
 ## Phase 6 — Analysis pipelines
 - Load `pgs_score_weights` (per-variant PGS weights, overlapping-only per locked decision #5) → PRS computation against PGS Catalog

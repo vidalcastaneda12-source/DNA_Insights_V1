@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- **Sub Project C2+D Phase 2 (PR 3) — D7 live-engine validation + arch-1 harness coverage; CLOSE**
+  (finding-034 / `DEC-0122`). **Closes Sub Project C2+D.** **D7:** a committed live-engine probe
+  (`docs/findings/c2d-d7-probe-wf_f3e8d649-a1a.js`, run `wf_f3e8d649-a1a`) ran all four
+  trigger-gated Stage-2 writers (schema-change-executor / fan-out-implementer / test-triage /
+  deep-debugger) through `parallel()` on the real engine — all resolved their agentType and returned
+  a StructuredOutput-validated object (`all_resolved` / `parallel_fanout_ok` true), validating the
+  live-engine RUN semantics the harness had covered only on synthetic manifests. **arch-1:** new
+  `harness-fanout-semantics.test.mjs` (8 tests) exhaustively pins the harness `parallel`/`pipeline`
+  null-on-async-rejection / propagate-on-sync-throw seams (`makeRecorder` now exported; harness 95
+  pass · 0 skip). Flips the ROADMAP "Sub Project C2+D" Phase 2 slot to `[x]` and prunes the
+  superseded maximalist migration plan (`docs/plans/sub-project-C2-D-workflow-engine-migration.md`,
+  §4 "migrate A/B/B2/C1" descoped). Test + docs only — **no `docs/schemas`/`ddl`/DB change**,
+  `applicable_anchors = []`. (#TBD)
 - **Sub Project C2+D Phase 2 (PR 2) — engine-primary CLI + reversal-gate** (finding-034 /
   `DEC-0122`). New DB-free `genome workflows` command group whose `genome workflows check` is a
   fail-closed **reversal-gate** over the three self-contained per-scope-team workflows:
