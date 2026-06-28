@@ -239,9 +239,15 @@ enhancement sub-projects, not the dbSNP-backfill cleanup, and none gates the Pha
   `auto_tuning_enabled=false`?) — plus the deferred test coverage for all three. Also deferred
   here: the dispatcher/splitter `est_risk_tier` convergence PR (the splitter stays advisory until
   then) and the unattended every-N-merges close-hook auto-commit (on-demand `/calibrate` is first).
-- [ ] **Sub Project B2 — Phase 2 (`genome.campaign`, [`finding-039`](docs/findings/finding-039-scope-split-smart-cut.md)).**
+- [ ] **Sub Project B2 — Phase 2 (`genome.campaign`, [`finding-041`](docs/findings/finding-041-campaign-orchestrator.md)).**
   The campaign runner that auto-runs split sub-scopes through the per-scope team (each transition
-  an insert-then-flip supersession). B2 Phase 1 shipped the smart-cut detector only.
+  an insert-then-flip supersession). B2 Phase 1 ([`finding-039`](docs/findings/finding-039-scope-split-smart-cut.md))
+  shipped the smart-cut detector only.
+  **PR 1 (DB-free core + advisory CLI) in flight** on branch `b2-phase2-campaign` (the
+  `CampaignStatus` state machine, the supersession ledger, adaptive re-validation, append-only
+  persistence, ROADMAP reflection, and the `genome campaign` CLI — **no live launch**); **PR 2**
+  wires the live launch to the model-driven `/scope-run` conductor (`DEC-0099`-aligned;
+  engine-primary deferred to C2+D Phase 2). Ticks on PR 2.
 - See also **Sub Project C2+D — Phase 2** (engine-primary CLI + the Python-CLI reversal-gate),
   already tracked in its own section below.
 

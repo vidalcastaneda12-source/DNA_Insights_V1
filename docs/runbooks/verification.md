@@ -464,6 +464,74 @@ not yet validated — and the `arch-1` drift-guard seam-coverage gap is latent/b
 [`finding-034`](../findings/finding-034-agent-team-plan-phase.md) "C2D-Phase1 residual risk"
 and ROADMAP "Sub Project C2+D" Phase 2.
 
+## Sub Project B2 Phase 2 campaign gate (PR 1 — DB-free core)
+
+This gate covers Sub Project B2 Phase 2 PR 1
+([`finding-041`](../findings/finding-041-campaign-orchestrator.md) / `DEC-0120`): the new DB-free
+`genome.campaign` orchestrator core, the `genome campaign` advisory CLI, and the `/campaign`
+skill. Like the C1 / C2+D gates it is a **new-module + docs change** with
+`manifest.applicable_anchors = []` — **no genome real-data anchors** — so the "Core commands"
+Python protocol runs as a **negative control** (it must stay byte-unchanged) and there is nothing
+to re-lock in CLAUDE.md "Real-data observations". Run from the repo root.
+
+**CC1 — full dev-loop green.**
+
+```
+uv run pytest                       # full suite 1661 passed (0 fail, 0 newly-skipped)
+uv run ruff check                   # All checks passed!
+uv run ruff format --check          # all files already formatted
+uv run mypy --strict backend/src    # Success: no issues found
+```
+
+The campaign suite alone is the DB-free regression signal: `uv run pytest backend/tests/test_campaign_*.py` → **70 passed** (deterministic — no tolerance band).
+
+**CC2 — DB-free / no-settings guarantee.** `import genome.campaign` pulls in no `genome.db` and
+no `genome.config`, proven in a clean subprocess:
+
+```
+uv run pytest backend/tests/test_campaign_no_db_import.py    # passes
+```
+
+**CC3 — supersession + the symmetric gate guard (the locked-#7 / refinement-A core).** The
+append-only insert-then-flip ledger, the byte-immutability of every prior record, and BOTH
+human-gate crossings requiring an external event:
+
+```
+uv run pytest backend/tests/test_campaign_supersession.py backend/tests/test_campaign_state_machine.py
+# every transition APPENDS + supersedes; all prior records byte-immutable across the lifecycle;
+# planning→implementing AND implementing→merged both reject a non-external crossing;
+# apply_revalidation refuses a non-ready sub-scope; `start` re-run fails closed (no duplicate-seed
+# ledger tear); an ejected dep does not unblock its dependent; cancel skips already-terminal.
+```
+
+**CC4 — negative control (no schema / DDL / DB / CLAUDE.md-digit change).** The change is a new
+Python module + tests + docs only:
+
+```
+{ git diff --name-only main; git ls-files --others --exclude-standard; } | grep -E '^(ddl/|docs/schemas/)'   # → empty
+git diff --stat main -- CLAUDE.md                                                                            # → empty (no real-data digit moved)
+```
+
+No `data/` write: the campaign ledger home `data/campaign/` is gitignored runtime state, not
+touched by the gate; the DuckDB / SQLite databases are untouched.
+
+**CC5 — decision-tracking gate.** finding-041 is registered and `DEC-0120` is linked, pure-append:
+
+```
+uv run genome docs check          # exit 0 — capture + retrieval + lifecycle all hold
+```
+
+`DEC-0120` is the **last in-table ledger row**, recorded pure-append; finding-041 is its
+`detail-link`; the README findings-index was regenerated (`genome docs build-index`).
+
+**Residual (not gated here; carried to PR 2).** The live launch is **deferred** — the CLI is
+advisory (it never runs a sub-scope, never crosses a human gate). `advance_on_merge` /
+`apply_revalidation` are present + unit-tested but **not** CLI-wired; PR 2 wires them to the
+model-driven `/scope-run` conductor (`DEC-0099`-aligned; the engine-primary path is C2+D Phase 2).
+The `apply_revalidation` decision+kwargs type-tightening (overloads / discriminated union) is a
+deferred design-quality nit. See
+[`finding-041`](../findings/finding-041-campaign-orchestrator.md) "Consequences / follow-ups".
+
 ## When the protocol fails
 
 If any step fails, do not attempt to fix the failure locally before
