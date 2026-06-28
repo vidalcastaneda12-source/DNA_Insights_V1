@@ -157,6 +157,7 @@ function anchorsExposed(manifest) {
 }
 
 // ── Inlined agent seam (self-contained; no sibling import). ──────────────────
+// agent-seam:start
 async function withRetry(thunk, who) {
   let lastErr;
   for (let attempt = 1; attempt <= RETRY_LIMIT; attempt++) {
@@ -191,6 +192,7 @@ async function call(agentType, input, opts) {
   if (isolation) agentOpts.isolation = isolation; // isolation:'worktree' → engine worktree directive; NOT probe/harness-exercised (deferred-unverified, D7/suite7). Only the fan-out writer passes it.
   return withRetry(() => agent(prompt, agentOpts), agentType);
 }
+// agent-seam:end
 
 // ── Budget helpers. `budget.total` is null with no target (default path; probe-confirmed)
 // → remaining is Infinity → the exhaustion guard is a no-op and skeptic width stays full. ─

@@ -432,7 +432,8 @@ node --test .claude/workflows/__tests__/*.test.mjs
 
 The single skip is the **intentional Phase-2 reversal-gate placeholder** in `drift.test.mjs`
 (the Python-CLI reversal-gate is Phase 2 — see ROADMAP "Sub Project C2+D — Workflow-Engine
-Migration"). `0 fail` is the bar.
+Migration"). `0 fail` is the bar. (C2+D Phase 2 PR 2 **un-skips** this — post-Phase-2 the harness
+is **87 pass · 0 skip**; see the "C2+D Phase 2 gate" block below.)
 
 **EC4 — dev-loop byte-unchanged (negative control).** No Python / DDL / schema file moved:
 
@@ -463,6 +464,51 @@ absence is **not** a regression.
 not yet validated — and the `arch-1` drift-guard seam-coverage gap is latent/backlogged. See
 [`finding-034`](../findings/finding-034-agent-team-plan-phase.md) "C2D-Phase1 residual risk"
 and ROADMAP "Sub Project C2+D" Phase 2.
+
+## C2+D Phase 2 gate (reversal-gate + engine-primary CLI)
+
+This gate covers Sub Project C2+D Phase 2 (finding-034 Phase-2 Amendment / `DEC-0122`): PR 1 (the
+StructuredOutput schema 400-fix), PR 2 (the engine-primary CLI `genome workflows` + its
+fail-closed reversal-gate `genome workflows check` — seam-drift + schema-validity — the un-skipped
+`drift.test.mjs`, and the `workflows-gate` CI workflow), and PR 3 (D7 live-engine validation +
+arch-1 harness coverage + ROADMAP close).
+
+Like Phase 1 it is **JS-orchestration + a new DB-free Python gate + docs**: `applicable_anchors`
+is `[]`, no genome real-data anchor is re-locked, and the "Core commands" Python protocol is run
+only as a negative control (no `docs/schemas`/`ddl`/DB change).
+
+**PR 1 + PR 2 checks** (run from the repo root; `node` v24 at capture):
+
+- **Node harness green, 0 skips** (the `drift.test.mjs` EC5 placeholder is now un-skipped as the
+  gate's node mirror):
+
+  ```
+  node --test .claude/workflows/__tests__/*.test.mjs
+  # → 87 tests · 87 pass · 0 fail · 0 skipped
+  ```
+
+- **The reversal-gate passes on the real repo AND catches drift (anti-theatre):**
+
+  ```
+  uv run genome workflows check     # exit 0 — "workflows check: OK …"
+  uv run pytest backend/tests/test_workflows_gate.py backend/tests/test_workflows_no_db_import.py
+  # the seeded seam-drift / schema-regression tests assert non-zero + SEAM_DRIFT / SCHEMA_MISSING_TYPE
+  ```
+
+- **DB-free + config-free:** `genome workflows check` reaches a verdict with **no**
+  `APP_DB_PASSPHRASE`; `test_workflows_no_db_import.py` proves no `genome.db` import.
+
+- **Negative control:** the full Python protocol (`uv run pytest`, `ruff check`,
+  `ruff format --check`, `mypy --strict backend/src`) is clean; no `docs/schemas`/`ddl`/DB change;
+  `uv run genome docs check` exit 0 (`DEC-0122` pure-append, leaving `DEC-0099`/`DEC-0020` active).
+
+**Optional operator step (not done by the gate):** to make the reversal-gate merge-blocking, enable
+the `workflows-gate` workflow as a required status check in branch protection (Settings → Branches)
+— the same manual step the `docs-gate` workflow needs.
+
+**PR 3 (D7 + arch-1 + close)** is gated when it lands: the committed live-engine probe artifact
+(`docs/findings/c2d-d7-probe-<run-id>.js`), the exhaustive `parallel`/`pipeline` fan-out tests, and
+the ROADMAP `[ ]→[x]` flip that closes Sub Project C2+D.
 
 ## Sub Project B2 Phase 2 campaign gate (PR 1 — DB-free core)
 

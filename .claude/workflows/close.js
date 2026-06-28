@@ -58,6 +58,7 @@ export const meta = {
 // funnels through call() → withRetry() → the injected agent() primitive. ────────
 const RETRY_LIMIT = 2; // bounded retry on a transient agent/validation failure.
 
+// agent-seam:start
 async function withRetry(thunk, who) {
   let lastErr;
   for (let attempt = 1; attempt <= RETRY_LIMIT; attempt++) {
@@ -75,7 +76,7 @@ async function withRetry(thunk, who) {
 
 /**
  * Invoke a `.claude/agents/<name>.md` subagent. With `opts.schema` the engine returns
- * a schema-validated object; without it, the member's prose text is returned.
+ * a schema-validated object; without it, the member's prose (e.g. handoff-assembler).
  */
 async function call(agentType, input, opts) {
   const { schema, label, isolation } = opts || {};
@@ -92,6 +93,7 @@ async function call(agentType, input, opts) {
   if (isolation) agentOpts.isolation = isolation; // isolation:'worktree' → engine worktree directive; NOT probe/harness-exercised (deferred-unverified, D7/suite7). Only the fan-out writer passes it.
   return withRetry(() => agent(prompt, agentOpts), agentType);
 }
+// agent-seam:end
 
 // Output-shape contracts. Each `required` list is a subset of that member's documented
 // "Output" JSON keys (.claude/agents/<name>.md); the engine validates against it.

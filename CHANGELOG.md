@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- **Sub Project C2+D Phase 2 (PR 2) — engine-primary CLI + reversal-gate** (finding-034 /
+  `DEC-0122`). New DB-free `genome workflows` command group whose `genome workflows check` is a
+  fail-closed **reversal-gate** over the three self-contained per-scope-team workflows:
+  **seam-drift** (GT-1's duplicated `agent()`/retry seam stays logically identical — located via new
+  `// agent-seam:start`/`:end` sentinels + a unified `call()` JSDoc, normalized on the two legit
+  per-file dimensions, fail-closed if unlocatable) + **schema-validity** (every `SCHEMAS` entry
+  declares `type:'object'`, locking the PR-1 400-fix). Mirrors `genome docs check` (own
+  `model`/`seam`/`schemas`/`validator`/`cli`; clean-subprocess DB-free + config-free guards). Wired
+  into the dev-loop + a new `workflows-gate` CI workflow; the one intentionally-skipped
+  `drift.test.mjs` test (EC5) is **un-skipped** as the node mirror (harness now 87 pass · 0 skip).
+  Anti-theatre: the gate's tests prove it CATCHES a seeded seam-drift / schema regression, not just
+  that it exits 0. New module + tests + CI + docs only — **no `docs/schemas`/`ddl`/DB change**,
+  `applicable_anchors = []`. (#TBD)
 - **Sub Project C2+D Phase 2 (PR 1) — per-scope-team workflow StructuredOutput schema 400-fix**
   (finding-034). The three engine-dialect team workflows
   (`.claude/workflows/{plan-phase,implement-review,close}.js`) declared each per-agent

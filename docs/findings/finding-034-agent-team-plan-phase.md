@@ -55,6 +55,25 @@ ClaudeCodeVerification / ClaudeCodePlanning (no code was written that session).
 > the `DEC-0086`/`DEC-0087` precedent), not a supersession of this finding. The Stage-4 row in
 > `.claude/agents/README.md` is correspondingly flipped to *wired*.
 
+> **Amendment (Sub Project C2-D Phase 2, 2026-06-28 — `finding-034` / `DEC-0122`).** The
+> **reversal-gate** that the "C2D-Phase1 residual risk" section below flagged as Phase 2 has
+> **landed** (PR 1 + PR 2). PR 1 fixed the latent StructuredOutput 400 — all 21 `SCHEMAS` entries
+> across the three workflows are now valid JSON Schema (`type:'object'` + `properties` +
+> `additionalProperties: true`; permissive `{}` property values so the engine never over-constrains
+> an agent's real return), restoring the team workflows on the real engine (smoke run
+> `wf_812305d6-ef9`). PR 2 added the engine-primary CLI `genome workflows` and its DB-free,
+> fail-closed `genome workflows check` gate: **seam-drift** (GT-1's duplicated `agent()`/retry seam
+> stays logically identical, located via `// agent-seam:start`/`:end` sentinels and normalized on
+> the two legit per-file dimensions, fail-closed if unlocatable) + **schema-validity** (every
+> `SCHEMAS` entry declares `type:'object'`, locking the PR-1 fix). The gate mirrors
+> `genome docs check` (own `model`/`seam`/`schemas`/`validator`/`cli`, clean-subprocess DB-free
+> guard), is wired into the dev-loop + a `workflows-gate` CI workflow, and the one
+> intentionally-skipped `drift.test.mjs` test (EC5) is **un-skipped** as the gate's node mirror (the
+> harness is now 0-skips). Recorded pure-append (`DEC-0122`, leaving `DEC-0099`/`DEC-0020` active).
+> The two remaining residuals in the section below — **D7** (live-engine validation of the four
+> trigger-gated Stage-2 writers) and **arch-1** (exhaustive harness `parallel`/`pipeline` fan-out
+> coverage) — land in PR 3, which also flips the ROADMAP slot to close Sub Project C2+D.
+
 Decisions locked this session:
 
 - The planner uses **Option B** — a judge-panel of *diverse* candidate plans, not a
