@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- **Sub Project B2 Phase 2 (PR 1) — the `genome.campaign` campaign orchestrator core**
+  (finding-041 / `DEC-0120`). New **DB-free** module that sequences the sub-scopes a non-atomic
+  `scope-split` cut proposes through the two human gates as a persistent, resumable campaign: a
+  `CampaignStatus` state machine, an append-only JSONL ledger applying supersession-over-update
+  (decision #7) to its own runtime state (the current view is DERIVED as the latest-`record_seq`
+  record per sub-scope, never an in-place edit), adaptive re-validation
+  (still_needed/moot/changed/grown — re-split capped at one level via the reused
+  `MAX_RESPLIT_DEPTH`, then eject-loud), and the `genome campaign`
+  `start`/`dry-run`/`status`/`resume`/`cancel`/`write-roadmap` advisory CLI plus the `/campaign`
+  skill. Reflects live state into the existing `scope_split` `B2-SUBSCOPES` ROADMAP block via the
+  reused `append_roadmap_block` (no second writer/region). Both human gates
+  (`planning→implementing`, `implementing→merged`) are external-event-gated — the campaign
+  sequences and tees up but **never crosses a gate** and **never launches a sub-scope** (the
+  `/scope-run` conductor wiring is PR 2). DB-free core (no `genome.db` / `get_settings`,
+  clean-subprocess guard); new module + tests + docs only — **no `docs/schemas`/`ddl` change, no
+  DB write, no CLAUDE.md real-data digit change**. (#117)
 - Sub Project B2 Phase 1 scope-split calibration + coupling-signal decision (deferred follow-ups
   1 & 2, finding-039 / `DEC-0119`). **Validation + a recorded design decision, NOT a behavior
   change** — the detector's atomic/split logic and the `MAX_CUT_COST=0.25` / `MIN_SUBSCOPE_SHRINK=0.34`
