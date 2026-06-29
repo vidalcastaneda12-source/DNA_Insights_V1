@@ -83,6 +83,12 @@ actually landed.
    made no durable decision, write **"None"** explicitly — the absence is intentional,
    not an omission. Confirm `genome docs check` exits 0.
 
+   Likewise, capture any **newly-identified deferred or incomplete work** from this session
+   as a `ROADMAP.md` checklist line item with a fresh `RM-<7 hex>` id — `ROADMAP.md` is the
+   single source of truth for scope (finding-042 / `DEC-0125`), so a deferral must not live
+   only in a finding / PR body / comment. List the new `RM-` ids here, or write **"None"**
+   explicitly. Confirm `genome roadmap check` exits 0.
+
 8. **Pre-change pytest baseline / post-change pytest result.** State the test
    count before and after, and call out any tests added, removed, tightened,
    or relaxed with a one-line description of what changed in each. If the

@@ -40,12 +40,19 @@ You are the detector half of the pair; `knowledge-curator` is the fixer.
   decision-tracking analogue of the missing-CHANGELOG detector; run `genome docs check` and
   surface any `DECISION_WITHOUT_DEC_ROW`). Also a DEC `superseded_by` that dangles, or a
   decision cell that **copied** a real-data anchor instead of referencing it.
+- **Untracked scope (no ROADMAP `RM-` item)** — deferred or incomplete work recorded in a
+  finding / plan doc / runbook / code comment ("follow-up", "deferred", "out of scope",
+  "TODO") with **no** corresponding `ROADMAP.md` checklist line item (the source-of-truth
+  analogue of the missing-DEC-row detector — `ROADMAP.md` is the single source of truth for
+  scope, finding-042 / `DEC-0125`). Also surface any `genome roadmap check` violation
+  (`MISSING_ID` / `DUPLICATE_ID` / `DANGLING_REF`). Propose the fix as a new `RM-` line item
+  for `knowledge-curator` to add.
 
 ## Reads
 
 `CLAUDE.md` · `ROADMAP.md` · `docs/runbooks/verification.md` · `docs/findings/**` ·
-`CHANGELOG.md` · `MEMORY.md` · git history · CLI↔docs cross-refs · `genome docs check`
-output. **Read-only.**
+`CHANGELOG.md` · `MEMORY.md` · git history · CLI↔docs cross-refs · `genome docs check` +
+`genome roadmap check` output. **Read-only.**
 
 ## Output (return this JSON)
 

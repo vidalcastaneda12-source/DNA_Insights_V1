@@ -53,10 +53,17 @@ future session can rely on it without re-deriving it.
 - If this finding re-locks an anchor that appears in `CLAUDE.md` / `verification.md`, note
   that those must be updated too (that is `knowledge-curator`'s job at Stage 5) — a number
   re-locked in one place but not another is cross-doc drift.
+- If this finding records **deferred or incomplete work** (a "follow-up", an "out of scope"
+  item, a "deferred" sub-item), that work must **also** be captured in `ROADMAP.md` as a
+  checklist line item with a fresh `RM-<7 hex>` id, and the finding should back-reference that
+  id. `ROADMAP.md` is the single source of truth for scope (finding-042 / `DEC-0125`) — a
+  deferred item living only in a finding is invisible to planning; `genome roadmap check`
+  fails if the finding's `RM-` reference does not resolve to a ROADMAP line item.
 
 ## Done when
 
 The finding exists at `docs/findings/finding-NNN-<slug>.md` with its frontmatter block + all
 sections, numbers sourced from a real run (or explicitly `GATE-FILL`), cross-links in both
-directions, a `DEC-NNNN` ledger row appended for a decision/both finding, and
-`genome docs check` exiting 0.
+directions, a `DEC-NNNN` ledger row appended for a decision/both finding, any deferred work it
+records also captured as a `ROADMAP.md` `RM-` line item it back-references, and
+`genome docs check` + `genome roadmap check` exiting 0.
