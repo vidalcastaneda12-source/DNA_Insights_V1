@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- **ROADMAP.md as the single source of truth for scope — PR A: `RM-` ids + 22 promoted backlog items**
+  (finding-042 / `DEC-0125`). Every trackable ROADMAP line item now carries a frozen `RM-<7 hex>` id
+  (`RM-` + `sha1(slug)[:7]`); the existing "PR N" sequence labels are kept as a secondary alias, so the
+  ~69 existing "PR N" references across ROADMAP / `MEMORY.md` / `.claude/` stay valid with zero drift.
+  The 2026-06-29 three-agent repo audit surfaced ~22 pieces of deferred/incomplete work that lived only
+  in findings / plan-docs / code comments / runbooks; all are promoted into ROADMAP under a new
+  `## Cross-cutting backlog (2026-06-29 audit)` section plus targeted Phase 6/7/10 + sub-project inserts.
+  First of a 3-PR sequence: **PR B** adds the DB-free fail-closed `genome roadmap check` gate (id format +
+  uniqueness + findings↔ROADMAP referential integrity); **PR C** propagates the capture-forward convention
+  into CLAUDE.md + the work-capturing skills/agents. **Docs-only** (ROADMAP + finding-042 + `MEMORY.md`
+  ledger row); no `backend/` / `ddl` / DB change, `applicable_anchors = []`. (#126)
 - **Sub Project C1 Phase 2 (PR 2) — calibration enablement flip (`auto_tuning_enabled` true); CLOSE**
   (finding-040 / `DEC-0124`). **Closes Sub Project C1.** The gated, activating change: the live
   `risk_weights.json` is flipped `auto_tuning_enabled` false→true and `weights_version` rw-1→rw-2 as an
