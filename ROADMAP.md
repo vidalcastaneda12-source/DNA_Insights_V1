@@ -380,7 +380,7 @@ Each requires a deliberate schema-doc edit + `ddl` re-extract + `rm -rf data/ &&
 - [ ] RM-e150116 — **[operator] Enable the `workflows-gate` workflow as a required status check on `main`** — same toggle for the C2+D reversal-gate. (verification.md:505-507; U6)
 - [ ] RM-eda68be — **Markdown↔DDL parity CI check / re-extraction tool**: verify each schema-doc fenced SQL block matches `ddl/*.sql` (the `docs check` gate validates the ledger/frontmatter, not schema↔DDL parity). (finding-010 #16; U21)
 - [ ] RM-a128da3 — **Teach `scope_split` `roadmap_writer`/`formatter` to mint `RM-` ids for auto-written sub-scope slots** so the managed `<!-- B2-SUBSCOPES -->` region can later drop its gate exemption. (dogfood)
-- [ ] RM-9dc7915 — **`genome roadmap check` fail-closed gate** (PR B of this effort): validate RM-id format + uniqueness + findings↔ROADMAP referential integrity; DB-free; + `roadmap-gate` CI. (finding-042 / DEC-0125)
+- [x] RM-9dc7915 — **`genome roadmap check` fail-closed gate** (PR B of this effort): validate RM-id format + uniqueness + findings↔ROADMAP referential integrity; DB-free; + `roadmap-gate` CI. (finding-042 / DEC-0125)
 
 ### Documentation hygiene
 
@@ -390,11 +390,11 @@ Each requires a deliberate schema-doc edit + `ddl` re-extract + `rm -rf data/ &&
 - [ ] RM-66f4c75 — **Refresh README "Status"** (says "PR 7 next"; PR 7 closed-as-moot). (audit NOTES)
 - [ ] RM-4484526 — **Fix CLAUDE.md obs #6 stale line** ("strand-flip collapse deferred to PR 5" — shipped #73). (audit NOTES)
 
-### ROADMAP source-of-truth migration (this effort — dogfooded; mark PR A done)
+### ROADMAP source-of-truth migration (this effort — dogfooded; complete — PRs A/B/C merged)
 
-- [x] RM-96830ba — **PR A — ROADMAP restructure**: frozen `RM-` ids on every line item (PR-N kept as alias) + the 22 audit items + `finding-042` + `DEC-0125`. (this PR)
-- [ ] RM-1a55a3a — **PR B — `genome roadmap check` gate** (see Tooling item `roadmap-check-gate`).
-- [ ] RM-527258f — **PR C — capture-forward convention**: CLAUDE.md SoT rule + skill/agent updates routing new work into ROADMAP.
+- [x] RM-96830ba — **PR A — ROADMAP restructure**: frozen `RM-` ids on every line item (PR-N kept as alias) + the 22 audit items + `finding-042` + `DEC-0125`. (#126)
+- [x] RM-1a55a3a — **PR B — `genome roadmap check` gate** (see Tooling item `roadmap-check-gate`). (#127)
+- [x] RM-527258f — **PR C — capture-forward convention**: CLAUDE.md SoT rule + skill/agent updates routing new work into ROADMAP. (#128)
 
 ## Phase 6 — Analysis pipelines
 - [ ] RM-2ec2f39 — Load `pgs_score_weights` (per-variant PGS weights, overlapping-only per locked decision #5) → PRS computation against PGS Catalog
