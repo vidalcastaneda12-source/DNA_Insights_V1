@@ -44,6 +44,7 @@ from genome.ingest import Source, ingest_file
 from genome.ingest.liftover import LiftoverEngine
 from genome.merge import merge_all
 from genome.privacy.external_client import is_external_enabled, write_config_change_audit
+from genome.roadmap import roadmap_app
 from genome.scope_split import scope_split_app
 from genome.verify_gate import verify_gate_app
 from genome.workflows import workflows_app
@@ -99,6 +100,9 @@ app.add_typer(campaign_app, name="campaign")
 # workflows is eagerly registered; the DB-free guarantee (no genome.db) is carried by the
 # package-local clean-subprocess test (test_workflows_no_db_import.py), not by lazy import.
 app.add_typer(workflows_app, name="workflows")
+# roadmap is eagerly registered; the DB-free guarantee (no genome.db) is carried by the
+# package-local clean-subprocess test (test_roadmap_no_db_import.py), not by lazy import.
+app.add_typer(roadmap_app, name="roadmap")
 imputation_app.add_typer(panel_app, name="panel")
 
 
