@@ -43,6 +43,7 @@ from genome.calibration.persistence import (
     append_outcome,
     load_audit,
     load_outcomes,
+    pending_parked,
     read_manifest,
     read_weights,
     write_manifest,
@@ -273,3 +274,56 @@ def test_default_weights_path_is_the_package_relative_git_tracked_file() -> None
     tail = DEFAULT_WEIGHTS_PATH.parts[-5:]
     assert tail == ("backend", "src", "genome", "calibration", "risk_weights.json")
     assert "data" not in DEFAULT_WEIGHTS_PATH.parts
+
+
+# ── pending_parked: consumed-row exclusion (finding-040 FIX-2) ─────────────────
+
+
+def _parked(candidate: RiskWeights) -> AuditRow:
+    """An un-applied PARK_FOR_APPROVAL audit row carrying ``candidate``."""
+    decision = RatchetDecision(
+        disposition=Disposition.PARK_FOR_APPROVAL,
+        knob="c_map.pipeline",
+        direction=Direction.TIGHTEN,
+        candidate_weights=candidate,
+        backtest_clean=True,
+        knob_covered=False,
+        cited_merged_shas=("sha-a",),
+        rationale="parked",
+        auto_applicable=False,
+    )
+    return AuditRow(date="2026-06-25", applied=False, decision=decision)
+
+
+def _approved(candidate: RiskWeights) -> AuditRow:
+    """The ``applied=True`` AUTO_COMMIT row an approval appends (the consumption marker)."""
+    decision = RatchetDecision(
+        disposition=Disposition.AUTO_COMMIT,
+        knob="c_map.pipeline",
+        direction=Direction.TIGHTEN,
+        candidate_weights=candidate,
+        backtest_clean=True,
+        knob_covered=False,
+        cited_merged_shas=("sha-a",),
+        rationale="approved",
+        auto_applicable=True,
+    )
+    return AuditRow(date="2026-06-26", applied=True, decision=decision)
+
+
+def test_pending_parked_excludes_a_consumed_row_and_keeps_an_unapproved_one() -> None:
+    """from: finding-040 FIX-2 (an approved parked row is consumed; an un-approved one stays).
+
+    A parked candidate whose value-equal ``applied=True`` row exists is consumed (insert-then-
+    supersede, never re-selected); a parked candidate with no matching applied row stays pending —
+    so a clean-by-vacuity tighten is approvable exactly once and older parked rows do not strand.
+    """
+    cand_a = dataclasses.replace(
+        SEED_RISK_WEIGHTS, c_map={**SEED_RISK_WEIGHTS.c_map, "pipeline": 4}, weights_version="rw-2"
+    )
+    cand_b = dataclasses.replace(
+        SEED_RISK_WEIGHTS, c_map={**SEED_RISK_WEIGHTS.c_map, "cli": 2}, weights_version="rw-2"
+    )
+    rows = [_parked(cand_a), _approved(cand_a), _parked(cand_b)]
+    pending = pending_parked(rows)
+    assert [row.decision.candidate_weights for row in pending] == [cand_b]

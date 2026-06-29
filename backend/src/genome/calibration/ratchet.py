@@ -118,6 +118,40 @@ def classify_direction(base: RiskWeights, candidate: RiskWeights) -> Direction:
     return Direction.TIGHTEN
 
 
+def _flatten_knobs(weights: RiskWeights) -> dict[str, int]:
+    """Flatten the tunable additive maps + the two thresholds to one ``{knob_id: value}`` dict.
+
+    The knob ids match :data:`~genome.calibration.model.KNOB_COVERAGE` /
+    :attr:`~genome.calibration.model.RatchetDecision.knob` (``c_map.cli`` / ``b_buckets.small`` /
+    ``t2`` …). ``weights_version`` / ``provenance`` / ``auto_tuning_enabled`` are deliberately
+    excluded — they are not tunable score knobs.
+    """
+    flat: dict[str, int] = {f"c_map.{label}": value for label, value in weights.c_map.items()}
+    flat.update({f"b_buckets.{label}": value for label, value in weights.b_buckets.items()})
+    flat.update({f"p_levels.{label}": value for label, value in weights.p_levels.items()})
+    flat["t1"] = weights.t1
+    flat["t2"] = weights.t2
+    return flat
+
+
+def nontarget_knobs_unchanged(live: RiskWeights, candidate: RiskWeights, knob: str) -> bool:
+    """``True`` iff ``candidate`` equals ``live`` on every tunable knob EXCEPT ``knob``.
+
+    The lost-update guard for ``apply-parked`` (plan §4 T1 / finding-040 FIX-1). A parked candidate
+    is a one-knob delta on the park-time live weights; if an intervening ``AUTO_COMMIT`` moved a
+    **different** knob before approval, writing the stale park-time snapshot wholesale would
+    silently revert it — and a tier-neutral revert slips both the back-test and direction
+    re-checks. This compares the two weights on all tunable knobs other than the parked target
+    ``knob`` and returns ``False`` the moment any of them diverged, the fail-closed signal for the
+    CLI to refuse the apply (the human must re-run the ratchet against current live).
+    """
+    live_knobs = _flatten_knobs(live)
+    candidate_knobs = _flatten_knobs(candidate)
+    live_knobs.pop(knob, None)
+    candidate_knobs.pop(knob, None)
+    return live_knobs == candidate_knobs
+
+
 def _disposition(direction: Direction, *, backtest_clean: bool, knob_covered: bool) -> Disposition:
     """The asymmetric reduction: loosen → PARK · dirty → SUPPRESSED · vacuity → PARK · else COMMIT.
 
