@@ -86,9 +86,6 @@ cleanup + `MAPPED_TRAIT_URI` (finding-010 #12) → PR 8, orphan-row cleanup proc
 The one remaining non-actionable item, cross-source generalization of the version-pointer
 pattern (finding-010 #15), is tracked under "Deliberately deferred" in that sequence.
 
-Deferred to later phases:
-- [ ] RM-d86d4fc — Genes / traits / pathways dictionary tables — primarily serve insight generation and rendering; defer to Phase 7. The loaders we ship in Phase 5 carry gene symbols and trait IDs inline, so the index does not need the dictionaries to do its joins. (The minimal FK-satisfying genes seed — gene symbols only, enough to unblock the four NOT NULL genes FKs — lands earlier as PR 6 in the pre-Phase-6 sequence; only the full genes / traits / pathways dictionaries with descriptions and rendering metadata defer to Phase 7.)
-
 **Verification:** all seven annotation source loaders complete (ClinVar, GWAS Catalog, PharmGKB, CPIC, PGS Catalog metadata, gnomAD, dbSNP); `variant_annotations_index` populated with the expected per-variant join across them (VEP columns NULL pending Phase 6's VEP runner); queries against `variant_full_v` view return joined annotations.
 
 ## Pre-Phase-6 sequence
@@ -420,6 +417,7 @@ Follow-ups (gated on `pgs_score_weights` landing):
 **Verification:** each pipeline produces non-zero output on the merged+imputed dataset; supersession works on re-run.
 
 ## Phase 7 — Insight generation
+- [ ] RM-d86d4fc — Genes / traits / pathways dictionary tables (full) — primarily serve insight generation and rendering. The loaders we ship in Phase 5 carry gene symbols and trait IDs inline, so the index does not need the dictionaries to do its joins. (The minimal FK-satisfying genes seed — gene symbols only, enough to unblock the five NOT NULL genes FKs — landed earlier as PR 6 in the pre-Phase-6 sequence; only the full genes / traits / pathways dictionaries with descriptions and rendering metadata remain, here in their home phase.)
 - [ ] RM-9c15e0f — Per-analysis-type insight generators in `genome.insights.*`
 - [ ] RM-3d8bfd1 — Versioned tier mapping functions
 - [ ] RM-16e06ae — Confidence rollup
