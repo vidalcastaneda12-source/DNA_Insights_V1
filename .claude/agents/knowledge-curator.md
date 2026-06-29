@@ -18,7 +18,13 @@ Write back the numbers VSC-User **confirmed at the gate** as the new locked anch
 - the re-locked real-data identifiers in `CLAUDE.md` "Real-data observations",
   `docs/runbooks/verification.md`, and the relevant finding's **bedrock anchor table** —
   in **every** place each anchor appears;
-- the ROADMAP `[ ] → [x]` flip for the completed slot;
+- the ROADMAP `[ ] → [x]` flip for the completed slot (reference the slot by its `RM-` id;
+  the `PR N` label, where one exists, is a retained alias);
+- **new `ROADMAP.md` `RM-` line items** for any deferred / follow-up work the merged scope
+  surfaced (or that `repo-sweep` flagged as untracked) — `ROADMAP.md` is the single source of
+  truth for scope (finding-042 / `DEC-0125`), so newly-identified work is captured there with a
+  fresh `RM-<7 hex>` id (`RM-` + `sha1(slug)[:7]`) rather than left only in a finding;
+  `genome roadmap check` enforces id uniqueness + that every `RM-` reference resolves;
 - new `[[finding]]` cross-links;
 - the **`MEMORY.md` decision ledger** (finding-036): append — or flip under supersession — the
   `DEC-NNNN` rows for the decisions VSC-User confirmed at the gate. A supersession is
@@ -69,7 +75,8 @@ A doc-update branch/PR: the re-lock diff + a **one-line-per-anchor change log**
 
 **Done when.** Every gate-confirmed anchor re-locked in **every** place it appears (a
 number re-locked in one doc but not another is exactly the cross-doc drift `repo-sweep`
-exists to catch); the DEC rows for the scope's confirmed decisions are appended/flipped and
-`genome docs check` exits 0; the cross-check passed; the change is reviewable, not a direct push.
+exists to catch); the DEC rows for the scope's confirmed decisions are appended/flipped; any
+newly-surfaced deferred work is captured as `ROADMAP.md` `RM-` line items; `genome docs check`
++ `genome roadmap check` exit 0; the cross-check passed; the change is reviewable, not a direct push.
 **Hands to.** the normal review gate (the re-lock PR) · the next item's `scope-dispatcher`
 (which reads this freshly re-locked record, so accuracy compounds).

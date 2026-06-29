@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- **ROADMAP source-of-truth — PR C: capture-forward convention** (finding-042 / `DEC-0125`).
+  Propagates the "ROADMAP.md is the single source of truth for scope" rule so newly-identified
+  deferred/incomplete work is captured into ROADMAP (with an `RM-` id) rather than left only in a
+  finding / plan / comment: a new CLAUDE.md Conventions rule + "Read this before any work" note; the
+  `/new-finding` skill (deferred work → an `RM-` ROADMAP item it back-references); the `/handoff`
+  contract (list newly-captured `RM-` ids or "None"); the `knowledge-curator` agent (adds new `RM-`
+  items at Stage-5 close, references slots by `RM-` id); and the `repo-sweep` agent (new
+  "untracked scope (no ROADMAP `RM-` item)" detector). Docs / agent-prompts only — no `backend/` /
+  `ddl` / DB change. Stacked on PR B (#127). (#PR_C)
 - **ROADMAP source-of-truth gate — PR B: `genome roadmap check`** (finding-042 / `DEC-0125`). New
   DB-free, config-free, fail-closed `genome roadmap` Typer sub-app + `genome/roadmap/` core keeping
   ROADMAP.md authoritative: every top-level checklist item carries a unique `RM-<7 hex>` id
