@@ -38,7 +38,7 @@ import datetime
 import json
 import sys
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import structlog
 import typer
@@ -61,12 +61,21 @@ from genome.calibration.persistence import (
     append_outcome,
     load_audit,
     load_outcomes,
+    pending_parked,
     read_manifest,
     read_weights,
     write_manifest,
     write_weights,
 )
-from genome.calibration.ratchet import classify_direction, propose_ratchet
+from genome.calibration.ratchet import (
+    classify_direction,
+    nontarget_knobs_unchanged,
+    propose_ratchet,
+)
+
+if TYPE_CHECKING:
+    from genome.calibration.backtest import BacktestResult
+    from genome.calibration.model import Direction, RatchetDecision, RiskWeights
 
 logger = structlog.get_logger(__name__)
 
@@ -362,6 +371,44 @@ def show_weights_cmd(
     typer.echo(f"p_levels: {dict(weights.p_levels)}")
 
 
+def _apply_refusal(
+    live: RiskWeights,
+    candidate: RiskWeights,
+    decision: RatchetDecision,
+    result: BacktestResult,
+    current_direction: Direction,
+) -> str | None:
+    """The first failing apply-time guard's message for ``apply-parked``, or ``None`` if all pass.
+
+    The fail-closed re-check order before a parked candidate may be written:
+
+    * **FIX-3 — kill switch:** ``apply-parked`` HONORS ``auto_tuning_enabled`` (VSC-User Gate-1
+      decision, 2026-06-28); off → refuse, so toggling the switch off re-freezes the human-approval
+      path too (mirrors :func:`~genome.calibration.ratchet.propose_ratchet`'s first gate).
+    * **back-test:** the candidate must still flip no frozen back-test row (TOCTOU).
+    * **direction:** the live-vs-candidate direction must still match the parked direction.
+    * **FIX-1 — lost update:** the parked candidate is a one-knob delta on the park-time live
+      weights; if an intervening ``AUTO_COMMIT`` moved a DIFFERENT knob, writing the snapshot
+      wholesale would revert it (a tier-neutral revert slips the two checks above). Refuse unless
+      the candidate still matches current live on every non-target knob.
+    """
+    if not live.auto_tuning_enabled:
+        return (
+            "auto-tuning disabled (kill switch off); parked approval frozen — "
+            "no weight write until signoff"
+        )
+    if not result.clean:
+        return "re-check failed: candidate now flips a back-test row; NOT applied"
+    if decision.direction is not None and current_direction is not decision.direction:
+        return (
+            f"re-check failed: direction changed since park "
+            f"({decision.direction.value} → {current_direction.value}); NOT applied"
+        )
+    if decision.knob is not None and not nontarget_knobs_unchanged(live, candidate, decision.knob):
+        return "re-check failed: live weights moved on another knob since park; NOT applied"
+    return None
+
+
 @calibration_app.command("apply-parked")
 def apply_parked_cmd(
     *,
@@ -378,16 +425,17 @@ def apply_parked_cmd(
 ) -> None:
     """One-click human approval of a parked loosen / clean-by-vacuity tighten (plan §4 T7).
 
-    Reads the latest parked decision from the audit log, re-runs the back-test + direction check
-    (TOCTOU guard: the ledger may have moved since the park), and — only if it still holds —
-    writes the candidate weights + emits the :class:`~genome.calibration.commit_plan.CommitPlan`
-    for the skill. ``--dry-run`` (default) re-checks and reports without changing anything.
+    Reads the latest **un-consumed** parked decision (:func:`~genome.calibration.persistence.
+    pending_parked` — FIX-2), re-runs the back-test + direction check (TOCTOU guard: the ledger may
+    have moved since the park), and — only if every guard still holds — writes the candidate
+    weights + emits the :class:`~genome.calibration.commit_plan.CommitPlan` for the skill. The apply
+    path is fail-closed on four guards in order: the kill switch (``auto_tuning_enabled`` —
+    apply-parked HONORS it, FIX-3), the back-test, the direction re-check, and a non-target-knob
+    lost-update guard (FIX-1). On approval the appended ``applied=True`` row consumes the parked row
+    (insert-then-supersede, FIX-2), so it is approvable exactly once. ``--dry-run`` (default)
+    re-checks and reports without changing anything.
     """
-    parked = [
-        row
-        for row in load_audit()
-        if row.decision.disposition is Disposition.PARK_FOR_APPROVAL and not row.applied
-    ]
+    parked = pending_parked(load_audit())
     if not parked:
         typer.echo("no parked decision awaiting approval")
         return
@@ -412,20 +460,16 @@ def apply_parked_cmd(
     if not apply_changes:
         typer.echo("--dry-run: re-checked only; nothing written")
         return
-    if not result.clean:
-        typer.echo("re-check failed: candidate now flips a back-test row; NOT applied")
-        return
-    if decision.direction is not None and current_direction is not decision.direction:
-        typer.echo(
-            f"re-check failed: direction changed since park "
-            f"({decision.direction.value} → {current_direction.value}); NOT applied"
-        )
+    refusal = _apply_refusal(live, candidate, decision, result, current_direction)
+    if refusal is not None:
+        typer.echo(refusal)
         return
 
     approved = dataclasses.replace(
         decision, disposition=Disposition.AUTO_COMMIT, auto_applicable=True
     )
-    # Audit BEFORE the weights mutate — no un-audited tune (mirrors `ratchet --apply`).
+    # Audit BEFORE the weights mutate — no un-audited tune (mirrors `ratchet --apply`). The
+    # applied=True row also CONSUMES the parked row (FIX-2): pending_parked excludes it next time.
     append_audit(AuditRow(date=_today(), applied=True, decision=approved))
     write_weights(candidate)
     typer.echo(json.dumps(render_commit_plan(approved).to_json()))

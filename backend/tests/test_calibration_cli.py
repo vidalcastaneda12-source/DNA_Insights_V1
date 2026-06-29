@@ -45,6 +45,7 @@ from genome.calibration.model import (
     RiskWeights,
 )
 from genome.calibration.persistence import DEFAULT_WEIGHTS_PATH
+from genome.calibration.ratchet import nontarget_knobs_unchanged
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -412,3 +413,109 @@ def test_apply_parked_apply_rejects_when_direction_changed_since_park(
     assert "direction changed since park" in result.stdout
     assert events == []
     assert written == []
+
+
+# ── PR-1 pre-enablement must-fixes: apply-parked kill-switch (FIX-3), consumption (FIX-2),
+#    lost-update (FIX-1). All are unreachable while dark (no PARK row exists), so these prove the
+#    ACTIVATED write path is correct. ──
+
+
+def test_apply_parked_honors_the_kill_switch_when_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """from: finding-040 FIX-3 (apply-parked HONORS auto_tuning_enabled — VSC-User Gate-1 decision).
+
+    With a parked decision but the live config's kill switch OFF (reachable only via
+    toggle-off-after-park), the one-click apply REFUSES to write — "no weight write until signoff".
+    The kill switch re-freezes the human-approval path, not just the automatic ratchet.
+    """
+    parked = _parked_row(_clean_tighten_candidate(), Direction.TIGHTEN)
+    monkeypatch.setattr(cli_mod, "load_audit", _const([parked]))
+    # SEED_RISK_WEIGHTS ships auto_tuning_enabled=False (the dark/disabled live config).
+    monkeypatch.setattr(cli_mod, "read_weights", _const(SEED_RISK_WEIGHTS))
+    events, _audit, written = _capture_writes(monkeypatch)
+
+    result = CliRunner().invoke(calibration_app, ["apply-parked", "--apply"])
+    assert result.exit_code == 0, result.output
+    assert "kill switch off" in result.stdout
+    assert events == []
+    assert written == []
+
+
+def test_apply_parked_consumes_the_parked_row_so_it_is_not_re_appliable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """from: finding-040 FIX-2 (an approved parked row is consumed — insert-then-supersede).
+
+    Once an ``applied=True`` row carrying the same candidate exists, the parked row is consumed:
+    ``apply-parked`` finds nothing pending (no duplicate write / duplicate CommitPlan / empty
+    re-commit), proving the approval retires the PARK row without an in-place edit.
+    """
+    candidate = _clean_tighten_candidate()
+    parked = _parked_row(candidate, Direction.TIGHTEN)
+    approved = AuditRow(
+        date="2026-06-26",
+        applied=True,
+        decision=dataclasses.replace(
+            parked.decision, disposition=Disposition.AUTO_COMMIT, auto_applicable=True
+        ),
+    )
+    monkeypatch.setattr(cli_mod, "load_audit", _const([parked, approved]))
+    monkeypatch.setattr(cli_mod, "read_weights", _const(cl.enabled()))
+    events, _audit, written = _capture_writes(monkeypatch)
+
+    result = CliRunner().invoke(calibration_app, ["apply-parked", "--apply"])
+    assert result.exit_code == 0, result.output
+    assert "no parked decision" in result.stdout
+    assert events == []
+    assert written == []
+
+
+def test_apply_parked_rejects_a_stale_snapshot_lost_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """from: finding-040 FIX-1 (the stale full-snapshot apply / lost-update guard).
+
+    The parked candidate is a clean-by-vacuity ``c_map.pipeline`` tighten built on the seed; an
+    intervening auto-commit then moved a DIFFERENT knob (``c_map.cli`` 1→2) in live. The candidate
+    is still back-test-clean AND its direction is still TIGHTEN, so it slips both existing TOCTOU
+    re-checks — ONLY the non-target-knob guard catches that writing the stale snapshot would revert
+    the ``c_map.cli`` move. The apply is refused, nothing written.
+    """
+    parked = _parked_row(_clean_tighten_candidate(), Direction.TIGHTEN)  # knob = c_map.pipeline
+    live = dataclasses.replace(
+        cl.enabled(),
+        c_map={**SEED_RISK_WEIGHTS.c_map, "cli": 2},  # the intervening different-knob auto-commit
+        weights_version="rw-2",
+    )
+    monkeypatch.setattr(cli_mod, "load_audit", _const([parked]))
+    monkeypatch.setattr(cli_mod, "read_weights", _const(live))
+    events, _audit, written = _capture_writes(monkeypatch)
+
+    result = CliRunner().invoke(calibration_app, ["apply-parked", "--apply"])
+    assert result.exit_code == 0, result.output
+    assert "moved on another knob" in result.stdout
+    assert events == []
+    assert written == []
+
+
+def test_nontarget_knobs_unchanged_true_on_a_pure_one_knob_delta() -> None:
+    """from: finding-040 FIX-1 unit (the lost-update guard passes a faithful one-knob delta).
+
+    A candidate that differs from live on ONLY the target knob is a clean one-step delta — the
+    guard returns ``True`` (the apply may proceed).
+    """
+    candidate = dataclasses.replace(
+        SEED_RISK_WEIGHTS, c_map={**SEED_RISK_WEIGHTS.c_map, "tests": 2}
+    )
+    assert nontarget_knobs_unchanged(SEED_RISK_WEIGHTS, candidate, "c_map.tests") is True
+
+
+def test_nontarget_knobs_unchanged_false_when_a_second_knob_diverged() -> None:
+    """from: finding-040 FIX-1 unit (the guard catches a second, non-target knob divergence).
+
+    A candidate that also differs on a non-target knob is a stale snapshot — the guard returns
+    ``False`` (refuse the apply rather than silently revert the other knob).
+    """
+    candidate = dataclasses.replace(
+        SEED_RISK_WEIGHTS, c_map={**SEED_RISK_WEIGHTS.c_map, "tests": 2, "cli": 2}
+    )
+    assert nontarget_knobs_unchanged(SEED_RISK_WEIGHTS, candidate, "c_map.tests") is False

@@ -26,15 +26,20 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import structlog
 
 from genome.calibration.model import (
     AuditRow,
+    Disposition,
     OutcomeRecord,
     PredictedManifest,
     RiskWeights,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 logger = structlog.get_logger(__name__)
 
@@ -108,6 +113,34 @@ def append_audit(row: AuditRow, path: Path = DEFAULT_AUDIT_PATH) -> None:
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row.to_json()) + "\n")
     logger.info("calibration.audit.appended", path=str(path), applied=row.applied)
+
+
+def pending_parked(rows: Sequence[AuditRow]) -> list[AuditRow]:
+    """The parked decisions still awaiting approval — consumed rows excluded (plan §4 T2 / FIX-2).
+
+    Pure (no I/O): the caller passes :func:`load_audit`'s result. A ``PARK_FOR_APPROVAL`` audit row
+    stays *pending* until an ``apply-parked`` approval consumes it — the approval appends an
+    ``applied=True`` row carrying the **same** ``candidate_weights``, which is the
+    insert-then-supersede consumption marker (never an in-place edit, finding-040 LIFECYCLE). This
+    returns the un-applied PARK rows whose candidate has no matching applied row, so a clean-by-
+    vacuity tighten is approvable exactly once (no re-selection → no duplicate ``CommitPlan`` /
+    empty re-commit, and no stranding of older parked rows behind it).
+
+    Equality is by value over a list, not a set:
+    :class:`~genome.calibration.model.RiskWeights` carries ``Mapping`` fields and is unhashable.
+    """
+    applied_candidates = [
+        row.decision.candidate_weights
+        for row in rows
+        if row.applied and row.decision.candidate_weights is not None
+    ]
+    return [
+        row
+        for row in rows
+        if row.decision.disposition is Disposition.PARK_FOR_APPROVAL
+        and not row.applied
+        and row.decision.candidate_weights not in applied_candidates
+    ]
 
 
 def write_manifest(

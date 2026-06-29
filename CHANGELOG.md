@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- **Sub Project C1 Phase 2 (PR 1) — calibration `apply-parked` write-path hardening + loop-closure test**
+  (finding-040 / `DEC-0123`). The three pre-enablement must-fixes on the (still-dark) `apply-parked` /
+  `ratchet --apply` write path, with their deferred tests, plus the deterministic loop-closure test — all
+  while `auto_tuning_enabled` stays `false` (the system stays report-only). **FIX-1** (stale full-snapshot
+  / lost-update): new pure `ratchet.nontarget_knobs_unchanged` guard refuses an apply whose candidate
+  diverged from current live on a non-target knob — the only tooth that catches a tier-neutral
+  different-knob revert (ordered after the back-test + direction re-checks). **FIX-2** (re-appliable parked
+  row): new pure `persistence.pending_parked` selector consumes a parked row via the approval's
+  `applied=True` row (insert-then-supersede, no in-place edit), so it is approvable exactly once — no
+  duplicate `CommitPlan` / empty re-commit. **FIX-3** (kill switch): `apply-parked` now HONORS
+  `auto_tuning_enabled` (VSC-User Gate-1 decision) — refusing to write when off, so the switch re-freezes
+  both write paths. New `test_calibration_loop_closure.py` proves the loop closes: a 12-outcome ledger →
+  ratchet `AUTO_COMMIT` → `write_weights` → `read_weights` → `compute_tier` flips a boundary manifest
+  Tier 1 → Tier 2. The four `apply-parked` apply-gates are extracted into a pure `_apply_refusal` helper.
+  Calibration-only; **no `docs/schemas`/`ddl`/DB change**, `applicable_anchors = []`. (#124)
 - **Sub Project C2+D Phase 2 (PR 3) — D7 live-engine validation + arch-1 harness coverage; CLOSE**
   (finding-034 / `DEC-0122`). **Closes Sub Project C2+D.** **D7:** a committed live-engine probe
   (`docs/findings/c2d-d7-probe-wf_f3e8d649-a1a.js`, run `wf_f3e8d649-a1a`) ran all four

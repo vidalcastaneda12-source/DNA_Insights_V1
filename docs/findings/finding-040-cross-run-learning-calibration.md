@@ -174,6 +174,27 @@ to act on — the whole ratchet→park→apply chain is inert until the enableme
 - **Coverage of the above is deferred** with them: tests for `apply-parked` under kill-switch-off, parked-
   row re-apply/consumption, and stale-snapshot clobber land with the enablement fixes they exercise.
 
+**Resolution — PR 1 (Sub Project C1 Phase 2, 2026-06-28; still dark).** All three are fixed in the
+`apply-parked` write path, with their deferred tests, while `auto_tuning_enabled` stays `false`:
+
+- **Stale full-snapshot apply** → `ratchet.nontarget_knobs_unchanged(live, candidate, knob)` is the
+  fail-closed lost-update guard: `apply-parked --apply` refuses unless the candidate still matches
+  current live on every non-target knob (the "assert non-target knobs equal live" remedy). It is ordered
+  AFTER the back-test + direction re-checks, so it is the *only* tooth that catches a tier-neutral
+  different-knob revert.
+- **Parked row never consumed** → `persistence.pending_parked(rows)` excludes any PARK row whose
+  `candidate_weights` is value-equal to a later `applied=True` row; the approval's `applied=True` row is
+  the **insert-then-supersede** consumption marker (no in-place edit, no model change). A parked decision
+  is now approvable exactly once — no duplicate `CommitPlan` / empty re-commit, no stranding.
+- **`apply-parked` + kill switch** → **HONOR** (VSC-User Gate-1 decision, 2026-06-28; `DEC-0123`):
+  `apply-parked` reads `auto_tuning_enabled` and refuses to write when it is `false`, so the kill switch
+  re-freezes the *entire* write surface (`ratchet --apply` **and** `apply-parked`) — "no weight write
+  until signoff". The manual-override (exempt) alternative was declined for the repo's fail-closed culture.
+
+The deterministic **loop-closure test** (`test_calibration_loop_closure.py`) also landed in PR 1: it drives
+a 12-outcome ledger → ratchet `AUTO_COMMIT` → `write_weights` → `read_weights` → `compute_tier` and asserts
+a boundary manifest flips Tier 1 → Tier 2 across the apply — the loop provably closes.
+
 Lower-severity Stage-3 review nits deferred to the backlog (non-blocking, dark or report-only):
 reference-table doc-drift after the first tighten (accepted per `DEC-0095`); `per_knob_tally` silently
 dropping an unattributable all-zero-breakdown outcome (fail-safe direction, report-only); assorted
