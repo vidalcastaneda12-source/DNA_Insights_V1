@@ -1,0 +1,29 @@
+name: roadmap-gate
+
+# Source-of-truth gate (finding-042 / DEC-0125): run `genome roadmap check` on every push to
+# main and every PR. The gate keeps ROADMAP.md authoritative — every top-level checklist item
+# carries a unique RM-<7 hex> id, and every RM- id cited in docs/findings/*.md, MEMORY.md, or
+# CHANGELOG.md resolves to one defined in ROADMAP.md. It is DB-free and config-free (needs no
+# APP_DB_PASSPHRASE), mirroring docs-gate.yml and workflows-gate.yml.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  roadmap-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      # Skip the two from-source packages whose system libs are absent on the runner: cyvcf2
+      # (htslib/libcurl) and pysqlcipher3 (SQLCipher headers). The gate is DB-free + config-free
+      # and `genome.cli` is pysqlcipher3-lazy, so it imports neither; dropping them keeps CI fast.
+      - name: Sync dependencies (without cyvcf2 or pysqlcipher3)
+        run: uv sync --no-install-package cyvcf2 --no-install-package pysqlcipher3
+      # The gate's non-zero exit fails this step (and the job). No `|| true`, no
+      # `continue-on-error` — a swallowed exit would make the gate enforcement theatre.
+      - name: Source-of-truth gate (genome roadmap check)
+        run: uv run --no-sync genome roadmap check
