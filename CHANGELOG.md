@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   First of a 3-PR sequence: **PR B** adds the DB-free fail-closed `genome roadmap check` gate (id format +
   uniqueness + findings↔ROADMAP referential integrity); **PR C** propagates the capture-forward convention
   into CLAUDE.md + the work-capturing skills/agents. **Docs-only** (ROADMAP + finding-042 + `MEMORY.md`
-  ledger row); no `backend/` / `ddl` / DB change, `applicable_anchors = []`. (#PR_A)
+  ledger row); no `backend/` / `ddl` / DB change, `applicable_anchors = []`. (#126)
 - **Sub Project C1 Phase 2 (PR 2) — calibration enablement flip (`auto_tuning_enabled` true); CLOSE**
   (finding-040 / `DEC-0124`). **Closes Sub Project C1.** The gated, activating change: the live
   `risk_weights.json` is flipped `auto_tuning_enabled` false→true and `weights_version` rw-1→rw-2 as an
