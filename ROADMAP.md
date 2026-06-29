@@ -230,7 +230,7 @@ Tracked here per the 2026-06-26 repo sweep (each previously lived only in its fi
 ROADMAP slot). These are **orthogonal to Phase-6 entry** — they continue the `/scope-run`
 enhancement sub-projects, not the dbSNP-backfill cleanup, and none gates the Phase 6 analyses.
 
-- [ ] **Sub Project C1 — Phase 2 (calibration enablement, [`finding-040`](docs/findings/finding-040-cross-run-learning-calibration.md)).**
+- [x] **Sub Project C1 — Phase 2 (calibration enablement, [`finding-040`](docs/findings/finding-040-cross-run-learning-calibration.md)).**
   C1 shipped report-only (`auto_tuning_enabled=false`, ratchet dark). The enablement flip
   (`auto_tuning_enabled=true`) is gated on the loop-closure test, a VSC-User `tier_in_hindsight`
   decision, and three **pre-enablement must-fixes** in the dark `apply-parked` / `ratchet --apply`
@@ -241,6 +241,13 @@ enhancement sub-projects, not the dbSNP-backfill cleanup, and none gates the Pha
   `auto_tuning_enabled=false`?) — plus the deferred test coverage for all three. Also deferred
   here: the dispatcher/splitter `est_risk_tier` convergence PR (the splitter stays advisory until
   then) and the unattended every-N-merges close-hook auto-commit (on-demand `/calibrate` is first).
+  **Done (2026-06-28):** PR 1 (#124, `DEC-0123`, still dark) landed the three must-fixes + the
+  deterministic loop-closure test + the HONOR kill-switch policy; PR 2 (#125, `DEC-0124`) flipped the live
+  `risk_weights.json` to `auto_tuning_enabled=true` / `rw-2` (live-file-only insert-then-flip
+  supersession — `SEED_RISK_WEIGHTS` stays the immutable `rw-1`/dark reconciliation + back-test +
+  kill-switch baseline) with a reversibility falsifier. The two further-deferred follow-ons (the
+  dispatcher/splitter `est_risk_tier` convergence PR; the unattended every-N-merges close-hook
+  auto-commit) **remain open**.
 - [x] **Sub Project B2 — Phase 2 (`genome.campaign`, [`finding-041`](docs/findings/finding-041-campaign-orchestrator.md)).**
   The campaign runner that auto-runs split sub-scopes through the per-scope team (each transition
   an insert-then-flip supersession). B2 Phase 1 ([`finding-039`](docs/findings/finding-039-scope-split-smart-cut.md))

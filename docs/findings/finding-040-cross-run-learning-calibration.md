@@ -15,7 +15,9 @@ anchor for the `genome.calibration` core, the `genome calibrate` sub-app, the
 `compute_tier` loop-closure seam that the `scope-dispatcher` now RUNS, the outcome-write hook in
 the `/verify-and-merge` close step, and the ledger rows `DEC-0095 … DEC-0098`. The synthesized
 plan artifact is transient (plans get pruned — see `DEC-0084`); this finding is where the design
-rationale lives. Ships **report-only** — `auto_tuning_enabled` is seeded `false`.
+rationale lives. Shipped **report-only** at C1 Phase 1 — `auto_tuning_enabled` was seeded `false`;
+the live config was flipped to `auto_tuning_enabled=true` at **Phase 2 PR 2** (`DEC-0124`,
+kill-switch-reversible, live-file-only — see LIFECYCLE).
 
 ## Related findings
 
@@ -130,9 +132,17 @@ categories:
   asymmetry invariant; the named knobs (`THIN_DATA_MIN_OUTCOMES=10`, `CADENCE_MIN_MERGES=5`,
   `HYSTERESIS_MIN_RUNS=3`; seed `t1=1`, `t2=5`) are the tunables, and the seed weights live in
   `backend/src/genome/calibration/risk_weights.json`.
-- **LIFECYCLE** — `status: active`; the enablement flip (`auto_tuning_enabled=true`), the deferred
-  dispatcher/splitter convergence PR, and any future knob added to `KNOB_COVERAGE` are
-  insert-then-flip supersessions, never in-place edits.
+- **LIFECYCLE** — `status: active`; the enablement flip, the deferred dispatcher/splitter
+  convergence PR, and any future knob added to `KNOB_COVERAGE` are insert-then-flip supersessions,
+  never in-place edits. **The enablement flip is done** (Sub Project C1 Phase 2 PR 2, 2026-06-28,
+  `DEC-0124`): the live `risk_weights.json` is flipped to `rw-2` / `auto_tuning_enabled=true` as the
+  insert-then-flip supersession of `rw-1` (provenance `source: enablement`, `parent_version: rw-1`),
+  **live-file-only** — `SEED_RISK_WEIGHTS` stays the immutable `rw-1` / dark reconciliation +
+  back-test + kill-switch baseline (the ratchet writes the file, never the constant). PR 1
+  (`DEC-0123`) resolved the three pre-enablement residuals, set the kill-switch policy to **HONOR**,
+  and added the deterministic loop-closure test; VSC-User confirmed the `tier_in_hindsight` ladder
+  as-is. The dispatcher/splitter `est_risk_tier` convergence PR and the unattended every-N-merges
+  close-hook auto-commit remain **further-deferred**.
 
 ## Consequences / follow-ups
 
