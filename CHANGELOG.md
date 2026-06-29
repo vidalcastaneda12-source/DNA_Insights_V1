@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CHANGELOG.md` resolves to one defined in ROADMAP (`DANGLING_REF`); the `<!-- B2-SUBSCOPES -->`
   managed region + indented sub-bullets are exempt; a missing ROADMAP.md is fail-closed
   (`ROADMAP_FILE_MISSING`). Mirrors `genome docs check` / `genome workflows check` (no `genome.db`
-  import — clean-subprocess guard) and ships a `roadmap-gate` CI workflow. Stacked on PR A (#126). (#PR_B)
+  import — clean-subprocess guard) and ships a `roadmap-gate` CI workflow. Stacked on PR A (#126). (#127)
 - **ROADMAP.md as the single source of truth for scope — PR A: `RM-` ids + 22 promoted backlog items**
   (finding-042 / `DEC-0125`). Every trackable ROADMAP line item now carries a frozen `RM-<7 hex>` id
   (`RM-` + `sha1(slug)[:7]`); the existing "PR N" sequence labels are kept as a secondary alias, so the
