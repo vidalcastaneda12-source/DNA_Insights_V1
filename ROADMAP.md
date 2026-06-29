@@ -417,7 +417,7 @@ Follow-ups (gated on `pgs_score_weights` landing):
 **Verification:** each pipeline produces non-zero output on the merged+imputed dataset; supersession works on re-run.
 
 ## Phase 7 — Insight generation
-- [ ] RM-d86d4fc — Genes / traits / pathways dictionary tables (full) — primarily serve insight generation and rendering. The loaders we ship in Phase 5 carry gene symbols and trait IDs inline, so the index does not need the dictionaries to do its joins. (The minimal FK-satisfying genes seed — gene symbols only, enough to unblock the four NOT NULL genes FKs — landed earlier as PR 6 in the pre-Phase-6 sequence; only the full genes / traits / pathways dictionaries with descriptions and rendering metadata remain, here in their home phase.)
+- [ ] RM-d86d4fc — Genes / traits / pathways dictionary tables (full) — primarily serve insight generation and rendering. The loaders we ship in Phase 5 carry gene symbols and trait IDs inline, so the index does not need the dictionaries to do its joins. (The minimal FK-satisfying genes seed — gene symbols only, enough to unblock the five NOT NULL genes FKs — landed earlier as PR 6 in the pre-Phase-6 sequence; only the full genes / traits / pathways dictionaries with descriptions and rendering metadata remain, here in their home phase.)
 - [ ] RM-9c15e0f — Per-analysis-type insight generators in `genome.insights.*`
 - [ ] RM-3d8bfd1 — Versioned tier mapping functions
 - [ ] RM-16e06ae — Confidence rollup
