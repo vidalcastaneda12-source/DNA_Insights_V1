@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- **Sub Project C1 Phase 2 (PR 2) — calibration enablement flip (`auto_tuning_enabled` true); CLOSE**
+  (finding-040 / `DEC-0124`). **Closes Sub Project C1.** The gated, activating change: the live
+  `risk_weights.json` is flipped `auto_tuning_enabled` false→true and `weights_version` rw-1→rw-2 as an
+  insert-then-flip supersession (provenance `source: enablement`, `parent_version: rw-1`).
+  **Live-file-only:** the `SEED_RISK_WEIGHTS` constant stays the immutable rw-1/dark reconciliation +
+  back-test + kill-switch baseline (flipping it would break the kill-switch matrix test). The score
+  knobs (`c_map`/`b_buckets`/`p_levels`/`t1`/`t2`) are byte-identical to the seed; auto-tuning is the
+  only behavioral change. New `test_calibration_enablement.py` pins the flip (live enabled at rw-2; the
+  SEED constant stays dark) and a **reversibility falsifier** proves toggling `auto_tuning_enabled` back
+  to false re-freezes BOTH write paths (`ratchet --apply` NO_OPs, `apply-parked` refuses). VSC-User
+  confirmed the `tier_in_hindsight` ladder as-is (no code change). Gated on + stacked atop PR 1 (#124).
+  **No `docs/schemas`/`ddl`/DB change**, `applicable_anchors = []`. (#125)
 - **Sub Project C1 Phase 2 (PR 1) — calibration `apply-parked` write-path hardening + loop-closure test**
   (finding-040 / `DEC-0123`). The three pre-enablement must-fixes on the (still-dark) `apply-parked` /
   `ratchet --apply` write path, with their deferred tests, plus the deterministic loop-closure test — all

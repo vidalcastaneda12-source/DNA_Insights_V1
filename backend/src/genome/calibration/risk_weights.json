@@ -1,5 +1,5 @@
 {
-  "weights_version": "rw-1",
+  "weights_version": "rw-2",
   "c_map": {
     "docs": 0,
     "tests": 1,
@@ -25,11 +25,11 @@
   },
   "t1": 1,
   "t2": 5,
-  "auto_tuning_enabled": false,
+  "auto_tuning_enabled": true,
   "provenance": {
-    "source": "seed",
-    "rationale": "Initial seed — mirrors scope_split._C_MAP and the scope-dispatcher.md additive S = C + B + P formula (finding-040 / Gate-1 D1). Report-only: auto_tuning_enabled is false until the deterministic loop-closure test + the three safety fixes are green and VSC-User confirms the tier_in_hindsight default.",
+    "source": "enablement",
+    "rationale": "Sub Project C1 Phase 2 PR 2 — enablement flip (DEC-0124). auto_tuning_enabled false->true after the Gate-2 signoff: PR 1 (the three pre-enablement apply-parked must-fixes + the deterministic loop-closure test, DEC-0123) landed; kill-switch policy = HONOR (apply-parked honors auto_tuning_enabled); the tier_in_hindsight ladder was confirmed as-is by VSC-User. Insert-then-flip supersession of rw-1: only the live config is flipped — SEED_RISK_WEIGHTS stays the immutable rw-1/dark reconciliation + back-test + kill-switch baseline (the ratchet writes the file, never the constant). Reversible: set auto_tuning_enabled=false to re-freeze the entire write surface (ratchet --apply AND apply-parked).",
     "cited_outcomes": [],
-    "parent_version": null
+    "parent_version": "rw-1"
   }
 }

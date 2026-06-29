@@ -167,7 +167,9 @@ def test_ratchet_dry_run_is_inert() -> None:
 
     ``--dry-run`` (the default) computes the decision and changes nothing: the git-tracked
     ``risk_weights.json`` is byte-identical (hash before == after) and its git status is unchanged
-    — the Python core never runs git, and the seed always NO_OPs (auto-tuning disabled).
+    — the Python core never runs git, and ``--dry-run`` writes nothing regardless of disposition
+    (the live config is now enabled, so an empty real ledger NO_OPs via thin-data, not the kill
+    switch — but dry-run is inert either way).
     """
     repo_root = _repo_root()
 
