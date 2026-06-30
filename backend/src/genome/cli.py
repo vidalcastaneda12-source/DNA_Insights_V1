@@ -602,7 +602,7 @@ def imputation_import(  # noqa: PLR0913 — one CLI flag per operational control
 ) -> None:
     """Stream the imputed VCFs into the database.
 
-    Reads archive/imputation/run_<id>/result/chr*.dose.vcf.gz files (the
+    Reads archive/imputation/run_<id>/result/chr*.vcf.gz files (the
     Beagle 5.5 output) and writes ``genotype_calls`` rows with
     ``source='beagle_imputed'``, plus a fresh ``ingestion_runs`` row and
     ``sample_qc`` row.

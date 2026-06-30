@@ -313,13 +313,26 @@ def annotate_refresh(  # noqa: PLR0913 — irreducible CLI surface; gnomad-speci
         if jobs is not None:
             _reject_remote_tabix_only_flag("jobs", source)
         result = loader(force, skip_if_same_version)
-    typer.echo(
-        f"source_db={result.source_db} "
-        f"source_version_id={result.source_version_id} "
-        f"version={result.version} "
-        f"records={result.record_count} "
-        f"already_current={result.was_already_current}",
-    )
+    if result.was_already_current:
+        # Short-circuit: nothing was loaded. Printing ``records=<N>`` here is
+        # misleading (it is the *current* count, not an insert). Report the
+        # already-current state explicitly instead. Semantics are unchanged —
+        # this is presentation only (finding-010 #12).
+        typer.echo(
+            f"source_db={result.source_db} "
+            f"source_version_id={result.source_version_id} "
+            f"version={result.version} "
+            f"already_current=True "
+            f"(no rows loaded; current record_count={result.record_count})",
+        )
+    else:
+        typer.echo(
+            f"source_db={result.source_db} "
+            f"source_version_id={result.source_version_id} "
+            f"version={result.version} "
+            f"records={result.record_count} "
+            f"already_current={result.was_already_current}",
+        )
 
 
 @annotate_app.command("refresh-index")

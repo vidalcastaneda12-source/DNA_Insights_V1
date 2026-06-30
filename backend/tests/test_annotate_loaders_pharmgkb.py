@@ -816,6 +816,36 @@ def test_cli_refresh_pharmgkb_runs_and_prints_summary(
     assert "already_current=False" in result.output
 
 
+def test_cli_refresh_already_current_omits_records_count(
+    fixture_zip: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Short-circuit CLI refresh omits ``records=`` and announces already_current.
+
+    Builds on test_refresh_second_call_is_short_circuit: the first CLI invoke
+    loads rows; the second (no --force) hits the was_already_current=True
+    short-circuit, so the shared refresh echo drops the misleading
+    ``records=<N>`` fragment (nothing was loaded) and prints
+    ``already_current=True`` instead.
+    """
+    init_databases()
+    _patch_download_to_cache(monkeypatch, fixture_zip)
+
+    runner = CliRunner()
+    first = runner.invoke(app, ["annotate", "refresh", "--source", "pharmgkb"])
+    assert first.exit_code == 0, first.output
+    assert "already_current=False" in first.output
+
+    second = runner.invoke(app, ["annotate", "refresh", "--source", "pharmgkb"])
+    assert second.exit_code == 0, second.output
+    assert "source_db=pharmgkb" in second.output
+    assert "already_current=True" in second.output
+    # The current count is still surfaced, under the safe ``record_count=``
+    # label; only the misleading bare ``records=`` (an insert count) is dropped.
+    assert "record_count=" in second.output
+    assert "records=" not in second.output
+
+
 def test_cli_status_after_refresh_reports_pharmgkb_loaded(
     fixture_zip: Path,
     monkeypatch: pytest.MonkeyPatch,

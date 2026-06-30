@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- **PR 8 docs/cosmetic batch — `MAPPED_TRAIT_URI` finding entry, imputation docstring fix,
+  PharmGKB/CPIC `already_current` CLI output** (`RM-76ec5db`). Three deferred docs/cosmetic
+  defects, none touching DB content: (1) records the GWAS `MAPPED_TRAIT_URI` single-value
+  truncation as finding-005 #11 (parity with `docs/runbooks/annotations.md`), with the actual
+  multi-valued `VARCHAR[]` schema fix captured — still deferred — as ROADMAP slot `RM-85121ee`;
+  (2) corrects the `genome imputation import` docstring to name the real Beagle 5.5 output
+  `chr*.vcf.gz` (was the legacy `chr*.dose.vcf.gz`); (3) the shared `annotate refresh` summary now
+  prints `already_current=True (no rows loaded; current record_count=<N>)` instead of a misleading
+  `records=<N>` on the was-already-current short-circuit. Loader short-circuit semantics + the
+  returned `RefreshResult` are byte-identical — presentation only (finding-010 #12). Docs /
+  CLI-output / tests; no `ddl` / `docs/schemas/` / DB change. (PR 8)
 - **ROADMAP source-of-truth — PR C: capture-forward convention** (finding-042 / `DEC-0125`).
   Propagates the "ROADMAP.md is the single source of truth for scope" rule so newly-identified
   deferred/incomplete work is captured into ROADMAP (with an `RM-` id) rather than left only in a

@@ -369,6 +369,7 @@ Each requires a deliberate schema-doc edit + `ddl` re-extract + `rm -rf data/ &&
 - [ ] RM-ea6c510 — **Add a real `genotype_calls.dosage_confidence` column** (NOT NULL-defaulted, DR² and dosage-confidence cleanly separated) to replace the `imputation_r2`+`quality_flags` overload for male non-PAR chrX. (finding-031; CHANGELOG [Unreleased]; U16)
 - [ ] RM-0bb9b37 — **Drop `variant_id_seq` in favor of a `MAX`-based allocator** (as the annotation tables use), removing the fragile `_resync_variant_id_sequence` dance that caused the finding-029 off-by-one. (finding-020 §2; U17)
 - [ ] RM-7b3123e — **Expand `ingestion_status_enum`** so imputation roundtrip sub-stages get first-class status values instead of being squeezed into 4 values + metadata. (imputation/runs.py:6-10; U18)
+- [ ] RM-85121ee — **Multi-valued `mapped_trait_uri` (`VARCHAR[]`)** so GWAS rows with multiple comma-separated EFO URIs stop truncating to URI#1 (today single-valued VARCHAR; loader keeps URI#1 + counts `truncated_mapped_trait_uri`). Schema-doc edit + `ddl` re-extract + `rm -rf data/ && genome init`; do NOT execute opportunistically. (finding-005 #11)
 
 ### Tooling, gates & process
 
