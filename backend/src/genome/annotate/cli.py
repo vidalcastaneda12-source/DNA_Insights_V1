@@ -657,6 +657,109 @@ def annotate_seed_genes(
     )
 
 
+@annotate_app.command("purge-superseded")
+def annotate_purge_superseded(
+    execute: Annotated[  # noqa: FBT002 — typer boolean flag, opt-in
+        bool,
+        typer.Option(
+            "--execute",
+            help=(
+                "Actually delete the superseded rows. WITHOUT this flag the command "
+                "is a read-only dry-run that prints the per-source partition and "
+                "mutates nothing. --execute proceeds when the mandatory probe surfaces "
+                "real work — a deletable version OR a zero-data unreferenced registry "
+                "orphan to self-heal. Under the default --keep 1 it is a no-op on the "
+                "current corpus (the single prior is protected) — corpus-conditional, "
+                "not structural: it will still snapshot and sweep an orphan if one exists."
+            ),
+        ),
+    ] = False,
+    source: Annotated[
+        str | None,
+        typer.Option(
+            "--source",
+            help=(
+                "Narrow the purge to one pointer-bearing source (clinvar, "
+                "gwas_catalog, pharmgkb, cpic, gnomad, dbsnp, pgs_catalog). Default: "
+                "all seven. dbsnp covers dbsnp_annotations + variant_aliases as a unit."
+            ),
+        ),
+    ] = None,
+    keep: Annotated[
+        int,
+        typer.Option(
+            "--keep",
+            help=(
+                "How many NON-active prior versions to retain per source (most-recent "
+                "first). 1 (default) keeps the single prior; 0 reclaims every "
+                "superseded version. The active build (the annotation_sources pointer) "
+                "is always kept regardless of --keep."
+            ),
+        ),
+    ] = 1,
+    no_backup: Annotated[  # noqa: FBT002 — typer boolean flag, opt-in
+        bool,
+        typer.Option(
+            "--no-backup",
+            help=(
+                "Skip the pre-mutation genome.duckdb snapshot (only taken on --execute "
+                "with a non-empty deletable set). The snapshot is the sole hard-recovery "
+                "path; only skip it when one already exists in archive/purge/."
+            ),
+        ),
+    ] = False,
+) -> None:
+    """Purge superseded annotation rows, FK-safe, with the active build protected (PR 9).
+
+    Per supersedable source (the seven with an ``annotation_sources`` pointer) the
+    ``(active, prior, deletable)`` partition is re-derived at runtime from the
+    pointer — never a hardcoded ``source_version_id`` (the PR-7 trap, finding-015).
+    Dry-run by default; ``--execute`` deletes the deletable rows in two
+    FK-safe transactions (data, then the guarded registry row) after a pre-mutation
+    snapshot. The active build is structurally undeletable. See finding-010 #14.
+    """
+    from genome.annotate.purge import PurgeError, purge_superseded  # noqa: PLC0415
+
+    try:
+        result = purge_superseded(
+            execute=execute,
+            source=source,
+            keep=keep,
+            no_backup=no_backup,
+        )
+    except (ValueError, PurgeError) as exc:
+        # PurgeError covers every fail-closed abort (RegistryStillReferenced, Dangling/Ambiguous
+        # Partition, ActiveBuildAtRisk, NegativeControl) — surface as clean stderr + exit 2, not a
+        # raw traceback. ValueError is an unknown --source.
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
+    if result.executed:
+        mode = "executed"
+    elif execute:
+        mode = "nothing-to-delete"
+    else:
+        mode = "dry-run"
+    typer.echo(
+        f"purge-superseded [{mode}]: "
+        f"data_rows_deleted={result.data_rows_deleted} "
+        f"registry_rows_deleted={result.registry_rows_deleted} "
+        f"orphan_rows_swept={result.orphan_rows_swept}",
+    )
+    for plan in result.plans:
+        typer.echo(
+            f"  {plan.source_db}: active={plan.active_id} prior={plan.prior_id} "
+            f"deletable={list(plan.deletable_ids)}",
+        )
+    if result.executed:
+        typer.echo(
+            f"  negative_control_ok={result.negative_control_ok} "
+            f"active_rows_unchanged={result.active_rows_unchanged} "
+            f"pointer_unchanged={result.pointer_unchanged} "
+            f"backup={result.backup_path or 'skipped'}",
+        )
+
+
 __all__ = [
     "annotate_app",
 ]

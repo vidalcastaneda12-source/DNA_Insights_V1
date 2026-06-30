@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- **General superseded-row purge — `genome annotate purge-superseded`** (`RM-12873bf`,
+  finding-010 #14). New `backend/src/genome/annotate/purge.py` + CLI command reclaim the
+  prior-version rowsets that version-pointer supersession (decision #7) leaves behind
+  (live: gnomAD `svid=8`, 4,467,370 superseded rows). Per pointer-bearing source it
+  re-derives the `(active, prior, deletable)` partition at runtime from the
+  `annotation_sources` pointer — never a hardcoded `source_version_id` (the moot PR 7 /
+  finding-015 trap) — and, only under `--execute`, deletes the deletable rows in two
+  FK-safe transactions (data, then the registry row guarded by a COUNT==0 over the
+  complete 14-child set of `annotation_source_versions`, each counted on its real
+  referencing column). Dry-run + `--keep 1` (keep the single prior) are the defaults, so
+  the first live run is a no-op on the current corpus (corpus-conditional, not structural:
+  a targeted-orphan sweep still snapshots + deletes a zero-data unreferenced registry row if
+  one exists); the active build is structurally undeletable
+  (pre-flight assert + in-SQL active belt + post-delete negative control) and every
+  destructive run is recoverable from the pre-mutation `archive/purge/` snapshot. New
+  code + CLI + runbook (`docs/runbooks/annotations.md`); no `ddl/` / `docs/schemas/` /
+  DB-content change. (PR 9)
 - **PR 8 docs/cosmetic batch — `MAPPED_TRAIT_URI` finding entry, imputation docstring fix,
   PharmGKB/CPIC `already_current` CLI output** (`RM-76ec5db`). Three deferred docs/cosmetic
   defects, none touching DB content: (1) records the GWAS `MAPPED_TRAIT_URI` single-value
