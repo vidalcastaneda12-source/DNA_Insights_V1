@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Docs hygiene: fast-follow drain of the RM-12873bf residual backlog.** Rolled the
+  CHANGELOG `[Unreleased]` history into `[0.5.0]`; refreshed stale "next PR" status lines
+  (ROADMAP header, README); corrected CLAUDE.md obs #6 (strand-flip shipped #73) and
+  verification.md C2+D narration (shipped #123); backfilled MEMORY.md per-PR DEC rows
+  #114–#133 (DEC-0128…0147). Closes RM-80af453, RM-66f4c75, RM-4484526, RM-a63d67a,
+  RM-b8470f2, RM-c994ce4.
+
 ## [0.5.0] — 2026-06-30
 - **General superseded-row purge — `genome annotate purge-superseded`** (`RM-12873bf`,
   finding-010 #14). New `backend/src/genome/annotate/purge.py` + CLI command reclaim the
