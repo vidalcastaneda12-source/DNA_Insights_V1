@@ -16,7 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prints `already_current=True (no rows loaded; current record_count=<N>)` instead of a misleading
   `records=<N>` on the was-already-current short-circuit. Loader short-circuit semantics + the
   returned `RefreshResult` are byte-identical — presentation only (finding-010 #12). Docs /
-  CLI-output / tests; no `ddl` / `docs/schemas/` / DB change. (PR 8)
+  CLI-output / tests; no `ddl` / `docs/schemas/` / DB change. Also captures the `/scope-run`
+  Stage-2 wedge (the `implement-review.js` implementer hung polling a backgrounded `pytest`)
+  as ROADMAP slot `RM-035c394`. (PR 8)
 - **ROADMAP source-of-truth — PR C: capture-forward convention** (finding-042 / `DEC-0125`).
   Propagates the "ROADMAP.md is the single source of truth for scope" rule so newly-identified
   deferred/incomplete work is captured into ROADMAP (with an `RM-` id) rather than left only in a
