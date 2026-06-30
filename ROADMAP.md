@@ -164,9 +164,12 @@ finding-016 #8):
   the data-bearing id=8 and `variant_aliases` orphans) remains **PR 9** (finding-010 #14) —
   not folded here. See finding-015 §12 (now inline-marked) + its Amendment closing note,
   CLAUDE.md obs #4, and `docs/runbooks/annotations.md` (gnomAD §5.5 "Orphan version rows").
-- [ ] RM-76ec5db (PR 8) — Deferred docs/cosmetic batch: the `MAPPED_TRAIT_URI` truncation finding
-  entry (finding-005, deferred from 5.3), the imputation docstring filename fix, and the
-  PharmGKB/CPIC `already_current=True` cosmetic cleanup (finding-010 #12).
+- [x] RM-76ec5db (PR 8) — Deferred docs/cosmetic batch: the `MAPPED_TRAIT_URI` truncation finding
+  entry (finding-005 #11, deferred from 5.3), the imputation docstring filename fix, and the
+  PharmGKB/CPIC `already_current=True` cosmetic cleanup (finding-010 #12). Merged #131
+  (2026-06-30); verify-gate GREEN (change_class=core; negative-control held — no DB anchor moved).
+  Spun off RM-85121ee (the deferred `mapped_trait_uri VARCHAR[]` schema fix) + RM-035c394 (the
+  implement-review pytest-poll wedge).
 - [ ] RM-12873bf (PR 9) — finding-010 #14: orphan-row cleanup *procedure* for rows under
   superseded `source_version_id`s, plus a runbook entry (covers `variant_aliases`
   orphans too). General/ongoing, vs. PR 7's one-off gnomAD-specific delete.
@@ -388,6 +391,8 @@ Each requires a deliberate schema-doc edit + `ddl` re-extract + `rm -rf data/ &&
 - [ ] RM-c994ce4 — **Roll up `CHANGELOG.md [Unreleased]`** (~2076 lines) into a versioned release section per the CLAUDE.md convention (Phases 1-5 complete). (audit NOTES)
 - [ ] RM-66f4c75 — **Refresh README "Status"** (says "PR 7 next"; PR 7 closed-as-moot). (audit NOTES)
 - [ ] RM-4484526 — **Fix CLAUDE.md obs #6 stale line** ("strand-flip collapse deferred to PR 5" — shipped #73). (audit NOTES)
+- [ ] RM-80af453 — **Refresh ROADMAP header status lines** — ROADMAP.md L5 + L93-94 still read "PR 8 is next" (PR 8 merged #131). Update to "PRs 1–8 landed; PR 9 next"; batch with the README L235 fix (RM-66f4c75). (fast-follow / repo-sweep 2026-06-30)
+- [ ] RM-b8470f2 — **MEMORY.md per-PR DEC-row backfill, PRs #114–#131** — 18 missing tactical DEC rows (the ledger footer still reads "complete: PRs #19…#113"). Append DEC-0126…DEC-0143 (squash subject as the decision text) + bump the footer to #131. (fast-follow / repo-sweep 2026-06-30)
 
 ### ROADMAP source-of-truth migration (this effort — dogfooded; complete — PRs A/B/C merged)
 
