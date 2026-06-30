@@ -2018,6 +2018,96 @@ SELECT COUNT(DISTINCT vm.rsid) AS user_old_rsid_hits
 * **All aliases vanished from reader joins after a dbSNP refresh.** Expected —
   the pointer moved to a new epoch. Re-run `genome annotate refresh-aliases`.
 
+### Superseded-row purge (`genome annotate purge-superseded`, PR 9)
+
+**SHIPPED (PR 9, `RM-12873bf`).** Version-pointer supersession (decision #7,
+finding-010 #8) keeps each prior version's rowset in the per-source table
+indefinitely under an older `source_version_id` (finding-010 #14). `purge-superseded`
+is the general, runtime-derived reclaim: per supersedable source it re-derives the
+`(active, prior, deletable)` partition and, under `--execute`, deletes the deletable
+rows FK-safe. It replaces the moot PR 7 (whose hardcoded `DELETE … IN (6,7,8,10)`
+would erase the *active* build on a rebuilt DB).
+
+```
+genome annotate purge-superseded [--execute] [--source TEXT] [--keep INT] [--no-backup]
+```
+
+* `--execute` — actually delete. **Without it the command is a read-only dry-run**
+  that prints the per-source partition and mutates nothing. Dry-run is the default.
+* `--source` — narrow to one pointer-bearing source; default all seven.
+* `--keep N` — retain `N` *non-active* prior versions per source (default **1** = keep
+  the single prior). `--keep 0` reclaims every superseded version. The active build
+  is kept regardless of `--keep`.
+* `--no-backup` — skip the pre-mutation snapshot (only taken on `--execute` with a
+  non-empty deletable set).
+
+**The active build is the `annotation_sources` pointer value — authoritatively, never
+newest-by-`ingested_at` (finding-015).** This is the PR-7 / finding-015 lesson: a
+recency-derived "active" would mis-flag the pointer's target as deletable whenever the
+pointer trails the newest ingest. The partition is re-derived at runtime every
+invocation; no `source_version_id` is ever hardcoded. The active build is structurally
+undeletable: a pre-flight `active ∉ deletable` assert, an in-SQL
+`AND source_version_id <> :active_id` belt on the data DELETE, and a post-delete
+negative control (pointer + active registry row + active row count unchanged) that
+aborts on any drift.
+
+**FK-safe two-transaction split (finding-020 §3).** DuckDB's FK-on-DELETE enforcement
+reads *pre-transaction* state, so the data rows and the `annotation_source_versions`
+registry row must be deleted in **two separate committed transactions** — TX1 data,
+then TX2 registry — with a COUNT-guard between them over the **complete** FK-child set
+of `annotation_source_versions`. That set has **fourteen** members, and each is counted
+on *its own* referencing column (`annotation_sources` via `current_source_version_id`,
+the other thirteen via `source_version_id`), derived from `duckdb_constraints()`. A
+hardcoded `WHERE source_version_id` would throw `BinderException` against
+`annotation_sources` *after* TX1 had already committed the data deletes. The guard is
+fail-closed: any remaining reference blocks the registry DELETE
+(`RegistryStillReferencedError`) — this is what makes a future `pgs_catalog` purge wait
+for `pgs_score_weights` to be cleared, and what protects any unmapped child.
+
+**Scope.** The seven sources with an `annotation_sources` pointer: `clinvar`,
+`gwas_catalog`, `pharmgkb`, `cpic`, `gnomad`, `dbsnp`, `pgs_catalog`. `dbsnp` is purged
+as a **two-table unit** (`dbsnp_annotations` + `variant_aliases` under one pointer, obs
+#5) — and because `variant_aliases` re-attaches under the dbSNP pointer, re-run
+`refresh-aliases` after any `refresh --source dbsnp`, then purge. The FK children with
+**no** pointer — `vep_consequences`, `genes`, `traits`, `pathways` (`genes` is the
+`hgnc` `svid=11` seed, obs #7) — are **never purge targets**, but the guard still counts
+them by their real column.
+
+**Recovery.** On `--execute` with a non-empty deletable set the command first **closes
+its read-only compute connection, then snapshots** `genome.duckdb` to `archive/purge/`
+(the compute conn is closed before `take_snapshot` opens its own writer, mirroring
+`canonicalize-variants`; a held connection would deadlock the single-writer lock). That
+snapshot is the **sole hard-recovery** path for committed deletes — once TX1 commits, a
+rollback cannot restore the data. A crash *between* TX1 and TX2 leaves a zero-row
+registry orphan; the command's final targeted-orphan sweep self-heals it on the next
+run (a plain re-run alone would not — the next partition's data-bearing filter skips a
+0-row svid). Snapshot cleanup is manual: delete the `.bak` once the purge is verified.
+
+**First live `--keep 1` run is a no-op on the current corpus (corpus-conditional, not
+structural).** Against the current corpus gnomAD holds `svid=8` (4,467,370 superseded) +
+`svid=10` (4,568,802 active, pointer=10); under `--keep 1` `svid=8` is the *protected
+prior* → `deletable=[]`, nothing deleted, no snapshot (verified: no zero-data registry
+orphan). It is corpus-conditional, **not** structural: the targeted-orphan sweep will still
+snapshot and delete a zero-data, unreferenced, non-active registry row if one exists
+(`orphan_rows_swept >= 1`). The run otherwise exercises the full pre-flight + guard +
+post-delete path while mutating zero rows.
+
+**Dual-polarity anchors** (retention is a single `--keep` knob; `--keep 0` needs no
+re-plan):
+
+* `--keep 1` → gnomAD `svid=8` **HELD** (4,467,370), `svid=10` (4,568,802),
+  pointer=10, `annotation_sources` total 7, `variants_master` 3,160,364,
+  `gnomad_matches` 3,054,426 **HELD**; `genes` `svid=11` (1153) untouched.
+* `--keep 0` (on a disposable snapshot copy) → gnomAD `svid=8` → 0 rows, its registry
+  row deleted, pointer still 10, `svid=10` (4,568,802) intact, and `gnomad_matches`
+  **still 3,054,426** after a `refresh-index` rebuild (only non-active rows leave; the
+  active-set readers all join the pointer, and the lone non-pointer reader
+  `pgs_extremes_v` loses only spurious cross-version fan-out, never an active row).
+
+Executing `--keep 0` on live data (the destructive `svid=8` reclaim) is the operator's
+call — `v1` ships `--keep 1` default with the knob exposed and both polarities
+pre-verified.
+
 ## Audit log review
 
 The full audit trail for a refresh is in `app.db.audit_log`. Group by
