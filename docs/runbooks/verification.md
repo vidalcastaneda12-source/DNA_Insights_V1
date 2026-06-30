@@ -523,10 +523,12 @@ assert `auto_approved` / `auto_merged` `=== false` (`plan-phase`, `implement-rev
 `close.js` carries **no** auto field **by design** (Stage 5 crosses no human gate) — its
 absence is **not** a regression.
 
-**Residual (not gated here; carried to Phase 2).** The four trigger-gated Stage-2 writers are
-**deferred-unverified (D7)** — exercised only on synthetic manifests, live-engine RUN semantics
-not yet validated — and the `arch-1` drift-guard seam-coverage gap is latent/backlogged. See
-[`finding-034`](../findings/finding-034-agent-team-plan-phase.md) "C2D-Phase1 residual risk"
+**Residual (was carried to Phase 2 — now shipped there).** At the Phase-1 gate the four
+trigger-gated Stage-2 writers were **deferred-unverified (D7)** — exercised only on synthetic
+manifests, live-engine RUN semantics not yet validated — and the `arch-1` drift-guard
+seam-coverage gap was latent/backlogged. **Both shipped in C2+D Phase 2 PR 3 (#123)** — D7
+live-engine validation + `arch-1` harness coverage (see the "C2+D Phase 2 gate" section below).
+See [`finding-034`](../findings/finding-034-agent-team-plan-phase.md) "C2D-Phase1 residual risk"
 and ROADMAP "Sub Project C2+D" Phase 2.
 
 ## C2+D Phase 2 gate (reversal-gate + engine-primary CLI)

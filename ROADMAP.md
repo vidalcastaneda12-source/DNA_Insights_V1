@@ -2,7 +2,7 @@
 
 Phases are sequential. Do not start phase N+1 until phase N's verification passes.
 
-**Current phase:** Phase 5 closed; executing the pre-Phase-6 cleanup sequence (PRs 1–6 landed; PR 7 closed-as-moot against the live DB — no FK-safe gnomAD orphan exists; PR 8 next) before Phase 6 begins. PR 6 (minimal `genes` seed, #88) cleared the Phase-6 FK gate.
+**Current phase:** Phase 5 closed; executing the pre-Phase-6 cleanup sequence (PRs 1–9 landed — PR 7 closed-as-moot against the live DB, no FK-safe gnomAD orphan exists; PR 10 next) before Phase 6 begins. PR 6 (minimal `genes` seed, #88) cleared the Phase-6 FK gate.
 
 ## Phase 1 — Foundation (this is the bootstrap)
 
@@ -90,8 +90,8 @@ pattern (finding-010 #15), is tracked under "Deliberately deferred" in that sequ
 
 ## Pre-Phase-6 sequence
 
-**Status:** in progress — PRs 1–6 landed (#63, #64, #65, #70, #74, #88); PR 7
-closed-as-moot (2026-06-26 — the live DB has no FK-safe gnomAD orphan); PR 8 is next.
+**Status:** in progress — PRs 1–9 landed (#63, #64, #65, #70, #74, #88, #131, #133); PR 7
+closed-as-moot (2026-06-26 — the live DB has no FK-safe gnomAD orphan); PR 10 is next.
 
 A 14-PR run that clears every dbSNP-dependent backfill, deferred-cleanup item,
 and FK blocker before the Phase 6 analyses begin, so Phase 6 starts with no open
@@ -398,12 +398,12 @@ Each requires a deliberate schema-doc edit + `ddl` re-extract + `rm -rf data/ &&
 ### Documentation hygiene
 
 - [ ] RM-f53aa75 — **Prune 3 implemented-but-unpruned plan docs** (`decision-tracking-followups.md`, `docs-gate-enforcement.md`, `PP6-PR7-gnomad-orphan-version-cleanup.md`) whose status banners are stale (shipped/closed). (audit NOTES)
-- [ ] RM-a63d67a — **Refresh `verification.md` L462-466** — stale Phase-1 D7/arch-1 "open residual" narration closed by PR #123. (audit NOTES)
-- [ ] RM-c994ce4 — **Roll up `CHANGELOG.md [Unreleased]`** (~2076 lines) into a versioned release section per the CLAUDE.md convention (Phases 1-5 complete). (audit NOTES)
-- [ ] RM-66f4c75 — **Refresh README "Status"** (says "PR 7 next"; PR 7 closed-as-moot). (audit NOTES)
-- [ ] RM-4484526 — **Fix CLAUDE.md obs #6 stale line** ("strand-flip collapse deferred to PR 5" — shipped #73). (audit NOTES)
-- [ ] RM-80af453 — **Refresh ROADMAP header status lines** — ROADMAP.md L5 + L93-94 still read "PR 8 is next" (PR 8 merged #131; PR 9 then merged #133). Update to "PRs 1–9 landed; PR 10 next"; batch with the README L235 fix (RM-66f4c75). (fast-follow / repo-sweep 2026-06-30)
-- [ ] RM-b8470f2 — **MEMORY.md per-PR DEC-row backfill, PRs #114–#133** — the missing tactical per-PR DEC rows (the ledger footer still reads "complete: PRs #19…#113"). Append the next free contiguous range — **DEC-0128…** onward (DEC-0126/DEC-0127 are taken by RM-12873bf / PR 9's design-decision rows; #133's per-PR row backfills alongside #114–#131) — with the squash subject as the decision text + bump the footer. (fast-follow / repo-sweep 2026-06-30)
+- [x] RM-a63d67a — **Refresh `verification.md` L462-466** — stale Phase-1 D7/arch-1 "open residual" narration closed by PR #123. (audit NOTES)
+- [x] RM-c994ce4 — **Roll up `CHANGELOG.md [Unreleased]`** (~2076 lines) into a versioned release section per the CLAUDE.md convention (Phases 1-5 complete). (audit NOTES)
+- [x] RM-66f4c75 — **Refresh README "Status"** (says "PR 7 next"; PR 7 closed-as-moot). (audit NOTES)
+- [x] RM-4484526 — **Fix CLAUDE.md obs #6 stale line** ("strand-flip collapse deferred to PR 5" — shipped #73). (audit NOTES)
+- [x] RM-80af453 — **Refresh ROADMAP header status lines** — ROADMAP.md L5 + L93-94 still read "PR 8 is next" (PR 8 merged #131; PR 9 then merged #133). Update to "PRs 1–9 landed; PR 10 next"; batch with the README L235 fix (RM-66f4c75). (fast-follow / repo-sweep 2026-06-30)
+- [x] RM-b8470f2 — **MEMORY.md per-PR DEC-row backfill, PRs #114–#133** — the missing tactical per-PR DEC rows (the ledger footer still reads "complete: PRs #19…#113"). Append the next free contiguous range — **DEC-0128…** onward (DEC-0126/DEC-0127 are taken by RM-12873bf / PR 9's design-decision rows; #133's per-PR row backfills alongside #114–#131) — with the squash subject as the decision text + bump the footer. (fast-follow / repo-sweep 2026-06-30)
 
 ### ROADMAP source-of-truth migration (this effort — dogfooded; complete — PRs A/B/C merged)
 
