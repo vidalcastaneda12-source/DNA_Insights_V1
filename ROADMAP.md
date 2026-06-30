@@ -164,9 +164,12 @@ finding-016 #8):
   the data-bearing id=8 and `variant_aliases` orphans) remains **PR 9** (finding-010 #14) —
   not folded here. See finding-015 §12 (now inline-marked) + its Amendment closing note,
   CLAUDE.md obs #4, and `docs/runbooks/annotations.md` (gnomAD §5.5 "Orphan version rows").
-- [ ] RM-76ec5db (PR 8) — Deferred docs/cosmetic batch: the `MAPPED_TRAIT_URI` truncation finding
-  entry (finding-005, deferred from 5.3), the imputation docstring filename fix, and the
-  PharmGKB/CPIC `already_current=True` cosmetic cleanup (finding-010 #12).
+- [x] RM-76ec5db (PR 8) — Deferred docs/cosmetic batch: the `MAPPED_TRAIT_URI` truncation finding
+  entry (finding-005 #11, deferred from 5.3), the imputation docstring filename fix, and the
+  PharmGKB/CPIC `already_current=True` cosmetic cleanup (finding-010 #12). Merged #131
+  (2026-06-30); verify-gate GREEN (change_class=core; negative-control held — no DB anchor moved).
+  Spun off RM-85121ee (the deferred `mapped_trait_uri VARCHAR[]` schema fix) + RM-035c394 (the
+  implement-review pytest-poll wedge).
 - [ ] RM-12873bf (PR 9) — finding-010 #14: orphan-row cleanup *procedure* for rows under
   superseded `source_version_id`s, plus a runbook entry (covers `variant_aliases`
   orphans too). General/ongoing, vs. PR 7's one-off gnomAD-specific delete.
