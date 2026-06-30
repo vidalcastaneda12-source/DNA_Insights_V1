@@ -389,6 +389,70 @@ CLAUDE.md obs #7, ROADMAP "Pre-Phase-6 sequence" PR 6, and
 [`finding-020`](../findings/finding-020-canonical-refalt-backfill.md) "Out of scope"
 amendment.
 
+### PR 9 purge gate (general superseded-row purge / finding-010 #14)
+
+PR 9 ships `genome annotate purge-superseded`, the ongoing orphan-row cleanup *procedure*
+for rows stranded under superseded `source_version_id`s (covers `variant_aliases` orphans
+too), generalizing PR 7's one-off gnomAD delete. Retention is **keep-1** (active + immediate
+prior kept per source; finding-010 #14); the command **defaults to dry-run** and mutates only
+under an explicit `--execute` gated behind a **mandatory read-only pre-execute probe** (the two
+VSC gate decisions). The headline discriminator is `orphan_candidates`: it is **0** on the live
+corpus today, so a keep-1 `--execute` is a **pure no-op** — **corpus-conditional, not
+structural** (the orphan sweep would snapshot-then-delete a zero-data registry orphan if one
+existed). Gate-confirmed boundary (PR #133 / `d4a07d6`, 2026-06-30; active versions
+`clinvar 2026_06_15, gwas_catalog 2026_06_01, gnomad 4.1.1, pharmgkb 2025_07_05, dbsnp 157`):
+
+**1. Dry-run probe (read-only — the default; mandatory before any `--execute`).**
+
+```
+genome annotate purge-superseded            # dry-run is the default
+# → every source deletable=[]
+# → purge.complete executed=false deletable_total=0 orphan_candidates=0
+```
+
+Per-source **active** `source_version_id` at the purge boundary (the stable inventory a later
+run compares against — a changed id means a refresh ran in between): clinvar=**3**,
+gwas_catalog=**4**, pharmgkb=**1**, cpic=**2**, **gnomad active=10 / prior=8**, dbsnp=**9**,
+pgs_catalog=**5**. Only gnomad carries a retained `prior` (`8`, obs #4's chrX reload); every
+other source has `prior=None`, so keep-1 protects all of them.
+
+**2. The 14-FK-child fail-closed guard.** `annotation_source_versions` has **14** FK children,
+not the **8** in `_SUPERSESSION_TABLES` — `annotation_sources` references it via
+`current_source_version_id`, the other **13** via `source_version_id` — so the guard counts
+each child on its actual FK column via `duckdb_constraints()` (a flat count keyed only on
+`_SUPERSESSION_TABLES` mis-sees the registry and throws a post-TX1 BinderException). A
+companion `source_db` dangling-pointer check rejects a cross-source `current_source_version_id`
+(FK-valid yet dangling → `DanglingPointerError`, closing a real active-build hole).
+
+**3. Negative control — anchors HELD** (keep-1 deletes nothing today; the purge touches no
+pipeline table):
+
+```sql
+-- both gnomad version-rowsets retained under keep-1 (active + immediate prior):
+SELECT source_version_id, COUNT(*) FROM gnomad_frequencies GROUP BY 1;  -- svid8 = 4,467,370 ; svid10 = 4,568,802
+SELECT COUNT(*) FROM variants_master;                                    -- 3,160,364  (obs #3)
+SELECT COUNT(*) FROM annotation_sources;                                 -- 7
+SELECT COUNT(*) FILTER (WHERE af_global IS NOT NULL)
+  AS gnomad_matches FROM variant_annotations_index;                      -- 3,054,426  (obs #4)
+SELECT COUNT(*) FROM genes;                                              -- 1,153  (hgnc svid11, obs #7)
+```
+
+**4. Dual-polarity discriminator (keep-0, on a DISPOSABLE copy only — never the live DB).**
+Re-running the purge at **keep-0** (retain only the active version) on a throwaway copy drops
+the protected prior `gnomad_frequencies` rows under `svid8` (**4,467,370 → 0**) while the active
+`svid10` set stays **unchanged**; a follow-up `refresh-index` rebuild leaves `gnomad_matches`
+**still 3,054,426** — proving the superseded prior-version rows are genuinely
+**index-unreferenced** (the index reads the active pointer only). So keep-1 retention is pure
+history margin, and the keep-1 no-op in block 1 is the real-corpus state, not a masking
+artifact. The discriminator between "no-op because nothing is orphaned" and "no-op because a
+guard mis-fired" is `orphan_candidates` (**0** here) together with the per-source `deletable=[]`
+sets. Any non-zero `orphan_candidates` / non-empty `deletable` on a re-run against the same
+corpus + same active versions is the regression signal.
+
+See CLAUDE.md "Real-data observations" **#8**, ROADMAP "Pre-Phase-6 sequence" PR 9
+(RM-12873bf), [`finding-010`](../findings/finding-010-version-pointer-supersession-pattern.md)
+#14, and `MEMORY.md` DEC-0126 / DEC-0127.
+
 ## C2+D Phase 1 gate (engine-dialect workflow port)
 
 This gate covers the Sub Project C2+D Phase 1 change class (PR #109, `866d255`): the port of
