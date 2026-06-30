@@ -2,7 +2,7 @@
 
 Phases are sequential. Do not start phase N+1 until phase N's verification passes.
 
-**Current phase:** Phase 5 closed; executing the pre-Phase-6 cleanup sequence (PRs 1–6 landed; PR 7 closed-as-moot against the live DB — no FK-safe gnomAD orphan exists; PR 8 next) before Phase 6 begins. PR 6 (minimal `genes` seed, #88) cleared the Phase-6 FK gate.
+**Current phase:** Phase 5 closed; executing the pre-Phase-6 cleanup sequence (PRs 1–9 landed — PR 7 closed-as-moot against the live DB, no FK-safe gnomAD orphan exists; PR 10 next) before Phase 6 begins. PR 6 (minimal `genes` seed, #88) cleared the Phase-6 FK gate.
 
 ## Phase 1 — Foundation (this is the bootstrap)
 
@@ -90,8 +90,8 @@ pattern (finding-010 #15), is tracked under "Deliberately deferred" in that sequ
 
 ## Pre-Phase-6 sequence
 
-**Status:** in progress — PRs 1–6 landed (#63, #64, #65, #70, #74, #88); PR 7
-closed-as-moot (2026-06-26 — the live DB has no FK-safe gnomAD orphan); PR 8 is next.
+**Status:** in progress — PRs 1–9 landed (#63, #64, #65, #70, #74, #88, #131, #133); PR 7
+closed-as-moot (2026-06-26 — the live DB has no FK-safe gnomAD orphan); PR 10 is next.
 
 A 14-PR run that clears every dbSNP-dependent backfill, deferred-cleanup item,
 and FK blocker before the Phase 6 analyses begin, so Phase 6 starts with no open
@@ -170,9 +170,20 @@ finding-016 #8):
   (2026-06-30); verify-gate GREEN (change_class=core; negative-control held — no DB anchor moved).
   Spun off RM-85121ee (the deferred `mapped_trait_uri VARCHAR[]` schema fix) + RM-035c394 (the
   implement-review pytest-poll wedge).
-- [ ] RM-12873bf (PR 9) — finding-010 #14: orphan-row cleanup *procedure* for rows under
+- [x] RM-12873bf (PR 9) — finding-010 #14: orphan-row cleanup *procedure* for rows under
   superseded `source_version_id`s, plus a runbook entry (covers `variant_aliases`
   orphans too). General/ongoing, vs. PR 7's one-off gnomAD-specific delete.
+  **Landed #133 / `d4a07d6` (2026-06-30); verify-gate GREEN (change_class=core; 6 dev-loop
+  steps PASS; integrity clean; tests 1713→1752).** `genome annotate purge-superseded`:
+  retention **keep-1** (active + immediate prior kept per source; finding-010 #14),
+  **dry-run default + mandatory read-only pre-execute probe + `--execute` opt-in** (the two
+  VSC gate decisions). Gate-confirmed a **pure no-op** on the live corpus (`orphan_candidates=0`,
+  every source `deletable=[]`) — the no-op is **corpus-conditional, not structural** (the orphan
+  sweep would snapshot + delete a zero-data registry orphan if one existed). Two fail-closed
+  guards: a **14-FK-child** per-column guard on `annotation_source_versions` (not the 8 in
+  `_SUPERSESSION_TABLES`) + a `source_db` dangling-pointer check. See CLAUDE.md obs #8,
+  [`verification.md`](docs/runbooks/verification.md) "PR 9 purge gate", finding-010 #14,
+  `MEMORY.md` DEC-0126/DEC-0127.
 - [ ] RM-9f3c52c (PR 10) — Version-label correctness policy (two related defects):
   - finding-010 #13: HEAD-request-failure version-label policy — write its own finding,
     decide refuse-vs-fallback, implement.
@@ -387,12 +398,12 @@ Each requires a deliberate schema-doc edit + `ddl` re-extract + `rm -rf data/ &&
 ### Documentation hygiene
 
 - [ ] RM-f53aa75 — **Prune 3 implemented-but-unpruned plan docs** (`decision-tracking-followups.md`, `docs-gate-enforcement.md`, `PP6-PR7-gnomad-orphan-version-cleanup.md`) whose status banners are stale (shipped/closed). (audit NOTES)
-- [ ] RM-a63d67a — **Refresh `verification.md` L462-466** — stale Phase-1 D7/arch-1 "open residual" narration closed by PR #123. (audit NOTES)
-- [ ] RM-c994ce4 — **Roll up `CHANGELOG.md [Unreleased]`** (~2076 lines) into a versioned release section per the CLAUDE.md convention (Phases 1-5 complete). (audit NOTES)
-- [ ] RM-66f4c75 — **Refresh README "Status"** (says "PR 7 next"; PR 7 closed-as-moot). (audit NOTES)
-- [ ] RM-4484526 — **Fix CLAUDE.md obs #6 stale line** ("strand-flip collapse deferred to PR 5" — shipped #73). (audit NOTES)
-- [ ] RM-80af453 — **Refresh ROADMAP header status lines** — ROADMAP.md L5 + L93-94 still read "PR 8 is next" (PR 8 merged #131). Update to "PRs 1–8 landed; PR 9 next"; batch with the README L235 fix (RM-66f4c75). (fast-follow / repo-sweep 2026-06-30)
-- [ ] RM-b8470f2 — **MEMORY.md per-PR DEC-row backfill, PRs #114–#131** — 18 missing tactical DEC rows (the ledger footer still reads "complete: PRs #19…#113"). Append DEC-0126…DEC-0143 (squash subject as the decision text) + bump the footer to #131. (fast-follow / repo-sweep 2026-06-30)
+- [x] RM-a63d67a — **Refresh `verification.md` L462-466** — stale Phase-1 D7/arch-1 "open residual" narration closed by PR #123. (audit NOTES)
+- [x] RM-c994ce4 — **Roll up `CHANGELOG.md [Unreleased]`** (~2076 lines) into a versioned release section per the CLAUDE.md convention (Phases 1-5 complete). (audit NOTES)
+- [x] RM-66f4c75 — **Refresh README "Status"** (says "PR 7 next"; PR 7 closed-as-moot). (audit NOTES)
+- [x] RM-4484526 — **Fix CLAUDE.md obs #6 stale line** ("strand-flip collapse deferred to PR 5" — shipped #73). (audit NOTES)
+- [x] RM-80af453 — **Refresh ROADMAP header status lines** — ROADMAP.md L5 + L93-94 still read "PR 8 is next" (PR 8 merged #131; PR 9 then merged #133). Update to "PRs 1–9 landed; PR 10 next"; batch with the README L235 fix (RM-66f4c75). (fast-follow / repo-sweep 2026-06-30)
+- [x] RM-b8470f2 — **MEMORY.md per-PR DEC-row backfill, PRs #114–#133** — the missing tactical per-PR DEC rows (the ledger footer still reads "complete: PRs #19…#113"). Append the next free contiguous range — **DEC-0128…** onward (DEC-0126/DEC-0127 are taken by RM-12873bf / PR 9's design-decision rows; #133's per-PR row backfills alongside #114–#131) — with the squash subject as the decision text + bump the footer. (fast-follow / repo-sweep 2026-06-30)
 
 ### ROADMAP source-of-truth migration (this effort — dogfooded; complete — PRs A/B/C merged)
 

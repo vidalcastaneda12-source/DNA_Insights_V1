@@ -177,6 +177,27 @@ superseded_by: []
     pressure point — but worth a runbook entry once the first
     same-source-multiple-versions diff query lands.
 
+    **SHIPPED — PR 9 (RM-12873bf), #133 / `d4a07d6` (2026-06-30).** The cleanup
+    procedure landed as `genome annotate purge-superseded`, with the runbook entry
+    this item asked for. Retention is **keep-1** — this item's "keep the prior version
+    for diff queries" rule, made concrete: the active + immediate prior `source_version_id`
+    are kept per source, everything older is deletable. It **defaults to dry-run** and
+    mutates only under an explicit `--execute` gated behind a mandatory read-only
+    pre-execute probe (the two VSC gate decisions), and covers `variant_aliases` orphans
+    as well as the per-source annotation tables — generalizing PR 7's one-off
+    gnomAD-specific delete (finding-015, closed-as-moot). Two fail-closed guards make it
+    safe: a **14-FK-child per-column guard** on `annotation_source_versions` (it has 14 FK
+    children, not the 8 in `_SUPERSESSION_TABLES` — `annotation_sources` via
+    `current_source_version_id`, the other 13 via `source_version_id` — each counted on its
+    real FK column via `duckdb_constraints()`, killing a post-TX1 BinderException), and a
+    `source_db` dangling-pointer check (a cross-source `current_source_version_id` is
+    FK-valid yet dangling → `DanglingPointerError`). Gate-confirmed a **corpus-conditional
+    pure no-op** today (`orphan_candidates=0`, every source `deletable=[]`): the procedure
+    exists and is verified, but the live corpus has no orphan to delete yet — the no-op is
+    conditional on the corpus, not structural. See CLAUDE.md "Real-data observations" #8,
+    [`verification.md`](../runbooks/verification.md) "PR 9 purge gate", ROADMAP
+    "Pre-Phase-6 sequence" PR 9, and `MEMORY.md` DEC-0126 / DEC-0127.
+
 15. **Cross-source generalization opportunity.** The pattern as
     implemented is generic: a `_sources(source_db PK,
     current_source_version_id)` registry plus a
