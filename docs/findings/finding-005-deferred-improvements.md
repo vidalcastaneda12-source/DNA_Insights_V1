@@ -148,6 +148,23 @@ manageable. This document tracks them so they aren't forgotten.
     finding-014's `maybe_skip_on_hash_match` to adopt the label of any prior
     `annotation_source_versions` row whose hash matches the cached file.
 
+11. **GWAS `MAPPED_TRAIT_URI` truncated to a single EFO URI.** GWAS Catalog's
+    `MAPPED_TRAIT_URI` cell can carry multiple comma-separated EFO URIs when an
+    association is mapped to several EFO terms (e.g.
+    `"...EFO_0000384,...EFO_0000729"`), but the schema's `mapped_trait_uri
+    VARCHAR` is single-valued. The sub-phase 5.3 `gwas_catalog` loader therefore
+    keeps the first URI (the curators' primary mapping), derives `trait_id` from
+    that same first URI, and increments the `truncated_mapped_trait_uri`
+    end-of-load counter on every truncation so the loss is surfaced rather than
+    silent. This entry is parity documentation for the behavior already
+    described in `docs/runbooks/annotations.md` (the "Single-value
+    `mapped_trait_uri`" note, lines 747-756); it was deferred from sub-phase 5.3.
+    *Recommended fix point:* a future schema change making `mapped_trait_uri` a
+    `VARCHAR[]` array so all mapped EFO URIs are retained — a schema-doc edit +
+    `ddl` re-extract + DB rebuild, captured (still deferred, do not execute
+    opportunistically) as ROADMAP slot **RM-85121ee** under "Deferred schema
+    changes (gated on next DB rebuild)". *Status:* **open** — deferred from 5.3.
+
 ## Implication
 
 Each item is a known limitation with an identified fix point. They are not

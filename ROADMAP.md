@@ -369,6 +369,7 @@ Each requires a deliberate schema-doc edit + `ddl` re-extract + `rm -rf data/ &&
 - [ ] RM-ea6c510 — **Add a real `genotype_calls.dosage_confidence` column** (NOT NULL-defaulted, DR² and dosage-confidence cleanly separated) to replace the `imputation_r2`+`quality_flags` overload for male non-PAR chrX. (finding-031; CHANGELOG [Unreleased]; U16)
 - [ ] RM-0bb9b37 — **Drop `variant_id_seq` in favor of a `MAX`-based allocator** (as the annotation tables use), removing the fragile `_resync_variant_id_sequence` dance that caused the finding-029 off-by-one. (finding-020 §2; U17)
 - [ ] RM-7b3123e — **Expand `ingestion_status_enum`** so imputation roundtrip sub-stages get first-class status values instead of being squeezed into 4 values + metadata. (imputation/runs.py:6-10; U18)
+- [ ] RM-85121ee — **Multi-valued `mapped_trait_uri` (`VARCHAR[]`)** so GWAS rows with multiple comma-separated EFO URIs stop truncating to URI#1 (today single-valued VARCHAR; loader keeps URI#1 + counts `truncated_mapped_trait_uri`). Schema-doc edit + `ddl` re-extract + `rm -rf data/ && genome init`; do NOT execute opportunistically. (finding-005 #11)
 
 ### Tooling, gates & process
 
@@ -377,6 +378,7 @@ Each requires a deliberate schema-doc edit + `ddl` re-extract + `rm -rf data/ &&
 - [ ] RM-e150116 — **[operator] Enable the `workflows-gate` workflow as a required status check on `main`** — same toggle for the C2+D reversal-gate. (verification.md:505-507; U6)
 - [ ] RM-eda68be — **Markdown↔DDL parity CI check / re-extraction tool**: verify each schema-doc fenced SQL block matches `ddl/*.sql` (the `docs check` gate validates the ledger/frontmatter, not schema↔DDL parity). (finding-010 #16; U21)
 - [ ] RM-a128da3 — **Teach `scope_split` `roadmap_writer`/`formatter` to mint `RM-` ids for auto-written sub-scope slots** so the managed `<!-- B2-SUBSCOPES -->` region can later drop its gate exemption. (dogfood)
+- [ ] RM-035c394 — **`implement-review.js` implementer must run the dev-loop `pytest` in the FOREGROUND (a `Bash` call with a timeout), not as a background task + `sleep`-poll on its output file** — the Stage-2 wedge surfaced on RM-76ec5db / PR 8: the implementer backgrounded `pytest`, then polled a never-filled (0-byte) output file and hung ~6.5 h; the segment never advanced past the implementer (≈85k tokens, no green-keeper / no review fan-out). Fix the dev-loop invocation in the implementer agent / workflow so a slow suite cannot wedge the run — run pytest foreground with a generous timeout, or rely on the harness's background-completion notification, never a manual file poll. (finding-034; surfaced by `/scope-run RM-76ec5db`)
 - [x] RM-9dc7915 — **`genome roadmap check` fail-closed gate** (PR B of this effort): validate RM-id format + uniqueness + findings↔ROADMAP referential integrity; DB-free; + `roadmap-gate` CI. (finding-042 / DEC-0125)
 
 ### Documentation hygiene
