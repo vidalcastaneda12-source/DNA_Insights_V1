@@ -1320,6 +1320,19 @@ def refresh(
     # the label-based short-circuits did not AND the download was a cache
     # hit that rebound onto the active label. Version+HASH, not
     # version-only; --force bypasses it. supersession.py is untouched.
+    #
+    # SHADOWED / currently unreachable in GWAS (finding-043). Reaching
+    # this clause under force=False requires sha256 == active hash, and
+    # the Step-2 `skip_already_current` early return above guarantees the
+    # LIVE label already differs from the active version by this point —
+    # together exactly the firing condition of the finding-014 3a
+    # hash-fallback (which ClinVar has no analogue of), so 3a returns
+    # `skip_content_unchanged` FIRST and this clause never runs today.
+    # Retained deliberately: it is the symmetric twin of ClinVar's
+    # REACHABLE 3c guard (ClinVar lacks the 3a fallback, so there the
+    # guard does fire) and is defense-in-depth SHOULD the 3a hash-fallback
+    # ever be removed. Do not delete without restoring an equivalent
+    # post-rebind guard.
     if not force:
         with duckdb_connection() as conn:
             current = get_current_version(conn, SOURCE_DB)

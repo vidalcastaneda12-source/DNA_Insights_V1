@@ -30,7 +30,9 @@ from typer.testing import CliRunner
 from genome.annotate import downloads as annotate_downloads
 from genome.annotate.loaders import clinvar as clinvar_loader
 from genome.annotate.loaders.clinvar import (
+    _CACHE_FILENAME,
     _CHUNK_SIZE,
+    SOURCE_DB,
     _clean_rsid,
     _empty_to_none,
     _extract_hgvs_c_p,
@@ -1563,6 +1565,46 @@ def test_refresh_steady_state_advanced_no_spurious_supersession(
 
     after = _clinvar_registry_snapshot()
     assert after == before
+
+
+def test_refresh_unbound_cache_hit_warns_and_proceeds_with_live_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-PR-10 cache (bytes on disk, NO ``.version`` sidecar) warns and self-heals.
+
+    Seeds the cache file at the exact download dest WITHOUT a sidecar
+    (the pre-PR-10 on-disk state: bytes cached before the sidecar-write
+    was added), then drives ``refresh(force=False)`` with the live
+    resolver at a fresh label. The download is a cache HIT with
+    ``cached_version_label=None``, so the rebind's ``elif`` branch fires:
+    the loader WARNS ``clinvar.version.unbound_cache_hit`` and proceeds
+    with the LIVE label (the historical behaviour), self-healing on the
+    next ``--force`` (finding-043 transitional unbound-cache-hit gap /
+    DEC-0149). Covers the reachable-but-previously-untested no-sidecar
+    branch.
+    """
+    from structlog.testing import capture_logs  # noqa: PLC0415 — test-local
+
+    init_databases()
+    _enable_external_calls()
+
+    # Pre-PR-10 cache: write the payload to the exact download dest with
+    # NO ``.version`` sidecar alongside it.
+    dest = annotate_downloads.source_download_dir(SOURCE_DB) / _CACHE_FILENAME
+    dest.write_bytes(_gzip_clinvar_payload())
+    assert not dest.with_name(dest.name + ".version").exists()
+
+    _patch_resolve_version(monkeypatch, "2026_06_15")
+    with capture_logs() as captured:
+        result = clinvar_loader.refresh(force=False)
+
+    # The refresh COMPLETES against the LIVE label (no rebind, no raise).
+    assert result.was_already_current is False
+    assert result.version == "2026_06_15"
+
+    warn = next(c for c in captured if c["event"] == "clinvar.version.unbound_cache_hit")
+    assert warn["log_level"] == "warning"
+    assert warn["live_version"] == "2026_06_15"
 
 
 # ---------------------------------------------------------------------------

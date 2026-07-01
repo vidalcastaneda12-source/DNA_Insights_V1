@@ -529,9 +529,11 @@ def _resolve_version_via_head() -> str:
     except ExternalCallsDisabledError:
         # Privacy gate is fail-closed; surface immediately. Kept as an
         # explicit handler (with a body, so it is not a bare re-raise)
-        # now that its ExternalCallError sibling is gone: the subclass
-        # ordering is load-bearing and the marker log documents the
-        # fail-closed refusal in the structlog stream (finding-022 #9).
+        # now that its ExternalCallError sibling is gone. Forward-looking:
+        # ExternalCallsDisabledError subclasses ExternalCallError — if an
+        # ExternalCallError handler is ever re-added it must come AFTER
+        # this clause; the marker log keeps this lone re-raise clear of
+        # ruff TRY203 (finding-043 / DEC-0148).
         logger.info("clinvar.version.head_call_disabled")
         raise
 

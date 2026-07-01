@@ -131,6 +131,11 @@ resolver path — another reason it was not free.)
   fallback into a shared `maybe_skip_on_hash_match(...)` helper is a *refactor of the existing
   gwas-only 3a*, orthogonal to the label-binding spine here. The inline 3c/3d guard is version+
   **hash** but is not that shared helper. Left `[ ]` in ROADMAP.
+- **Sidecar write/read atomicity is not adversarial-hardened** (`RM-fd3f213`, follow-up): a
+  swallowed sidecar-write failure can leave a STALE sidecar rather than degrading to ABSENT, and
+  `_read_version_sidecar` swallows broad `OSError` without a log. Real on-theme label-correctness
+  hardening (temp-file+atomic-rename / narrow to `FileNotFoundError`) but only adversarially
+  reachable under the single-user `0700`/`0600` cache — captured forward, not fixed here.
 - **Already-mislabeled live rows** are not rewritten (finding-022 #11): a future
   `refresh --source {clinvar,gwas_catalog} --force` against a re-pulled current cache mints a
   correctly-labeled row. PR 10 stops *new* mislabels; it does not retro-correct old ones.

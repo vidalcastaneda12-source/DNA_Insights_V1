@@ -35,8 +35,10 @@ from typer.testing import CliRunner
 from genome.annotate import downloads as annotate_downloads
 from genome.annotate.loaders import gwas_catalog as gwas_loader
 from genome.annotate.loaders.gwas_catalog import (
+    _CACHE_FILENAME,
     _CHUNK_SIZE,
     _ZIP_TSV_MEMBER,
+    SOURCE_DB,
     _derive_is_replicated,
     _empty_to_none,
     _extract_trait_id,
@@ -1183,12 +1185,17 @@ def test_rebuild_reload_binds_label_to_cached_bytes(
     annotation_source_versions must be the sidecar/bytes label
     ``2026_05_16`` — NOT the drifted live label (finding-022 #4 / D2).
 
-    Ordering guard: the finding-014 3a hash-fallback exercised by
-    ``test_skip_when_content_unchanged_despite_label_drift`` evaluates
-    against the LIVE label and short-circuits an unchanged active row
-    BEFORE the rebind, so wiring the rebind must not disturb that test
-    (rebind-first would flip ``current.version != version`` to False and
-    duplicate the row — the traced 4717ff06 regression).
+    Ordering guard: the finding-014 3a hash-fallback evaluates against
+    the LIVE label and short-circuits an unchanged active row BEFORE the
+    rebind (rebind-first would flip ``current.version != version`` to
+    False and duplicate the row — the traced 4717ff06 regression). The
+    test that actually ENFORCES that ordering is
+    ``test_cache_hit_hash_fallback_precedes_rebind_ordering_guard`` — it
+    drives a genuine ``from_cache=True`` cache hit whose sidecar label ==
+    the active version, so a rebind-before-3a reorder would change its
+    outcome. ``test_skip_when_content_unchanged_despite_label_drift``
+    does NOT guard the ordering: it stubs ``from_cache=False`` so its
+    rebind is a no-op and it would survive the reorder unchanged.
     """
     # from: plan §5/§6 (gwas mirror) — cache-hit rebuild inserts the CACHED label, not the live one
     from genome.config import get_settings  # noqa: PLC0415
@@ -1222,6 +1229,115 @@ def test_rebuild_reload_binds_label_to_cached_bytes(
             " WHERE source_db = 'gwas_catalog' ORDER BY source_version_id",
         ).fetchall()
     assert versions == [("2026_05_16",)]
+
+
+def test_refresh_unbound_cache_hit_warns_and_proceeds_with_live_label(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-PR-10 cache (ZIP on disk, NO ``.version`` sidecar) warns and self-heals.
+
+    Seeds the cache ZIP at the exact download dest WITHOUT a sidecar (the
+    pre-PR-10 on-disk state: bytes cached before the sidecar-write was
+    added), then drives ``refresh(force=False)`` with the live resolver
+    at a fresh label. The download is a cache HIT with
+    ``cached_version_label=None``, so the rebind's ``elif`` branch fires:
+    the loader WARNS ``gwas_catalog.version.unbound_cache_hit`` and
+    proceeds with the LIVE label (the historical behaviour), self-healing
+    on the next ``--force`` (finding-043 transitional unbound-cache-hit
+    gap / DEC-0149). Covers the reachable-but-previously-untested
+    no-sidecar branch — the gwas mirror of the clinvar case.
+    """
+    from structlog.testing import capture_logs  # noqa: PLC0415 — test-local
+
+    init_databases()
+    _enable_external_calls()
+
+    # Pre-PR-10 cache: write the ZIP payload to the exact download dest
+    # with NO ``.version`` sidecar alongside it.
+    dest = annotate_downloads.source_download_dir(SOURCE_DB) / _CACHE_FILENAME
+    dest.write_bytes(_zip_gwas_payload(tmp_path))
+    assert not dest.with_name(dest.name + ".version").exists()
+
+    _patch_resolve_version(monkeypatch, "2026_06_15")
+    with capture_logs() as captured:
+        result = gwas_loader.refresh(force=False)
+
+    # The refresh COMPLETES against the LIVE label (no rebind, no raise).
+    assert result.was_already_current is False
+    assert result.version == "2026_06_15"
+    assert result.record_count == _EXPECTED_EMITTED
+
+    warn = next(c for c in captured if c["event"] == "gwas_catalog.version.unbound_cache_hit")
+    assert warn["log_level"] == "warning"
+    assert warn["live_version"] == "2026_06_15"
+
+
+def test_cache_hit_hash_fallback_precedes_rebind_ordering_guard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The finding-014 3a hash-fallback runs against the LIVE label BEFORE the rebind.
+
+    The REAL ordering guard for the 3a-before-3c(rebind) invariant (the
+    one ``test_rebuild_reload_binds_label_to_cached_bytes``'s docstring
+    used to misattribute to ``test_skip_when_content_unchanged_despite_label_drift``,
+    which stubs ``from_cache=False`` and so has a no-op rebind that would
+    survive a reorder).
+
+    Seeds a POPULATED active GWAS row at ``2026_05_16`` via a REAL
+    download (cache ZIP + ``.version`` sidecar written), leaves the DB
+    intact, then drifts the LIVE resolver to ``2026_06_15``. The second
+    refresh is a genuine cache HIT (``from_cache=True``) whose sidecar
+    label (``2026_05_16``) == the active version and whose sha256 == the
+    active hash. If the rebind ran first it would bind ``version`` to the
+    cached ``2026_05_16`` == active, flipping 3a's ``current.version !=
+    version`` guard to False and duplicating the row (the traced 4717ff06
+    regression). Because 3a evaluates against the LIVE label it fires
+    ``gwas_catalog.skip_content_unchanged`` FIRST and returns — the
+    rebind (``label_rebound_to_cache``) and the 3d post-rebind guard
+    (``skip_already_current_post_rebind``) are never reached.
+    """
+    from structlog.testing import capture_logs  # noqa: PLC0415 — test-local
+
+    payload = _zip_gwas_payload(tmp_path)
+
+    init_databases()
+    _enable_external_calls()
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=payload)
+
+    _patched_external_client_with_handler(monkeypatch, handler)
+    _patch_resolve_version(monkeypatch, "2026_05_16")
+    seeded = gwas_loader.refresh(force=False)
+    assert seeded.was_already_current is False
+
+    # DB intact (no rm -rf). Cache ZIP + sidecar 2026_05_16 on disk; the
+    # live resolver drifts ahead to a later label, content byte-identical.
+    _patch_resolve_version(monkeypatch, "2026_06_15")
+    with capture_logs() as captured:
+        result = gwas_loader.refresh(force=False)
+
+    # 3a returned against the ACTIVE row's label — no new version minted.
+    assert result.was_already_current is True
+    assert result.source_version_id == seeded.source_version_id
+    assert result.version == "2026_05_16"
+
+    events = [c["event"] for c in captured]
+    # 3a fired against the LIVE label...
+    assert "gwas_catalog.skip_content_unchanged" in events
+    # ...BEFORE the rebind or the 3d post-rebind guard could run.
+    assert "gwas_catalog.version.label_rebound_to_cache" not in events
+    assert "gwas_catalog.skip_already_current_post_rebind" not in events
+
+    # Still exactly one version row: the fallback is a pure no-op.
+    with duckdb_connection() as conn:
+        n_versions = conn.execute(
+            "SELECT COUNT(*) FROM annotation_source_versions WHERE source_db = 'gwas_catalog'",
+        ).fetchone()
+    assert n_versions is not None
+    assert n_versions[0] == 1
 
 
 def test_refresh_transaction_rolls_back_on_bulk_insert_failure(

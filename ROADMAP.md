@@ -233,6 +233,7 @@ hasn't arrived, tracked in findings for when it does:
 
 - [ ] RM-4f5df57 — Cross-source generalization of the version-pointer pattern (finding-010 #15)
 - [ ] RM-25072d2 — Generalize the hash-match fallback into a shared helper
+- [ ] RM-fd3f213 — Sidecar write/read atomicity hardening (finding-043 follow-up): temp-file+atomic-rename (or unlink-before-write) for the version sidecar so a swallowed write failure degrades to ABSENT not STALE; narrow `_read_version_sidecar` to FileNotFoundError + warn on other OSError. Adversarial-only today (single-user 0700/0600 cache); on-theme label-correctness hardening.
 - [ ] RM-b2a34d9 — Hash-as-canonical-identity refactor
 - [ ] RM-597e9fc — `annotate inspect --source URL` schema-inspection helper
 - [ ] RM-74c3386 — Gate-1 fail-closed **token core** for `genome.campaign` `approve-plan` — a typed-token authorization mirroring Sub Project A's `verify_gate` `merge` token; the shipped `--approved` flag already suffices (the reducer refuses any GATE_CROSSING absent `external_event`), so this is future hardening, not a correctness gap. Gated on Sub Project C2+D Phase 2. ([`finding-041`](docs/findings/finding-041-campaign-orchestrator.md) "Gate-1 authorization — as taken" / `DEC-0121`)
