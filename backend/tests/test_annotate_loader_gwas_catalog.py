@@ -159,13 +159,14 @@ def _patch_download_to_cache(
     digest = hashlib.sha256(zip_path.read_bytes()).hexdigest()
     size = zip_path.stat().st_size
 
-    def _stub(
+    def _stub(  # noqa: PLR0913 — mirrors download_to_cache's public signature (R2 adds version_label)
         source_db: str,  # noqa: ARG001
         url: str,  # noqa: ARG001
         filename: str,  # noqa: ARG001
         *,
         resource_id: str,  # noqa: ARG001
         force: bool = False,  # noqa: ARG001
+        version_label: str | None = None,  # noqa: ARG001 — R2: loader now passes it; stub must accept
     ) -> annotate_downloads.DownloadResult:
         counter["calls"] += 1
         return annotate_downloads.DownloadResult(
@@ -1154,6 +1155,73 @@ def test_skip_when_content_unchanged_despite_label_drift(
     assert n_versions[0] == 1
     assert current_pointer is not None
     assert int(current_pointer[0]) == first.source_version_id
+
+
+# ---------------------------------------------------------------------------
+# Integration: version-label correctness policy (PR 10 / RM-9f3c52c) — gwas mirror.
+# ---------------------------------------------------------------------------
+
+
+def _zip_gwas_payload(tmp_path: Path) -> bytes:
+    """The real download body bytes: the fixture TSV wrapped in the EBI ZIP shape."""
+    zip_path = tmp_path / "gwas_seed.zip"
+    _wrap_tsv_in_zip(_FIXTURE_PATH, zip_path)
+    return zip_path.read_bytes()
+
+
+def test_rebuild_reload_binds_label_to_cached_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """INV-2 GOLD (gwas mirror): a ``rm -rf data/`` rebuild binds the CACHED label.
+
+    Seeds cache + ``.version`` sidecar at ``2026_05_16`` via a real
+    download (MockTransport → the fixture ZIP bytes), wipes only the
+    DuckDB (the sidecar under ANNOTATIONS_DOWNLOAD_ROOT survives — R4),
+    re-inits an empty schema, then drifts the LIVE resolver to
+    ``2026_06_15``. The reload is a cache HIT, so the version written to
+    annotation_source_versions must be the sidecar/bytes label
+    ``2026_05_16`` — NOT the drifted live label (finding-022 #4 / D2).
+
+    Ordering guard: the finding-014 3a hash-fallback exercised by
+    ``test_skip_when_content_unchanged_despite_label_drift`` evaluates
+    against the LIVE label and short-circuits an unchanged active row
+    BEFORE the rebind, so wiring the rebind must not disturb that test
+    (rebind-first would flip ``current.version != version`` to False and
+    duplicate the row — the traced 4717ff06 regression).
+    """
+    # from: plan §5/§6 (gwas mirror) — cache-hit rebuild inserts the CACHED label, not the live one
+    from genome.config import get_settings  # noqa: PLC0415
+
+    payload = _zip_gwas_payload(tmp_path)
+
+    init_databases()
+    _enable_external_calls()
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=payload)
+
+    _patched_external_client_with_handler(monkeypatch, handler)
+    _patch_resolve_version(monkeypatch, "2026_05_16")
+    seeded = gwas_loader.refresh(force=False)
+    assert seeded.was_already_current is False
+
+    # Wipe only the DuckDB; create-if-absent init will not wipe on its own (R4).
+    get_settings().genome_duckdb_path.unlink()
+    init_databases()
+    _enable_external_calls()
+
+    # The LIVE resolver has drifted; the cached ZIP bytes on disk are unchanged.
+    _patch_resolve_version(monkeypatch, "2026_06_15")
+    result = gwas_loader.refresh(force=False)
+
+    assert result.version == "2026_05_16"
+    with duckdb_connection() as conn:
+        versions = conn.execute(
+            "SELECT version FROM annotation_source_versions"
+            " WHERE source_db = 'gwas_catalog' ORDER BY source_version_id",
+        ).fetchall()
+    assert versions == [("2026_05_16",)]
 
 
 def test_refresh_transaction_rolls_back_on_bulk_insert_failure(

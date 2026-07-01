@@ -46,11 +46,14 @@ from genome.annotate.loaders.clinvar import (
     _review_status_to_star,
     _stream_bulk_insert,
 )
-from genome.annotate.registry import get_loader
+from genome.annotate.registry import RefreshResult, get_loader
 from genome.cli import app
 from genome.db import duckdb_connection, init_databases
 from genome.db.sqlite_conn import sqlcipher_connection
-from genome.privacy.external_client import ExternalCallsDisabledError
+from genome.privacy.external_client import (
+    ExternalCallError,
+    ExternalCallsDisabledError,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -419,13 +422,14 @@ def _patch_download_to_cache(
     digest = hashlib.sha256(gz_path.read_bytes()).hexdigest()
     size = gz_path.stat().st_size
 
-    def _stub(
+    def _stub(  # noqa: PLR0913 — mirrors download_to_cache's public signature (R2 adds version_label)
         source_db: str,  # noqa: ARG001
         url: str,  # noqa: ARG001
         filename: str,  # noqa: ARG001
         *,
         resource_id: str,  # noqa: ARG001
         force: bool = False,  # noqa: ARG001
+        version_label: str | None = None,  # noqa: ARG001 — R2: loader now passes it; stub must accept
     ) -> annotate_downloads.DownloadResult:
         counter["calls"] += 1
         return annotate_downloads.DownloadResult(
@@ -852,7 +856,8 @@ def test_resolve_version_reads_last_modified_header() -> None:
     assert version == "2026_05_10"
 
 
-def test_resolve_version_falls_back_when_header_missing() -> None:
+def test_resolve_version_raises_when_header_missing() -> None:
+    # spec: finding-043 / plan §5 — refuse policy (was a today-label fallback)
     init_databases()
     _enable_external_calls()
 
@@ -862,13 +867,14 @@ def test_resolve_version_falls_back_when_header_missing() -> None:
     monkeypatch = pytest.MonkeyPatch()
     try:
         _patched_external_client_with_handler(monkeypatch, handler)
-        version = _resolve_version_via_head()
+        with pytest.raises(ValueError):  # noqa: PT011 — missing Last-Modified → refuse (ValueError)
+            _resolve_version_via_head()
     finally:
         monkeypatch.undo()
-    assert version == datetime.now(UTC).strftime("%Y_%m_%d")
 
 
-def test_resolve_version_falls_back_when_header_unparseable() -> None:
+def test_resolve_version_raises_when_header_unparseable() -> None:
+    # spec: finding-043 / plan §5 — refuse policy (was a today-label fallback)
     init_databases()
     _enable_external_calls()
 
@@ -878,16 +884,14 @@ def test_resolve_version_falls_back_when_header_unparseable() -> None:
     monkeypatch = pytest.MonkeyPatch()
     try:
         _patched_external_client_with_handler(monkeypatch, handler)
-        version = _resolve_version_via_head()
+        with pytest.raises(ValueError):  # noqa: PT011 — unparseable Last-Modified → refuse (ValueError)
+            _resolve_version_via_head()
     finally:
         monkeypatch.undo()
-    # parsedate_to_datetime returns None for fully-unparseable input
-    # in some Python versions; the loader treats both that and any
-    # raised TypeError/ValueError as the fallback path.
-    assert re.match(r"^\d{4}_\d{2}_\d{2}$", version)
 
 
-def test_resolve_version_falls_back_when_http_error() -> None:
+def test_resolve_version_raises_when_http_error() -> None:
+    # spec: finding-043 / plan §5 — refuse policy (was a today-label fallback)
     init_databases()
     _enable_external_calls()
 
@@ -897,10 +901,11 @@ def test_resolve_version_falls_back_when_http_error() -> None:
     monkeypatch = pytest.MonkeyPatch()
     try:
         _patched_external_client_with_handler(monkeypatch, handler)
-        version = _resolve_version_via_head()
+        # HEAD ExternalCallError now PROPAGATES (GWAS-symmetric refuse); no today-label.
+        with pytest.raises(ExternalCallError):
+            _resolve_version_via_head()
     finally:
         monkeypatch.undo()
-    assert version == datetime.now(UTC).strftime("%Y_%m_%d")
 
 
 # ---------------------------------------------------------------------------
@@ -1382,6 +1387,182 @@ def test_refresh_transaction_rolls_back_on_bulk_insert_failure(
     assert version_rows[0] == 0
     assert annotation_rows is not None
     assert annotation_rows[0] == 0
+
+
+# ---------------------------------------------------------------------------
+# Integration: version-label correctness policy (PR 10 / RM-9f3c52c).
+#
+# from: plan §5 / §6. The D1 refuse oracle (a HEAD failure must not orphan a
+# prior version), the D2 rebuild-relabel GOLD oracle (a cache-hit rebuild binds
+# the CACHED bytes' label, not the drifted live label), and the steady-state
+# guard (a post-rebind match to the active row mints nothing). All three route
+# the REAL download_to_cache via MockTransport so the on-disk cache + `.version`
+# sidecar round-trip (R5) — the _patch_download_to_cache stub hard-codes
+# from_cache=False and cannot reach the rebind/guard.
+# ---------------------------------------------------------------------------
+
+
+def _gzip_clinvar_payload(n: int = 50) -> bytes:
+    """A gzip-compressed ``variant_summary`` TSV — the real download body bytes."""
+    return gzip.compress(_build_n_row_tsv(n).encode("utf-8"))
+
+
+def _seed_active_clinvar_via_real_download(
+    mp: pytest.MonkeyPatch,
+    *,
+    version: str,
+    payload: bytes,
+) -> RefreshResult:
+    """Seed cache file + ``.version`` sidecar + active DB row via a REAL download.
+
+    Routes the fresh download through a MockTransport (unlike
+    ``_patch_download_to_cache``, which hard-codes ``from_cache=False``
+    and writes no sidecar) so a later cache hit round-trips the sidecar
+    label — the precondition the D2 rebind + steady-state guard fire on.
+    """
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=payload)
+
+    _patched_external_client_with_handler(mp, handler)
+    _patch_resolve_version(mp, version)
+    return clinvar_loader.refresh(force=False)
+
+
+def _clinvar_registry_snapshot() -> tuple[list[tuple[object, ...]], object, object]:
+    """(version rows, MAX(source_version_id), clinvar pointer) — the byte-oracle."""
+    with duckdb_connection() as conn:
+        rows = conn.execute(
+            "SELECT source_version_id, source_db, version, source_file_hash,"
+            " source_file_size, record_count"
+            " FROM annotation_source_versions"
+            " ORDER BY source_version_id",
+        ).fetchall()
+        max_svid = conn.execute(
+            "SELECT COALESCE(MAX(source_version_id), 0) FROM annotation_source_versions",
+        ).fetchone()
+        pointer = conn.execute(
+            "SELECT current_source_version_id FROM annotation_sources WHERE source_db = 'clinvar'",
+        ).fetchone()
+    return rows, max_svid, pointer
+
+
+def test_refresh_head_failure_does_not_orphan_prior_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """INV-1: a transient HEAD failure must REFUSE, not orphan the prior version.
+
+    Seeds a pre-existing active clinvar version (real download → cache
+    file + active DB row + pointer), then fails the HEAD resolver with a
+    5xx. Under the refuse policy (finding-043 / plan §5)
+    ``_resolve_version_via_head`` PROPAGATES, so ``refresh`` raises before
+    any registry write: the prior version + pointer survive byte-for-byte
+    and no fresh source_version_id is minted.
+    """
+    # from: plan §6 — INV-1: raise + annotation_source_versions byte-unchanged + pointer unchanged
+    init_databases()
+    _enable_external_calls()
+
+    seed_mp = pytest.MonkeyPatch()
+    try:
+        seeded = _seed_active_clinvar_via_real_download(
+            seed_mp,
+            version="2026_05_10",
+            payload=_gzip_clinvar_payload(),
+        )
+    finally:
+        seed_mp.undo()
+    assert seeded.was_already_current is False
+
+    before = _clinvar_registry_snapshot()
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text="Service Unavailable")
+
+    _patched_external_client_with_handler(monkeypatch, handler)
+    with pytest.raises(ExternalCallError):
+        clinvar_loader.refresh(force=False)
+
+    after = _clinvar_registry_snapshot()
+    assert after == before
+
+
+def test_rebuild_reload_binds_label_to_cached_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """INV-2 GOLD: a ``rm -rf data/`` rebuild binds the CACHED bytes' label.
+
+    Seeds cache + ``.version`` sidecar at ``2026_05_17`` via a real
+    download, wipes only the DuckDB file (the sidecar under
+    ANNOTATIONS_DOWNLOAD_ROOT is a sibling and survives — R4), re-inits an
+    empty schema, then drifts the LIVE resolver to ``2026_06_15``. The
+    reload is a cache HIT, so the version written to
+    annotation_source_versions must be the sidecar/bytes label
+    ``2026_05_17`` — NOT the drifted live label (finding-022 #4 / D2).
+    """
+    # from: plan §6 — INV-2: cache-hit rebuild inserts the CACHED label, not the drifted live label
+    from genome.config import get_settings  # noqa: PLC0415
+
+    init_databases()
+    _enable_external_calls()
+
+    _seed_active_clinvar_via_real_download(
+        monkeypatch,
+        version="2026_05_17",
+        payload=_gzip_clinvar_payload(),
+    )
+
+    # Wipe only the DuckDB; create-if-absent init will not wipe on its own (R4).
+    get_settings().genome_duckdb_path.unlink()
+    init_databases()
+    _enable_external_calls()
+
+    # The LIVE resolver has drifted; the cached bytes on disk are unchanged.
+    _patch_resolve_version(monkeypatch, "2026_06_15")
+    result = clinvar_loader.refresh(force=False)
+
+    assert result.version == "2026_05_17"
+    with duckdb_connection() as conn:
+        versions = conn.execute(
+            "SELECT version FROM annotation_source_versions"
+            " WHERE source_db = 'clinvar' ORDER BY source_version_id",
+        ).fetchall()
+    assert versions == [("2026_05_17",)]
+
+
+def test_refresh_steady_state_advanced_no_spurious_supersession(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Steady-state guard: a cache-hit rebind to the ACTIVE label mints nothing.
+
+    Active row + cache + sidecar at ``2026_05_17``; the live resolver then
+    advances to ``2026_06_15`` while the cached bytes are unchanged. The
+    download is a cache hit → the label rebinds to ``2026_05_17`` (== the
+    active row's version) with a matching sha256, so the force=False
+    post-rebind guard returns ``was_already_current=True`` WITHOUT minting
+    a new source_version_id or flipping the pointer (finding-043 / plan §5).
+    """
+    # from: plan §6 — guard: was_already_current True + MAX(source_version_id) + pointer unchanged
+    init_databases()
+    _enable_external_calls()
+
+    first = _seed_active_clinvar_via_real_download(
+        monkeypatch,
+        version="2026_05_17",
+        payload=_gzip_clinvar_payload(),
+    )
+    assert first.was_already_current is False
+
+    before = _clinvar_registry_snapshot()
+
+    _patch_resolve_version(monkeypatch, "2026_06_15")
+    second = clinvar_loader.refresh(force=False)
+
+    assert second.was_already_current is True
+    assert second.source_version_id == first.source_version_id
+
+    after = _clinvar_registry_snapshot()
+    assert after == before
 
 
 # ---------------------------------------------------------------------------

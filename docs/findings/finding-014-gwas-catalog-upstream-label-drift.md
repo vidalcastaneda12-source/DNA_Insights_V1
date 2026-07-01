@@ -146,6 +146,11 @@ superseded_by: []
     helper in `genome.annotate.supersession`) the first time a
     second source exhibits the same drift pattern. Tracked as a
     bullet in `finding-005-deferred-improvements.md`.
+    **Still OPEN after PR 10 / `RM-9f3c52c` (finding-043):** PR 10 shipped a
+    *label-binding* sidecar + an inline version+hash steady-state guard, but
+    deliberately did **not** extract this shared helper (OQ-4=4a-i keeps
+    `supersession.py` untouched). The generalization remains open as its own scope,
+    `RM-25072d2`.
 
 13. **Optional: replace label-based identity with hash-based
     identity outright (Phase 6+ refactor).** The current model treats

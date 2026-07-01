@@ -184,9 +184,9 @@ finding-016 #8):
   `_SUPERSESSION_TABLES`) + a `source_db` dangling-pointer check. See CLAUDE.md obs #8,
   [`verification.md`](docs/runbooks/verification.md) "PR 9 purge gate", finding-010 #14,
   `MEMORY.md` DEC-0126/DEC-0127.
-- [ ] RM-9f3c52c (PR 10) — Version-label correctness policy (two related defects):
+- [x] RM-9f3c52c (PR 10) — Version-label correctness policy (two related defects):
   - finding-010 #13: HEAD-request-failure version-label policy — write its own finding,
-    decide refuse-vs-fallback, implement.
+    decide refuse-vs-fallback, implement. **Shipped: refuse (finding-043 / DEC-0148).**
   - finding-022 / finding-005 #10: the loader version label decouples from the cached bytes on a
     `rm -rf data/` rebuild reload — ClinVar/GWAS resolve the *current upstream* label (e.g. June)
     while loading *older cached* bytes (e.g. May), mislabeling `annotation_source_versions.version`
@@ -194,7 +194,13 @@ finding-016 #8):
     `<file>.version` written on fresh download and read back on a cache-hit, or generalize
     finding-014's `maybe_skip_on_hash_match` to adopt the label of any prior row whose hash matches
     the cached file. (Folded here by the 2026-06-26 repo sweep; the named "next annotation-loader
-    PR" fix point had no slot.)
+    PR" fix point had no slot.) **Shipped: the sidecar shape (finding-043 / DEC-0149).**
+  - Shipped 2026-07-01: OQ-1=A refuse (ClinVar HEAD failure propagates / raises, GWAS-symmetric)
+    + the `<dest>.version` sidecar bind + inline version+hash steady-state guard (OQ-4=4a-i,
+    `supersession.py` untouched). See [`finding-043`](docs/findings/finding-043-head-failure-version-label-policy.md),
+    [`verification.md`](docs/runbooks/verification.md) "PR 10 version-label correctness gate",
+    `MEMORY.md` DEC-0148/DEC-0149. The `maybe_skip_on_hash_match` generalization stays separate as
+    RM-25072d2 (still open, below).
 - [ ] RM-7fba363 (PR 11) — finding-008: `register-existing-result` CLI command, collapsing
   the full-archive rebuild workflow.
 - [ ] RM-c5bcb2d (PR 12) — Top-level CLI test module for `init` / `status` / `config get|set` /

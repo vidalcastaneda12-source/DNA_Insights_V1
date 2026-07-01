@@ -453,6 +453,88 @@ See CLAUDE.md "Real-data observations" **#8**, ROADMAP "Pre-Phase-6 sequence" PR
 (RM-12873bf), [`finding-010`](../findings/finding-010-version-pointer-supersession-pattern.md)
 #14, and `MEMORY.md` DEC-0126 / DEC-0127.
 
+### PR 10 version-label correctness gate (HEAD-failure refuse + bytes-bound label / finding-043)
+
+PR 10 (`RM-9f3c52c`) closes two label-integrity defects in the ClinVar / GWAS Catalog loaders:
+**D1** — the ClinVar HEAD resolver refuses (propagates / raises) instead of fabricating today's
+date (OQ-1=A, finding-010 #13); **D2** — `download_to_cache` binds the version label to the
+loaded bytes via a `<dest>.version` sidecar, and each loader rebinds + applies an inline
+version+hash steady-state guard on a cache hit (finding-022 #4 / finding-005 #10). It is a
+**test-evidence + empty-anchor** change: `manifest.applicable_anchors = []` — **no** live
+refresh and **no** genome real-data count — so the negative control is *structural* (the CLAUDE.md
+anchors cannot move because none is recomputed). The three source files touched are
+`annotate/downloads.py`, `annotate/loaders/clinvar.py`, `annotate/loaders/gwas_catalog.py`.
+
+**1. Dev-loop (run against the pushed branch).**
+
+```
+uv run pytest        # full suite green; net +10 tests vs main, 0 removed
+uv run ruff check && uv run ruff format --check
+uv run mypy --strict backend/src
+uv run genome docs check && uv run genome roadmap check && uv run genome workflows check
+```
+
+**2. D1 refuse (ClinVar HEAD failure no longer fabricates a label).**
+
+```
+uv run pytest backend/tests/test_annotate_loaders_clinvar.py -k \
+  "resolve_version_raises or head_failure_does_not_orphan"
+# → test_resolve_version_raises_when_header_missing      (missing Last-Modified → ValueError)
+# → test_resolve_version_raises_when_header_unparseable  (garbage Last-Modified → ValueError)
+# → test_resolve_version_raises_when_http_error          (HTTP 5xx → ExternalCallError propagates)
+# → test_refresh_head_failure_does_not_orphan_prior_version  (INV-1: refresh raises BEFORE any
+#   registry write; annotation_source_versions rows + the clinvar pointer are byte-unchanged)
+```
+
+INV-1 is the durable D1 invariant: a pre-existing active version + pointer survive a transient
+HEAD 5xx byte-for-byte, and no fresh `source_version_id` is minted.
+
+**3. D2 rebuild-relabel (INV-2 GOLD — cache-hit rebuild binds the CACHED label).**
+
+```
+uv run pytest -k rebuild_reload_binds_label_to_cached_bytes
+# clinvar + gwas mirror: seed cache + <dest>.version sidecar at the OLD label via a REAL
+# MockTransport download, unlink only the DuckDB (the sidecar survives — sibling dir), re-init an
+# empty schema, drift the LIVE resolver to a NEWER label, refresh → the row written to
+# annotation_source_versions carries the CACHED (old) label, not the drifted live one.
+```
+
+**4. Steady-state guard (no spurious supersession) + the 3a-before-rebind ordering invariant.**
+
+```
+uv run pytest backend/tests/test_annotate_loaders_clinvar.py -k steady_state_advanced
+# → was_already_current=True, source_version_id unchanged, MAX(source_version_id) + pointer
+#   byte-unchanged after a cache-hit rebind onto the ACTIVE label.
+uv run pytest backend/tests/test_annotate_loader_gwas_catalog.py -k skip_when_content_unchanged
+# → the finding-014 3a hash-fallback STILL fires (rebind lands AFTER 3a); no duplicate row.
+```
+
+**5. Sidecar mechanics (downloads.py, isolation-first).**
+
+```
+uv run pytest backend/tests/test_annotate_downloads.py -k "sidecar or version_label"
+# 6 tests: fresh download writes a 0600 sidecar (from_cache=False); cache hit returns
+# from_cache=True + the sidecar label (sidecar WINS over a drifted kwarg); hit-without-sidecar
+# → cached_version_label=None; write-failure is non-fatal; version_label=None → no sidecar;
+# path appends (variant_summary.txt.gz.version), does NOT clobber .gz.
+```
+
+**6. Negative control — empty-anchor (must HOLD, structural).** No pipeline table is touched
+and no anchor is recomputed, so obs #3/#4/#7/#8 hold by construction. Confirm the forbidden
+surfaces are untouched:
+
+```
+git diff main -- ddl/ docs/schemas/   # EMPTY (frozen DownloadResult field, not a DB column)
+git diff main -- CLAUDE.md             # EMPTY (adding a Real-data entry would break the invariant)
+```
+
+The `weakened_or_removed_test` review lens: the 3 `test_resolve_version_falls_back_*` tests are
+**inverted in place** to `test_resolve_version_raises_when_*` (the refuse policy is the exact
+opposite assertion), each provenance-stamped `# spec: finding-043 / plan §5`. This is a 1:1
+rename, net +10 tests / 0 removed — not a weakening. See CLAUDE.md is **not** amended (empty-anchor),
+[`finding-043`](../findings/finding-043-head-failure-version-label-policy.md), ROADMAP
+"Pre-Phase-6 sequence" PR 10 (RM-9f3c52c), and `MEMORY.md` DEC-0148 / DEC-0149.
+
 ## C2+D Phase 1 gate (engine-dialect workflow port)
 
 This gate covers the Sub Project C2+D Phase 1 change class (PR #109, `866d255`): the port of

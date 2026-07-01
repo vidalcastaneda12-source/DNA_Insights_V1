@@ -164,6 +164,13 @@ superseded_by: []
     and probably a refusal-to-fallback policy aligned with GWAS
     Catalog's "propagate the error" stance.
 
+    **SHIPPED — PR 10 / `RM-9f3c52c` (finding-043 / `DEC-0148`, OQ-1=A):** the
+    refuse policy landed. `_resolve_version_via_head` now propagates
+    `ExternalCallError` (the fail-open handler is deleted — GWAS-symmetric)
+    and raises `ValueError` on a missing/unparseable `Last-Modified`;
+    `_today_label` is deleted. A transient HEAD failure can no longer mint
+    a today-dated `source_version_id` or orphan the prior rowset.
+
 14. **Orphan rows under superseded `source_version_id`s.** PR #43
     leaves prior-version rowsets in the per-source table indefinitely,
     keyed by their old `source_version_id`. Disk is cheap and the rows
