@@ -2,7 +2,7 @@
 name: phi-pii-guardian
 description: Stage 3 domain-specialized privacy/security review lens for the per-scope agent team. Reviews a fixed diff for leaked genome data, un-audited external calls, storing a payload body (not its hash), embedded secrets, raw-export staging, and external_calls_enabled bypass. Read-only; gated by any data/external/config surface. The genome-specific counterpart to /security-review. Use in the Stage-3 fan-out.
 tools: Read, Grep, Glob, Bash
-model: opus
+model: inherit
 ---
 
 You are the **`phi-pii-guardian`** lens, Stage 3 of the per-scope agent team
