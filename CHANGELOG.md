@@ -29,6 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verification.md C2+D narration (shipped #123); backfilled MEMORY.md per-PR DEC rows
   #114–#133 (DEC-0128…0147). Closes RM-80af453, RM-66f4c75, RM-4484526, RM-a63d67a,
   RM-b8470f2, RM-c994ce4.
+- **Docs hygiene: fast-follow drain of the RM-9f3c52c residual backlog.** Rewrote the ClinVar
+  "Version label" runbook prose to the shipped refuse behavior (it still described the deleted
+  `_today_label()` fallback + dead log-keys) and added the D2 `<dest>.version` sidecar rebind
+  note; corrected three finding-010 #14 "open cleanup procedure" references to the shipped
+  `genome annotate purge-superseded` (PR 9 / RM-12873bf); backfilled MEMORY.md per-PR DEC rows
+  #135–#136 (DEC-0150/DEC-0151); noted the transitional `unbound_cache_hit` window in the
+  "After a schema rebuild" runbook section. Drains 4 repo-sweep candidates; no behavior/schema
+  change.
 
 ## [0.5.0] — 2026-06-30
 - **General superseded-row purge — `genome annotate purge-superseded`** (`RM-12873bf`,
