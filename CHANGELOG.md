@@ -36,6 +36,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generalization stays open as RM-25072d2.
 
 ### Changed
+- **Agent team pinned to the `claude-fable-5` (Fable 5) model** (PR #141). All 29
+  per-scope-team members in `.claude/agents/*.md` moved from `model: inherit` (#138) to an
+  explicit `model: claude-fable-5`, so the team runs on Fable 5 regardless of the session
+  model and the full id pins the exact version rather than floating the `fable` alias. The
+  README Model column + "Model & effort" note were updated to match. This pin governs
+  Task/Agent-tool spawns; the `.claude/workflows/*.js` `agent()` seam still inherits the
+  session model.
 - **Docs hygiene: fast-follow drain of the RM-12873bf residual backlog.** Rolled the
   CHANGELOG `[Unreleased]` history into `[0.5.0]`; refreshed stale "next PR" status lines
   (ROADMAP header, README); corrected CLAUDE.md obs #6 (strand-flip shipped #73) and
