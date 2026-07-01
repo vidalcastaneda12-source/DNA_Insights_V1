@@ -535,6 +535,103 @@ rename, net +10 tests / 0 removed — not a weakening. See CLAUDE.md is **not** 
 [`finding-043`](../findings/finding-043-head-failure-version-label-policy.md), ROADMAP
 "Pre-Phase-6 sequence" PR 10 (RM-9f3c52c), and `MEMORY.md` DEC-0148 / DEC-0149.
 
+### PR 11 register-existing-result gate (JVM-free validate-and-flip / finding-008)
+
+PR 11 (`RM-7fba363`) ships `genome imputation register-existing-result <id>`, the JVM-free
+bridge for the full-archive-preserved rebuild (finding-008): after a schema rebuild
+re-creates `imputation_runs` at `pending` while the on-disk
+`archive/imputation/run_<id>/result/` tree survives, `register` validates that tree against
+the prepare `MANIFEST.json` and flips `status` straight to `completed` — no Beagle, no
+`genotype_calls` — so `import` (which refuses `pending`) proceeds unchanged. It is
+**status-only + fail-closed**: the single `update_status` write fires strictly after every
+read-only check, so any refusal leaves the run byte-unchanged. Run the arms against the live
+corpus with the run_0002 tree preserved (active versions `clinvar 2026_06_15,
+gwas_catalog 2026_06_01, gnomad 4.1.1, pharmgkb 2025_07_05, dbsnp 157`).
+
+**1. Arm 1 — POSITIVE (run_0002 preserved).**
+
+```
+genome imputation register-existing-result 2
+# → status=pending->completed chromosomes_validated=23/23 submitted=<ts> completed=<ts>
+# → NO imputation.beagle.subprocess.* event (no JVM); wall-clock < 30 s
+genome imputation list       # run 2: status=completed, variants_output STILL NULL (status-only)
+```
+
+`chromosomes_validated` = **23** (chr1–22 + X; chrY excluded by the E1 panel intersection).
+Both `submitted_at` and `completed_at` are stamped (finding-007 Fix 3). Then run the loader
+and confirm the anchor **reproduces exactly**:
+
+```
+genome imputation import 2
+# → variants_above_r2_0_3 = 2,369,171   (EXACT)
+genome merge
+# → consensus imputed_only = 2,218,539  (EXACT, post-chrX)
+```
+
+`2,369,171` is asserted **EXACT**, not tolerance-banded: `register` re-imports a **frozen,
+byte-identical** tree and does **not** re-run Beagle, so the CLAUDE.md obs #3 run-to-run band
+(which exists only for Beagle **re-runs**) does **not** apply here — a deviation is a
+**regression**, not noise. (A silently-dropped-but-nonempty chromosome shifting the count by
+less than the old band would otherwise be wrongly waved through.) `imputed_only = 2,218,539`
+is the **load-bearing male-non-PAR guard**: register checks completeness, **not lineage**
+(Option A), so the ~91K non-PAR calls ride on the manifest's `chrx_ploidy` / `profile_sex`
+that register does **not** re-derive — a stale / incoherent chrX manifest is caught **here**,
+via anchor reproduction, not by register.
+
+Because that DR²-gated `import` anchor `2,369,171` **structurally excludes** the ~91K male
+non-PAR chrX dosage-confidence rows — non-PAR male DR² is structurally dead (CLAUDE.md obs #3),
+so those calls never enter the DR² run-stats — a silently-dropped non-PAR chrX is **invisible
+at the `import` step** and surfaces only at `merge`. The `genome merge` → `imputed_only =
+2,218,539` step is therefore **non-optional**: stopping at `import` (`2,369,171`) is a
+**false-GREEN** for the male non-PAR population.
+
+**2. Arm 2 — FAIL-CLOSED (disposable copy only — never the live tree).**
+
+```
+cp -r run_0002 run_0002_scratch && truncate -s -28 run_0002_scratch/result/chr7.vcf.gz
+genome imputation register-existing-result <scratch id>
+# → exit != 0; stderr contains: [chr7 (truncated/unparseable)]
+genome imputation list       # status STILL pending; submitted_at / completed_at NULL
+```
+
+`import` stays blocked (status never advanced). The same fail-closed refusal fires for a
+**missing** chrom (`chr7 (missing)`), a renamed-away `MANIFEST.json` (manifest-absent), an
+on-disk result VCF absent from the manifest (unmanifested), and a run under `status='failed'`
+(`refusing to launder a failed run`). Every refusal leaves the run byte-unchanged.
+
+**3. Arm 3 — chrY NON-REFUSAL (E1 guard).** The real run_0002 manifest carries a `Y` key with
+**no** `result/chrY.vcf.gz` (chrY is intentionally absent from the reference panel). Arm 1
+SUCCEEDING **is** this check — a refusal here would mean the `∩ PANEL_CHROMOSOMES` intersection
+is missing and the chrY dead-gate has resurrected.
+
+**4. Negative control — register does ONE status UPDATE, no `genotype_calls`.** Register writes
+only `imputation_runs.status` + the two timestamps, so the corpus tables are **byte-identical
+across the flip regardless of their absolute counts**. Snapshot both anchors immediately
+**before** register and again immediately **after**, and assert **before == after** (setup-agnostic
+— it holds on either setup path below):
+
+```sql
+-- capture ONCE before `register`, ONCE after; the two captures must be equal
+SELECT COUNT(*) FROM variants_master;                                   -- before == after
+SELECT COUNT(*) FILTER (WHERE af_global IS NOT NULL)
+  AS gnomad_matches FROM variant_annotations_index;                     -- before == after
+```
+
+Any movement means register did more than flip status. STOP.
+
+**Setup note — the absolute counts are setup-dependent, the equality is not.** The values
+`variants_master = 3,160,364` / `gnomad_matches = 3,054,426` (CLAUDE.md obs #3/#4) hold **only on
+a fully-populated disposable copy** — run 2 reset to `pending` over an already-imported+merged
+corpus. On THAT path Arm 1's `import 2` must use **`--force-reimport`**: run 2's `variants_output`
+is already populated, so a bare `import 2` RAISES `already imported. Use --force-reimport`. On the
+**fresh-rebuild path** Arm 1 is written for (`rm -rf data/` → re-ingest → prepare lands run 2 at
+`pending`), `variants_master` is **chip-only** at register-time and reaches 3,160,364 only *after*
+Arm 1's `import` + `merge`. Either way the **before == after** equality above is the invariant.
+
+See CLAUDE.md "Real-data observations" **#3**, ROADMAP "Pre-Phase-6 sequence"
+PR 11 (RM-7fba363), and
+[`finding-008`](../findings/finding-008-phase4-rebuild-and-chrx-observations.md).
+
 ## C2+D Phase 1 gate (engine-dialect workflow port)
 
 This gate covers the Sub Project C2+D Phase 1 change class (PR #109, `866d255`): the port of

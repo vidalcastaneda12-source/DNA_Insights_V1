@@ -179,16 +179,22 @@ is present, validating each per-chromosome VCF with cyvcf2 and
 flipping `imputation_runs.status` directly to `completed` (with
 `submitted_at` and `completed_at` stamped to current timestamps).
 That would collapse the "full archive preserved" rebuild case to a
-single command. Deferred — the runner's existing skip-cleanly-parsing
--files behavior already handles this case cheaply.
+single command. Implemented as `RM-7fba363` (PR 11): the runner's
+skip-cleanly-parsing-files behavior already handled this case, but
+`register-existing-result` collapses it to one JVM-free
+validate-and-flip that skips the Beagle boot entirely — truncation-aware
+(per #2 above), over the manifest ∩ reference-panel chromosome set
+(chrY excluded; chrX via the top-level concat).
 
 ## Follow-up
 
 - Pick one of fix options (a), (b), or the temporary (c) (silently
   skip chrX) in a future session. This finding's job is to capture
   the mechanism and the option space; no implementation in this PR.
-- The `register-existing-result` command is deferred and not tracked
-  as a blocker.
+- The `register-existing-result` command is now tracked as
+  `RM-7fba363` (PR 11) and implemented here — the JVM-free
+  validate-and-flip described above (truncation-aware, manifest-driven,
+  fail-closed, status-only).
 - CLAUDE.md "Real-data observations" #3 is intentionally left as-is.
   The symptom it documents is still correct on its own terms; this
   finding now supplies the mechanism behind it.
