@@ -84,7 +84,6 @@ from genome.db.duckdb_conn import duckdb_connection
 from genome.ingest.models import normalize_chrom
 from genome.privacy.external_client import (
     _DEFAULT_TIMEOUT_S,
-    ExternalCallError,
     ExternalCallsDisabledError,
     ExternalClient,
 )
@@ -489,15 +488,21 @@ def _resolve_version_via_head() -> str:
     and rendered as ``YYYY_MM_DD`` to match the schema's
     ``annotation_source_versions.version`` shape.
 
-    Failure modes:
+    Failure modes (refuse policy, finding-043 / OQ-1=A — GWAS-symmetric):
 
     * :class:`ExternalCallsDisabledError` propagates -- callers see the
       audited refusal directly. The privacy gate is fail-closed; we do
       not paper over it with a fallback.
-    * Any other :class:`ExternalCallError` (network, HTTP 4xx/5xx,
-      malformed Last-Modified) → fall back to today's UTC date in the
-      same format. Logged at INFO so the fallback is visible in the
-      structlog output.
+    * Any other ``ExternalCallError`` (network, HTTP 4xx/5xx) propagates
+      too. A failed HEAD must NOT silently fall back to today's UTC date:
+      a transient upstream failure would otherwise mint a fresh
+      source_version_id stamped today, flip the pointer, and orphan the
+      prior rowset (finding-010 #13). Better to raise and let the
+      operator retry.
+    * A missing or unparseable ``Last-Modified`` header raises
+      :class:`ValueError` for the same reason — the version label must
+      identify the bytes it stamps, and a today-date is a fabricated
+      label, not the release date.
 
     The HEAD request is the loader's first audited call; placing it
     before the download means a fresh refresh against an unchanged
@@ -522,11 +527,15 @@ def _resolve_version_via_head() -> str:
             )
         last_modified = response.headers.get("Last-Modified")
     except ExternalCallsDisabledError:
-        # Privacy gate is fail-closed; surface immediately.
+        # Privacy gate is fail-closed; surface immediately. Kept as an
+        # explicit handler (with a body, so it is not a bare re-raise)
+        # now that its ExternalCallError sibling is gone. Forward-looking:
+        # ExternalCallsDisabledError subclasses ExternalCallError — if an
+        # ExternalCallError handler is ever re-added it must come AFTER
+        # this clause; the marker log keeps this lone re-raise clear of
+        # ruff TRY203 (finding-043 / DEC-0148).
+        logger.info("clinvar.version.head_call_disabled")
         raise
-    except ExternalCallError as exc:
-        logger.warning("clinvar.version.head_failed", error=str(exc))
-        return _today_label()
 
     if last_modified:
         try:
@@ -537,16 +546,20 @@ def _resolve_version_via_head() -> str:
                 last_modified=last_modified,
                 error=str(exc),
             )
-            return _today_label()
+            msg = (
+                "ClinVar HEAD returned an unparseable Last-Modified header "
+                f"{last_modified!r}; refusing to mint a today-dated version "
+                "label (finding-043 refuse policy)"
+            )
+            raise ValueError(msg) from exc
         return parsed.astimezone(UTC).strftime("%Y_%m_%d")
 
     logger.info("clinvar.version.last_modified_missing")
-    return _today_label()
-
-
-def _today_label() -> str:
-    """Today's UTC date as ``YYYY_MM_DD`` -- the version-resolution fallback."""
-    return datetime.now(UTC).strftime("%Y_%m_%d")
+    msg = (
+        "ClinVar HEAD response carried no Last-Modified header; refusing to "
+        "mint a today-dated version label (finding-043 refuse policy)"
+    )
+    raise ValueError(msg)
 
 
 # ---------------------------------------------------------------------------
@@ -838,23 +851,40 @@ def refresh(
     Pipeline:
 
     1. Resolve version via HEAD against
-       :data:`VARIANT_SUMMARY_URL` (audited; falls back to today's UTC
-       date when the ``Last-Modified`` header is absent or
-       unparseable).
+       :data:`VARIANT_SUMMARY_URL` (audited). A HEAD failure or a
+       missing / unparseable ``Last-Modified`` header REFUSES (raises)
+       rather than fabricating a today-dated label (finding-043 /
+       OQ-1=A).
     2. Short-circuit and return ``was_already_current=True`` if a row
        in ``annotation_source_versions`` already names the resolved
        ``(source_db='clinvar', version)`` and ``force`` is ``False``.
        This is what makes a re-run against an unchanged ClinVar release
        cheap: no download, no parse, no insert.
     3. Download ``variant_summary.txt.gz`` via the audited
-       :func:`genome.annotate.downloads.download_to_cache`
-       (skip-if-exists by default; ``force=True`` re-downloads).
+       :func:`genome.annotate.downloads.download_to_cache`, passing the
+       resolved label as ``version_label`` so a fresh download persists
+       it to the ``<dest>.version`` sidecar (skip-if-exists by default;
+       ``force=True`` re-downloads).
     3a. If ``skip_if_same_version`` is ``True`` and the downloaded
         file's (version, sha256) match the currently-active row, short-
         circuit via :func:`maybe_skip_same_version`. This is the
         finding-009 #14 safety net for ``--force`` re-runs against
         unchanged ClinVar releases (~28 minutes of UPDATE+checkpoint
         avoided when the file is byte-for-byte identical).
+    3b. **Rebind label to cached bytes (finding-043 / D2).** On a cache
+        hit whose sidecar carries a label different from the live-
+        resolved one, rebind ``version`` to the sidecar label — the
+        version must identify the bytes in the table, and on a
+        ``rm -rf data/`` rebuild the cache holds the older release while
+        the live resolver has moved on (finding-022 #4). A cache hit
+        with no sidecar (a pre-PR-10 cache) logs a warning and proceeds
+        with the live label, self-healing on the next ``--force``.
+    3c. **Steady-state guard (finding-043 / OQ-4=4a-i, inline).** When
+        ``force`` is ``False`` and the (now possibly rebound) label +
+        sha256 both match the active row, return
+        ``was_already_current=True`` without minting a spurious
+        source_version_id. Version+hash, not version-only; inert under
+        ``--force`` and when Step 2 already fired.
     4. Inside one DuckDB transaction: upsert
        ``annotation_source_versions``, stream-parse the gzipped TSV,
        chunk-insert at :data:`_CHUNK_SIZE` rows per chunk via
@@ -893,13 +923,17 @@ def refresh(
                 was_already_current=True,
             )
 
-    # 3. Download (skip-if-exists; force re-downloads).
+    # 3. Download (skip-if-exists; force re-downloads). Pass the resolved
+    # label as version_label so a FRESH download persists it to the
+    # <dest>.version sidecar; a later cache hit reads it back so the label
+    # can be bound to the cached bytes (finding-043 / D2).
     download_result = download_to_cache(
         SOURCE_DB,
         VARIANT_SUMMARY_URL,
         _CACHE_FILENAME,
         resource_id=_DOWNLOAD_RESOURCE_ID,
         force=force,
+        version_label=version,
     )
     log.info(
         "clinvar.download.audited",
@@ -919,6 +953,56 @@ def refresh(
     )
     if skip is not None:
         return skip
+
+    # 3b. Rebind the label to the CACHED bytes (finding-043 / D2). On a
+    # cache hit the sidecar carries the label the bytes were downloaded
+    # under; when the live resolver has since drifted (a `rm -rf data/`
+    # rebuild resolves the June upstream label while the May bytes still
+    # sit in cache — finding-022 #4), bind `version` to the sidecar label
+    # so the source_version row identifies the bytes it actually loads.
+    # MUST run AFTER 3a: the opt-in maybe_skip evaluates against the LIVE
+    # label (finding-009 #14), and rebinding first would defeat it. Bind
+    # to a local first so mypy keeps the str-narrowing across the log call.
+    cached = download_result.cached_version_label
+    if download_result.from_cache and cached is not None and cached != version:
+        log.info(
+            "clinvar.version.label_rebound_to_cache",
+            live_version=version,
+            cached_version=cached,
+        )
+        version = cached
+    elif download_result.from_cache and cached is None:
+        # Transitional: a pre-PR-10 cache has no sidecar. Proceed with the
+        # live label (the historical behaviour) and self-heal on the next
+        # --force, which re-downloads and writes the sidecar.
+        log.warning("clinvar.version.unbound_cache_hit", live_version=version)
+
+    # 3c. Steady-state guard (finding-043 / OQ-4=4a-i, inline). After the
+    # rebind, a force=False refresh whose (label, sha256) both match the
+    # active row must NOT mint a fresh source_version_id. Fires only when
+    # Step 2 did not (the live label differed) AND the download was a cache
+    # hit that rebound onto the active label. Version+HASH, not
+    # version-only; --force bypasses it. supersession.py is untouched.
+    if not force:
+        with duckdb_connection() as conn:
+            current = get_current_version(conn, SOURCE_DB)
+        if (
+            current is not None
+            and version == current.version
+            and download_result.sha256 == current.source_file_hash
+        ):
+            log.info(
+                "clinvar.skip_already_current_post_rebind",
+                version=version,
+                source_version_id=current.source_version_id,
+            )
+            return RefreshResult(
+                source_db=SOURCE_DB,
+                source_version_id=current.source_version_id,
+                version=version,
+                record_count=current.record_count or 0,
+                was_already_current=True,
+            )
 
     # 4. Single-transaction load. The PharmGKB loader's "version row in
     # autocommit, INSERT + pointer flip in the wrapping transaction"

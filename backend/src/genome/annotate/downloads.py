@@ -76,20 +76,83 @@ def source_download_dir(source_db: str) -> Path:
 
 @dataclass(frozen=True, slots=True)
 class DownloadResult:
-    """Outcome of a single :func:`download_to_cache` call."""
+    """Outcome of a single :func:`download_to_cache` call.
+
+    ``from_cache`` distinguishes a skip-if-exists cache hit (the bytes
+    were already on disk, no external call was made) from a fresh
+    download. ``cached_version_label`` carries the label read back from
+    the ``<dest>.version`` sidecar on a cache hit (``None`` when the
+    caller wrote no sidecar on the original download or the sidecar is
+    unreadable). Together they let a loader bind its version label to
+    the *bytes actually loaded* rather than the label it resolved from
+    live upstream — the fix for the ``rm -rf data/`` rebuild-relabel
+    defect (finding-043 / finding-022 #4). Both fields are trailing and
+    defaulted so every existing keyword-construction call site is
+    unaffected.
+    """
 
     path: Path
     sha256: str
     size_bytes: int
+    from_cache: bool = False
+    cached_version_label: str | None = None
 
 
-def download_to_cache(
+def _sidecar_path(dest: Path) -> Path:
+    """Return the ``<dest>.version`` sidecar path.
+
+    Uses ``dest.with_name(dest.name + '.version')`` (a string append)
+    rather than ``dest.with_suffix('.version')`` so a compound extension
+    like ``variant_summary.txt.gz`` yields
+    ``variant_summary.txt.gz.version`` instead of clobbering the ``.gz``
+    into ``variant_summary.txt.version``.
+    """
+    return dest.with_name(dest.name + ".version")
+
+
+def _read_version_sidecar(dest: Path) -> str | None:
+    """Read the version label from ``<dest>.version``; ``None`` when absent.
+
+    Best-effort: a missing or unreadable sidecar (or an empty one) maps
+    to ``None`` so the caller reads it as "the cached bytes carry no
+    known version label" and can fall back to its live-resolved label.
+    """
+    try:
+        label = _sidecar_path(dest).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return label or None
+
+
+def _write_version_sidecar(dest: Path, label: str) -> None:
+    """Write ``label`` to ``<dest>.version`` at ``0600``, best-effort.
+
+    A failure to persist the sidecar must never abort the download: the
+    bytes are already on disk and are the load's payload. We log the
+    failure and continue so a hostile filesystem state (e.g. the sidecar
+    path already taken by a directory) degrades to "no version label
+    cached" rather than a failed refresh.
+    """
+    sidecar = _sidecar_path(dest)
+    try:
+        sidecar.write_text(label, encoding="utf-8")
+        sidecar.chmod(_OWNER_RW_ONLY)
+    except OSError:
+        logger.warning(
+            "annotate.download.version_sidecar_write_failed",
+            sidecar=str(sidecar),
+            exc_info=True,
+        )
+
+
+def download_to_cache(  # noqa: PLR0913 — trailing version_label kwarg (finding-043 sidecar bind)
     source_db: str,
     url: str,
     filename: str,
     *,
     resource_id: str,
     force: bool = False,
+    version_label: str | None = None,
 ) -> DownloadResult:
     """Download ``url`` to ``<annotations_root>/<source_db>/<filename>``.
 
@@ -105,6 +168,16 @@ def download_to_cache(
     :meth:`ExternalClient.download` (so the response never lives in
     memory), chmods the saved file to ``0600``, and returns the
     SHA-256 the client computed plus the byte size from ``stat()``.
+
+    ``version_label`` binds a version label to the *bytes on disk*: on a
+    fresh download (and only then) it is persisted to a ``<dest>.version``
+    sidecar (``0600``, best-effort — a write failure is logged and never
+    aborts the download). A later cache hit reads that sidecar back into
+    :attr:`DownloadResult.cached_version_label` so a loader can bind its
+    version label to the cached bytes rather than a drifted live-resolved
+    label (finding-043 / finding-022 #4). When ``version_label`` is
+    ``None`` no sidecar is written and cache-hit callers see
+    ``cached_version_label=None``.
 
     The endpoint label is ``f"annotations_{source_db}"`` — embedding the
     source_db lets audit-log queries group every download for one
@@ -132,14 +205,22 @@ def download_to_cache(
     if dest.exists() and not force:
         size = dest.stat().st_size
         digest = _hash_file(dest)
+        cached_label = _read_version_sidecar(dest)
         logger.debug(
             "annotate.download.skip_existing",
             source_db=source_db,
             filename=filename,
             sha256=digest[:12],
             size_bytes=size,
+            cached_version_label=cached_label,
         )
-        return DownloadResult(path=dest, sha256=digest, size_bytes=size)
+        return DownloadResult(
+            path=dest,
+            sha256=digest,
+            size_bytes=size,
+            from_cache=True,
+            cached_version_label=cached_label,
+        )
 
     endpoint_label = f"{_ENDPOINT_LABEL_PREFIX}{source_db}"
     log = logger.bind(source_db=source_db, filename=filename, url=url)
@@ -159,8 +240,10 @@ def download_to_cache(
         )
     dest.chmod(_OWNER_RW_ONLY)
     size = dest.stat().st_size
+    if version_label is not None:
+        _write_version_sidecar(dest, version_label)
     log.info("annotate.download.complete", sha256=digest[:12], size_bytes=size)
-    return DownloadResult(path=dest, sha256=digest, size_bytes=size)
+    return DownloadResult(path=dest, sha256=digest, size_bytes=size, from_cache=False)
 
 
 def _hash_file(path: Path) -> str:

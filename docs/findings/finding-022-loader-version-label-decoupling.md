@@ -96,6 +96,9 @@ superseded_by: []
    cache dates; it does **not** change loader code (that would broaden the
    canonicalize squash). finding-020's corpus line and CLAUDE.md obs #4 are corrected
    to the true GWAS `2026_05_19`. The code fix is deferred — see finding-005 #10.
+   **SHIPPED — PR 10 / `RM-9f3c52c` (finding-043 / `DEC-0149`):** the code fix landed
+   in a later, isolated PR (not the canonicalize squash), so this session's docs-only
+   scoping held.
 
 ## Follow-up
 
@@ -107,6 +110,11 @@ superseded_by: []
     `annotation_source_versions` row adopts that row's label instead of the
     live-resolved one. Either binds label↔bytes; (a) also covers the
     no-prior-row-anywhere case. Tracked in finding-005 #10.
+    **SHIPPED — PR 10 / `RM-9f3c52c` (finding-043 / `DEC-0149`):** shape **(a)** — the
+    `<dest>.version` sidecar — landed. On a cache hit the loader rebinds `version` to the
+    sidecar label and an inline version+hash guard suppresses the spurious
+    re-supersession. Shape (b), the shared `maybe_skip_on_hash_match` helper, stays
+    separate and open as `RM-25072d2`.
 
 11. **Operator action for the mislabeled rows.** None blocking. The data is correct;
     a future `genome annotate refresh --source {clinvar,gwas_catalog} --force` against

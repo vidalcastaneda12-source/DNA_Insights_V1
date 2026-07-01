@@ -113,6 +113,10 @@ manageable. This document tracks them so they aren't forgotten.
    `maybe_skip_on_hash_match(source_db, version, hash, force)` helper in
    `genome.annotate.supersession` and adopt it across the affected loaders.
    *Recommended fix point:* the second time the pattern shows up.
+   **Examined by PR 10 / `RM-9f3c52c` (finding-043), kept SEPARATE and OPEN as
+   `RM-25072d2`:** PR 10's inline steady-state guard is version+hash but is *not* this
+   shared helper (OQ-4=4a-i keeps `supersession.py` untouched), so the generalization is
+   still owed.
 
 9. **`pos_grch37` not coalesced across canonicalize collapse.**
    `genome annotate canonicalize-variants`'s new-survivor INSERT
@@ -147,6 +151,9 @@ manageable. This document tracks them so they aren't forgotten.
     written on a fresh download and read back on a cache-hit, or by generalizing
     finding-014's `maybe_skip_on_hash_match` to adopt the label of any prior
     `annotation_source_versions` row whose hash matches the cached file.
+    **SHIPPED — PR 10 / `RM-9f3c52c` (finding-043 / `DEC-0149`):** the sidecar `<file>.version`
+    shape landed (with the D1 refuse of finding-010 #13 / `DEC-0148`). The `maybe_skip_on_hash_match`
+    alternative (item #8 above) stays open as `RM-25072d2`.
 
 11. **GWAS `MAPPED_TRAIT_URI` truncated to a single EFO URI.** GWAS Catalog's
     `MAPPED_TRAIT_URI` cell can carry multiple comma-separated EFO URIs when an

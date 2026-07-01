@@ -1146,8 +1146,10 @@ def refresh(
        GWAS Catalog release cheap: no download, no parse, no insert.
     3. Download the dated "all associations" ZIP from the EBI FTP
        ``latest/`` directory via the audited
-       :func:`genome.annotate.downloads.download_to_cache`
-       (skip-if-exists by default; ``force=True`` re-downloads).
+       :func:`genome.annotate.downloads.download_to_cache`, passing the
+       resolved label as ``version_label`` so a fresh download persists
+       it to the ``<dest>.version`` sidecar (skip-if-exists by default;
+       ``force=True`` re-downloads).
     3a. **Hash-based fallback short-circuit (finding-014).** If
         ``force`` is ``False`` and the downloaded ZIP's SHA-256 matches
         the currently-active version row's recorded hash but the
@@ -1168,6 +1170,19 @@ def refresh(
         #14). Off by default. Distinct from 3a because 3a fires on
         hash-match-with-label-drift; 3b fires on both-match and is
         gated on the opt-in flag.
+    3c. **Rebind label to cached bytes (finding-043 / D2).** On a cache
+        hit whose sidecar label differs from the live-resolved one,
+        rebind ``version`` to the sidecar label so the source_version row
+        identifies the cached bytes (finding-022 #4). Runs AFTER 3a/3b —
+        both evaluate against the LIVE label; rebinding first would defeat
+        the finding-014 3a duplicate-row guard. A cache hit with no
+        sidecar (pre-PR-10 cache) warns and proceeds, self-healing on the
+        next ``--force``.
+    3d. **Steady-state guard (finding-043 / OQ-4=4a-i, inline).** When
+        ``force`` is ``False`` and the (possibly rebound) label + sha256
+        both match the active row, return ``was_already_current=True``
+        without minting a spurious source_version_id. Version+hash, not
+        version-only; inert under ``--force``.
     4. Inside one DuckDB transaction: upsert
        ``annotation_source_versions``, open the ZIP and stream-parse
        the contained TSV, chunk-insert at :data:`_CHUNK_SIZE` rows per
@@ -1209,13 +1224,17 @@ def refresh(
                 was_already_current=True,
             )
 
-    # 3. Download (skip-if-exists; force re-downloads).
+    # 3. Download (skip-if-exists; force re-downloads). Pass the resolved
+    # label as version_label so a FRESH download persists it to the
+    # <dest>.version sidecar; a later cache hit reads it back so the label
+    # can be bound to the cached bytes (finding-043 / D2).
     download_result = download_to_cache(
         SOURCE_DB,
         GWAS_ASSOCIATIONS_ZIP_URL,
         _CACHE_FILENAME,
         resource_id=_DOWNLOAD_RESOURCE_ID,
         force=force,
+        version_label=version,
     )
     log.info(
         "gwas_catalog.download.audited",
@@ -1269,6 +1288,71 @@ def refresh(
     )
     if skip is not None:
         return skip
+
+    # 3c. Rebind the label to the CACHED bytes (finding-043 / D2). On a
+    # cache hit the sidecar carries the label the bytes were downloaded
+    # under; when the live resolver has since drifted (a `rm -rf data/`
+    # rebuild resolves a newer upstream label while the older bytes still
+    # sit in cache — finding-022 #4), bind `version` to the sidecar label
+    # so the source_version row identifies the bytes it actually loads.
+    # MUST run AFTER the finding-014 3a hash-fallback AND the opt-in
+    # maybe_skip, both of which evaluate against the LIVE label; rebinding
+    # first would flip `current.version != version` to False and duplicate
+    # the row (the traced 4717ff06 regression). Bind to a local first so
+    # mypy keeps the str-narrowing across the log call.
+    cached = download_result.cached_version_label
+    if download_result.from_cache and cached is not None and cached != version:
+        log.info(
+            "gwas_catalog.version.label_rebound_to_cache",
+            live_version=version,
+            cached_version=cached,
+        )
+        version = cached
+    elif download_result.from_cache and cached is None:
+        # Transitional: a pre-PR-10 cache has no sidecar. Proceed with the
+        # live label (the historical behaviour) and self-heal on the next
+        # --force, which re-downloads and writes the sidecar.
+        log.warning("gwas_catalog.version.unbound_cache_hit", live_version=version)
+
+    # 3d. Steady-state guard (finding-043 / OQ-4=4a-i, inline). After the
+    # rebind, a force=False refresh whose (label, sha256) both match the
+    # active row must NOT mint a fresh source_version_id. Fires only when
+    # the label-based short-circuits did not AND the download was a cache
+    # hit that rebound onto the active label. Version+HASH, not
+    # version-only; --force bypasses it. supersession.py is untouched.
+    #
+    # SHADOWED / currently unreachable in GWAS (finding-043). Reaching
+    # this clause under force=False requires sha256 == active hash, and
+    # the Step-2 `skip_already_current` early return above guarantees the
+    # LIVE label already differs from the active version by this point —
+    # together exactly the firing condition of the finding-014 3a
+    # hash-fallback (which ClinVar has no analogue of), so 3a returns
+    # `skip_content_unchanged` FIRST and this clause never runs today.
+    # Retained deliberately: it is the symmetric twin of ClinVar's
+    # REACHABLE 3c guard (ClinVar lacks the 3a fallback, so there the
+    # guard does fire) and is defense-in-depth SHOULD the 3a hash-fallback
+    # ever be removed. Do not delete without restoring an equivalent
+    # post-rebind guard.
+    if not force:
+        with duckdb_connection() as conn:
+            current = get_current_version(conn, SOURCE_DB)
+        if (
+            current is not None
+            and version == current.version
+            and download_result.sha256 == current.source_file_hash
+        ):
+            log.info(
+                "gwas_catalog.skip_already_current_post_rebind",
+                version=version,
+                source_version_id=current.source_version_id,
+            )
+            return RefreshResult(
+                source_db=SOURCE_DB,
+                source_version_id=current.source_version_id,
+                version=version,
+                record_count=current.record_count or 0,
+                was_already_current=True,
+            )
 
     # 4. Single-transaction load. Same shape as ClinVar: the version
     # row insert runs in autocommit, then a second transaction wraps

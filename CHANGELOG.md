@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Version-label correctness for the ClinVar / GWAS Catalog loaders** (`RM-9f3c52c`, PR 10,
+  finding-043). Two label-integrity defects, both fault-triggered and invisible on a normal
+  run. **D1 (refuse):** ClinVar's HEAD resolver no longer fabricates today's date on a failure
+  — an `ExternalCallError` now propagates (GWAS-symmetric) and a missing/unparseable
+  `Last-Modified` raises, so a transient HEAD failure can no longer mint a today-dated
+  `source_version_id`, flip the pointer, and orphan the prior rowset (was finding-010 #13).
+  **D2 (bytes-bound label):** `download_to_cache` writes a `<dest>.version` sidecar (0600,
+  best-effort) on a fresh download and reads it back on a cache hit via two new trailing
+  `DownloadResult` fields, so a `rm -rf data/` rebuild that reloads older cached bytes binds
+  the *cached* label instead of the drifted live one (was finding-022 #4 / finding-005 #10);
+  an inline version+hash steady-state guard suppresses the spurious re-supersession
+  (`supersession.py` untouched). See `MEMORY.md` DEC-0148/DEC-0149. The shared-helper
+  generalization stays open as RM-25072d2.
+
 ### Changed
 - **Docs hygiene: fast-follow drain of the RM-12873bf residual backlog.** Rolled the
   CHANGELOG `[Unreleased]` history into `[0.5.0]`; refreshed stale "next PR" status lines

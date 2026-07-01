@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import stat
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import httpx
 import pytest
@@ -406,3 +406,162 @@ def test_download_to_cache_without_redirect_following_would_write_empty_body(
 
     assert result.size_bytes == len(payload)
     assert result.path.read_bytes() == payload
+
+
+# -----------------------------------------------------------------------------
+# Version-label sidecar (PR 10 / RM-9f3c52c).
+#
+# from: plan §5 (downloads sidecar) + frozen interface. DownloadResult gains
+# ``from_cache: bool = False`` and ``cached_version_label: str | None = None``;
+# ``download_to_cache`` gains a trailing ``version_label: str | None = None``
+# kwarg that writes a ``<dest>.version`` sidecar (0600) on a FRESH download and
+# reads it back on a CACHE HIT. These assert the SPEC'd behaviour and are RED
+# until the downloads wiring lands.
+# -----------------------------------------------------------------------------
+
+_SIDECAR_URL: Final[str] = "https://example.invalid/clinvar.vcf.gz"
+_MOCK_PAYLOAD: Final[bytes] = b"CLINVAR_VCF_BYTES_v1"
+
+
+def _sidecar_for(dest: Path) -> Path:
+    """The frozen sidecar path formula: ``<dest>.version`` (append, not clobber)."""
+    return dest.with_name(dest.name + ".version")
+
+
+def test_download_to_cache_writes_version_sidecar_on_fresh_download(
+    annotations_root: Path,  # noqa: ARG001 — pins ANNOTATIONS_DOWNLOAD_ROOT
+    mock_transport: dict[str, list[httpx.Request]],  # noqa: ARG001 — keep the patch active
+) -> None:
+    # from: plan §5 / frozen interface — fresh download writes a 0600 sidecar; from_cache False
+    init_databases()
+    _enable_external_calls()
+    result = download_to_cache(
+        "clinvar",
+        _SIDECAR_URL,
+        "clinvar.vcf.gz",
+        resource_id="clinvar_full",
+        version_label="2026_05_17",
+    )
+    sidecar = _sidecar_for(result.path)
+    assert sidecar.is_file()
+    assert sidecar.read_text(encoding="utf-8").strip() == "2026_05_17"
+    assert stat.S_IMODE(sidecar.stat().st_mode) == 0o600
+    assert result.from_cache is False
+    assert result.cached_version_label is None
+
+
+def test_download_to_cache_cache_hit_reads_sidecar_label_over_drifted_kwarg(
+    annotations_root: Path,  # noqa: ARG001 — pins ANNOTATIONS_DOWNLOAD_ROOT
+    mock_transport: dict[str, list[httpx.Request]],  # noqa: ARG001 — keep the patch active
+) -> None:
+    # from: plan §5 / frozen interface — cache hit returns from_cache True + the SIDECAR label,
+    # and the sidecar WINS even when a DIFFERENT version_label is passed on the hit.
+    init_databases()
+    _enable_external_calls()
+    first = download_to_cache(
+        "clinvar",
+        _SIDECAR_URL,
+        "clinvar.vcf.gz",
+        resource_id="clinvar_full",
+        version_label="2026_05_17",
+    )
+    assert first.from_cache is False
+    second = download_to_cache(
+        "clinvar",
+        _SIDECAR_URL,
+        "clinvar.vcf.gz",
+        resource_id="clinvar_full",
+        version_label="2026_06_15",
+    )
+    assert second.from_cache is True
+    assert second.cached_version_label == "2026_05_17"
+    # The cache hit does not rewrite the sidecar — the seeded label wins.
+    assert _sidecar_for(second.path).read_text(encoding="utf-8").strip() == "2026_05_17"
+
+
+def test_download_to_cache_cache_hit_without_sidecar_returns_none(
+    annotations_root: Path,  # noqa: ARG001 — pins ANNOTATIONS_DOWNLOAD_ROOT
+    mock_transport: dict[str, list[httpx.Request]],  # noqa: ARG001 — keep the patch active
+) -> None:
+    # from: plan §5 / frozen interface — cache hit with NO sidecar → cached_version_label None
+    init_databases()
+    _enable_external_calls()
+    first = download_to_cache(
+        "clinvar",
+        _SIDECAR_URL,
+        "clinvar.vcf.gz",
+        resource_id="clinvar_full",
+    )  # version_label defaults None → no sidecar is written
+    assert not _sidecar_for(first.path).exists()
+    second = download_to_cache(
+        "clinvar",
+        _SIDECAR_URL,
+        "clinvar.vcf.gz",
+        resource_id="clinvar_full",
+    )
+    assert second.from_cache is True
+    assert second.cached_version_label is None
+
+
+def test_download_to_cache_sidecar_write_failure_is_non_fatal(
+    annotations_root: Path,
+    mock_transport: dict[str, list[httpx.Request]],  # noqa: ARG001 — keep the patch active
+) -> None:
+    # from: plan §5 / frozen interface — the sidecar write is best-effort; a failure to write it
+    # must NOT abort the download (a valid DownloadResult still comes back with the bytes on disk).
+    init_databases()
+    _enable_external_calls()
+    # Pre-create the sidecar path as a directory so the sidecar file write fails.
+    clinvar_dir = annotations_root / "clinvar"
+    clinvar_dir.mkdir(parents=True)
+    (clinvar_dir / "clinvar.vcf.gz.version").mkdir()
+    result = download_to_cache(
+        "clinvar",
+        _SIDECAR_URL,
+        "clinvar.vcf.gz",
+        resource_id="clinvar_full",
+        version_label="2026_05_17",
+    )
+    assert isinstance(result, DownloadResult)
+    assert result.path.is_file()
+    assert result.from_cache is False
+    assert result.size_bytes == len(_MOCK_PAYLOAD)
+
+
+def test_download_to_cache_no_version_label_writes_no_sidecar(
+    annotations_root: Path,  # noqa: ARG001 — pins ANNOTATIONS_DOWNLOAD_ROOT
+    mock_transport: dict[str, list[httpx.Request]],  # noqa: ARG001 — keep the patch active
+) -> None:
+    # from: plan §5 / frozen interface — version_label=None default → no sidecar written
+    init_databases()
+    _enable_external_calls()
+    result = download_to_cache(
+        "clinvar",
+        _SIDECAR_URL,
+        "clinvar.vcf.gz",
+        resource_id="clinvar_full",
+    )
+    assert not _sidecar_for(result.path).exists()
+    assert result.from_cache is False
+    assert result.cached_version_label is None
+
+
+def test_download_to_cache_sidecar_path_appends_not_clobbers_gz(
+    annotations_root: Path,  # noqa: ARG001 — pins ANNOTATIONS_DOWNLOAD_ROOT
+    mock_transport: dict[str, list[httpx.Request]],  # noqa: ARG001 — keep the patch active
+) -> None:
+    # from: plan §5 / frozen interface — sidecar = dest.with_name(dest.name + '.version'):
+    # variant_summary.txt.gz → variant_summary.txt.gz.version (NOT with_suffix clobbering .gz).
+    init_databases()
+    _enable_external_calls()
+    result = download_to_cache(
+        "clinvar",
+        _SIDECAR_URL,
+        "variant_summary.txt.gz",
+        resource_id="clinvar_full",
+        version_label="2026_05_17",
+    )
+    assert result.path.name == "variant_summary.txt.gz"
+    assert result.path.with_name("variant_summary.txt.gz.version").is_file()
+    # with_suffix('.version') would have produced this path — it must NOT exist.
+    assert not result.path.with_name("variant_summary.txt.version").exists()
