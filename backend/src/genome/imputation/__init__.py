@@ -25,8 +25,11 @@ from genome.imputation.ingest import (
     IMPUTATION_PIPELINE_VERSION,
     DryRunResult,
     ImportResult,
+    RegisterError,
+    RegisterResult,
     import_result,
     parse_chromosomes_filter,
+    register_existing_result,
 )
 from genome.imputation.reference_panel import (
     PANEL_CHROMOSOMES,
@@ -62,6 +65,8 @@ __all__ = [
     "ImputationRun",
     "PreparedUpload",
     "ReferencePanel",
+    "RegisterError",
+    "RegisterResult",
     "default_panel_root",
     "import_result",
     "install_panel",
@@ -69,6 +74,7 @@ __all__ = [
     "normalize_imputed_rsids",
     "parse_chromosomes_filter",
     "prepare_run",
+    "register_existing_result",
     "run_imputation",
     "update_status",
     "validate_panel",

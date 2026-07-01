@@ -201,7 +201,7 @@ finding-016 #8):
     [`verification.md`](docs/runbooks/verification.md) "PR 10 version-label correctness gate",
     `MEMORY.md` DEC-0148/DEC-0149. The `maybe_skip_on_hash_match` generalization stays separate as
     RM-25072d2 (still open, below).
-- [ ] RM-7fba363 (PR 11) — finding-008: `register-existing-result` CLI command, collapsing
+- [x] RM-7fba363 (PR 11) — finding-008: `register-existing-result` CLI command, collapsing
   the full-archive rebuild workflow.
 - [ ] RM-c5bcb2d (PR 12) — Top-level CLI test module for `init` / `status` / `config get|set` /
   `version` (audit item 3.2; currently uncovered).

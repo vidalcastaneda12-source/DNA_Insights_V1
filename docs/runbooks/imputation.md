@@ -351,10 +351,13 @@ archive lives outside `data/` deliberately), but the
 `imputation_runs` row does not. The fresh `genome imputation prepare`
 that follows the rebuild lands a new row in `status='pending'`.
 
-The correct sequence is **prepare → run → import**, not the
-prepare → import shortcut one might expect when the result VCFs are
-already on disk. `genome imputation import` guards on
-`status='completed'` and aborts with:
+The correct sequence is **prepare → run → import** — or, when the
+*full* result tree survived intact, the JVM-free
+**prepare → register-existing-result → import** fast path (see
+[Fast path](#fast-path-register-existing-result-full-archive-preserved)
+below). Neither is the bare prepare → import shortcut one might expect
+when the result VCFs are already on disk: `genome imputation import`
+guards on `status='completed'` and aborts with:
 
     RuntimeError: imputation_id <id> is in status 'pending'; download
     the result first (status must be 'completed' before import)
@@ -368,10 +371,63 @@ exists and parses cleanly with cyvcf2 is skipped (logged at INFO as
 `imputation.beagle.chrom.skip_existing`), and anything missing is
 re-imputed for real against the on-disk panel.
 
+### Fast path: `register-existing-result` (full archive preserved)
+
+When the **entire** result tree survived the rebuild — every
+`result/chr<N>.vcf.gz` the prepare manifest expects is on disk and
+intact — `genome imputation register-existing-result <id>` collapses the
+bridge to a single JVM-free command, instead of `run` booting Beagle
+just to skip every already-imputed chromosome:
+
+```
+genome imputation prepare ...                     # re-creates the pending run row
+genome imputation register-existing-result <id>   # validate-and-flip, no Beagle
+genome imputation import <id>                      # load the validated VCFs
+```
+
+`register` never boots Java/Beagle. It validates the preserved tree
+against the prepare `upload/MANIFEST.json` and, only if every expected
+chromosome passes, flips `imputation_runs.status` straight to
+`completed` (stamping `submitted_at` / `completed_at`, finding-007 Fix 3)
+so the `status='completed'` guard on `import` clears. It writes no
+`genotype_calls` — loading the VCFs stays `import`'s job.
+
+Validation is **fail-closed and truncation-aware** (finding-008 #2):
+
+- The expected set is the manifest's `variants_per_chrom` keys ∩ the
+  reference panel, so a manifest `Y` / `MT` key is dropped — chrY is
+  intentionally absent from the panel, and the user's own run carries a
+  `Y` key with no `result/chrY.vcf.gz`.
+- chrX is validated via the **top-level concat** `result/chrX.vcf.gz`
+  (finding-029), never the `result/chrX_regions/` per-region subdir.
+- Each expected VCF must exist, be a non-truncated BGZF (a missing
+  28-byte EOF marker is a mid-write Beagle failure cyvcf2 would otherwise
+  read as a silent zero-variant success), and stream ≥1 record when the
+  manifest recorded uploaded variants for it.
+- Any missing / truncated / silently-empty VCF, an on-disk result VCF the
+  manifest does not list, an absent or unparseable manifest, or a run
+  already `completed` / `failed` is refused with a non-zero exit and the
+  run's status left **byte-unchanged** (no torn state).
+
+**id ↔ `run_<id>` directory alignment (important).** After `rm -rf
+data/`, `_next_imputation_id` restarts at **1**, but the preserved tree
+is whatever id it was first produced under (e.g. `run_0002`). A DB row
+must therefore exist at the *preserved run's* id before `register` — so
+re-run `prepare` until the new `pending` row lands on that id, then
+`register <that id>`. A wrong id fails **loud**, never silent: an id with
+no row → `imputation_id <id> not found`; an id whose `run_<id>/result/`
+tree is absent → an empty-expected / missing-VCF refusal. This is the
+same id↔dir constraint `run` and `import` already inherit.
+
+For a **partially** preserved archive, use `run` instead — it re-imputes
+only the missing chromosomes; `register` is all-or-nothing and refuses a
+partial tree rather than registering it.
+
 The wall-clock cost scales with how much of the archive survived:
 
-- **Full archive preserved** — seconds: the runner parse-checks every
-  chromosome and skips them all; no Beagle subprocess runs. Total
+- **Full archive preserved** — seconds: `register-existing-result`
+  (above) validate-and-flips with no Beagle subprocess at all; `run` also
+  works (it parse-checks every chromosome and skips them all). Total
   rebuild cost is dominated by the re-ingest and merge.
 - **Partial archive preserved** — minutes per missing chromosome.
   Beagle re-imputes only the missing set against the existing panel.

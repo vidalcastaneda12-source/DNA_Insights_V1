@@ -57,9 +57,16 @@ import structlog
 from genome.config import get_settings
 from genome.db.duckdb_conn import duckdb_connection
 from genome.imputation.archive import ImputationArchive
+from genome.imputation.beagle_runner import (
+    _output_is_complete,
+    _output_vcf_path,
+    _vcf_has_records,
+)
 from genome.imputation.bgzf import is_truncated_bgzf
+from genome.imputation.reference_panel import PANEL_CHROMOSOMES
 from genome.imputation.runs import (
     ImputationRun,
+    ImputationStatus,
     fetch_run,
     record_import_volumes,
     update_status,
@@ -1598,6 +1605,253 @@ def _execute_import(  # noqa: PLR0913 — options pass through directly to the w
         nonpar_confident=counters.nonpar_confident,
         profile_sex=profile_sex,
         chromosomes_imported=tuple(c for c, _ in plan.vcf_inputs),
+    )
+
+
+class RegisterError(RuntimeError):
+    """A preserved imputation result could not be registered (fail-closed refusal).
+
+    Raised by :func:`register_existing_result` when the run does not exist, is not
+    in a registerable pre-state (``pending`` / ``processing``), or its on-disk
+    ``result/`` tree is not a complete, non-truncated, non-silently-empty set for
+    the expected chromosomes. Mirrors the typed-refusal channel of
+    :class:`genome.imputation.chrx_loo.ChrxLooError`: the CLI catches it, echoes
+    the message to stderr, and exits non-zero with the run left unchanged.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class RegisterResult:
+    """Outcome of :func:`register_existing_result`.
+
+    ``status_before`` and ``status_after`` bracket the single ``update_status``
+    flip to ``completed``. ``chromosomes_expected`` is the prepare-manifest set
+    restricted to the reference panel; ``chromosomes_validated`` is the subset
+    whose result VCF passed validation. ``submitted_at`` and ``completed_at`` are
+    the timestamps read back after the flip (finding-007 Fix3 COALESCE stamping).
+    """
+
+    imputation_id: int
+    status_before: ImputationStatus
+    status_after: ImputationStatus
+    chromosomes_expected: tuple[str, ...]
+    chromosomes_validated: tuple[str, ...]
+    submitted_at: str | None
+    completed_at: str | None
+
+
+def _result_vcf_incomplete_reason(path: Path, expected_count: int) -> str | None:
+    """Return why a preserved result VCF is not register-complete, or ``None``.
+
+    The reasons mirror the two finding-008 #2 silent-failure shapes plus the
+    trivially-missing file:
+
+    * ``"missing"`` — no ``result/chr<N>.vcf.gz`` on disk;
+    * ``"truncated/unparseable"`` — a truncated BGZF (missing EOF marker) or a
+      file cyvcf2 cannot open/read (:func:`_output_is_complete`, cheapest-first);
+    * ``"silently-empty"`` — a cleanly-closed, header-only 0-record BGZF for a
+      chromosome the prepare manifest recorded uploaded variants for (E2). This is
+      the exact mirror of :func:`_assert_chrom_not_silently_empty` (the canonical
+      definition of the empty-rule, ``raw == 0 and expected > 0``, used by the
+      import transaction): :func:`_output_is_complete` accepts a 0-record body as
+      "clean", so the :func:`_vcf_has_records` pairing is needed here, not
+      redundant.
+    """
+    if not path.is_file():
+        return "missing"
+    if not _output_is_complete(path):
+        return "truncated/unparseable"
+    if expected_count > 0 and not _vcf_has_records(path):
+        return "silently-empty"
+    return None
+
+
+def _validate_preserved_result_tree(
+    archive: ImputationArchive,
+    imputation_id: int,
+) -> tuple[str, ...]:
+    """Read-only validation of a preserved Beagle result tree for register.
+
+    Returns the validated chromosome set — the prepare manifest's
+    ``variants_per_chrom`` keys restricted to
+    :data:`~genome.imputation.reference_panel.PANEL_CHROMOSOMES` — when every
+    expected ``result/chr<N>.vcf.gz`` exists, is a non-truncated BGZF, and carries
+    at least one record where the manifest recorded uploaded variants. Raises
+    :class:`RegisterError` on any shortfall.
+
+    Pure read-only — no DB handle, no writes — so :func:`register_existing_result`
+    runs it *before* its single ``update_status`` flip and can rely on a refusal
+    leaving the run byte-unchanged (the torn-state invariant).
+    """
+    log = logger.bind(imputation_id=imputation_id)
+
+    per_chrom = _load_manifest_variants_per_chrom(archive)
+    if per_chrom is None:
+        msg = (
+            f"imputation_id {imputation_id} has no readable prepare MANIFEST.json "
+            f"under {archive.upload_dir}; the manifest is the trusted per-chromosome "
+            f"completeness oracle. Re-run `genome imputation run {imputation_id}` "
+            "(which does not need it), or use `genome imputation import` for a legacy "
+            "archive without a manifest."
+        )
+        raise RegisterError(msg)
+
+    # E1 — expected = manifest keys ∩ reference panel. chrY is intentionally absent
+    # from the panel, so a manifest 'Y' / 'MT' key (the user's own run_0002/0003
+    # carry a 'Y' key with no ``result/chrY.vcf.gz``) must not dead-gate a
+    # genuinely complete run.
+    expected = tuple(sorted(c for c in per_chrom if c in PANEL_CHROMOSOMES))
+    if not expected:
+        msg = (
+            f"imputation_id {imputation_id} prepare MANIFEST.json lists no "
+            f"reference-panel chromosome in variants_per_chrom (keys "
+            f"{sorted(per_chrom)}); there is nothing to register."
+        )
+        raise RegisterError(msg)
+
+    # arch-1 glob reconciliation — the on-disk top-level result set (parsed the
+    # SAME way :func:`import_result` globs it, via :func:`_resolve_result_vcfs`)
+    # must not carry a ``result/chrN.vcf.gz`` absent from the expected set, or
+    # "register blessed complete" would disagree with what import loads. The
+    # missing-expected direction is caught in the per-chromosome loop below.
+    on_disk = {chrom for chrom, _ in _resolve_result_vcfs(archive, None)}
+    unmanifested = sorted(on_disk - set(expected))
+    if unmanifested:
+        msg = (
+            f"imputation_id {imputation_id} has on-disk result VCF(s) for "
+            f"chromosome(s) {unmanifested} that the prepare manifest does not list "
+            f"(expected {list(expected)}); refusing to register a tree that import "
+            f"would load differently. Re-run `genome imputation run {imputation_id}` "
+            "to regenerate a coherent manifest, or remove the stray result VCF(s)."
+        )
+        raise RegisterError(msg)
+
+    # Per-chromosome ALL-OR-NOTHING completeness. Every failure is collected so the
+    # refusal names them all at once. chrX resolves to the TOP-LEVEL concat
+    # ``result/chrX.vcf.gz`` (never ``result/chrX_regions/``) via
+    # :func:`_output_vcf_path`, matching import (finding-029).
+    failures: list[tuple[str, str]] = []
+    for chrom in expected:
+        reason = _result_vcf_incomplete_reason(_output_vcf_path(archive, chrom), per_chrom[chrom])
+        if reason is not None:
+            failures.append((chrom, reason))
+        else:
+            log.info("imputation.register.chrom.validated", chrom=chrom)
+
+    if failures:
+        detail = ", ".join(f"chr{chrom} ({reason})" for chrom, reason in failures)
+        msg = (
+            f"imputation_id {imputation_id} has {len(failures)} incomplete result "
+            f"VCF(s): [{detail}]. Re-run `genome imputation run {imputation_id}`, or "
+            "import the intact chromosomes with `--chromosomes`. No status change was "
+            "made."
+        )
+        raise RegisterError(msg)
+
+    return expected
+
+
+def register_existing_result(
+    imputation_id: int,
+    *,
+    duckdb_path: Path | None = None,
+    archive_root: Path | None = None,
+) -> RegisterResult:
+    """Validate a preserved Beagle result tree and flip the run to ``completed``.
+
+    The JVM-free bridge for the rebuild-from-preserved-archive path (finding-008,
+    RM-7fba363). After a schema rebuild re-creates ``imputation_runs`` at
+    ``pending`` while the on-disk ``run_<id>/result/`` tree survives, ``run`` is
+    otherwise the only way forward and it boots Beagle just to skip every already
+    imputed chromosome. This collapses that to one validate-and-flip so
+    :func:`import_result` (which refuses ``pending``) can proceed unchanged.
+
+    Manifest-driven and fail-closed. The expected set is the prepare manifest's
+    ``variants_per_chrom`` keys restricted to
+    :data:`~genome.imputation.reference_panel.PANEL_CHROMOSOMES`; every expected
+    chromosome's result VCF must exist, be a non-truncated BGZF, and stream at
+    least one record when the manifest recorded uploaded variants for it
+    (truncation-aware per finding-008 #2). Any shortfall raises
+    :class:`RegisterError` and leaves the run untouched — no torn state. Only on
+    full validation does a single ``update_status`` flip to ``completed`` run,
+    stamping ``submitted_at`` / ``completed_at`` idempotently. Status-only: no
+    ``genotype_calls`` are written (that stays :func:`import_result`'s job).
+
+    ``duckdb_path`` and ``archive_root`` default to the resolved settings,
+    matching :func:`import_result` and :func:`run_imputation`.
+    """
+    settings = get_settings()
+    db_path = duckdb_path or settings.genome_duckdb_path
+    archive_root = archive_root or settings.archive_path
+
+    log = logger.bind(imputation_id=imputation_id)
+    log.info("imputation.register.start")
+
+    archive = ImputationArchive.for_run(archive_root, imputation_id)
+
+    # Everything up to the single ``update_status`` flip is read-only, so a
+    # refusal anywhere below leaves the run byte-unchanged (no torn state). The
+    # connection stays open across the file validation only so the write lands in
+    # the same scope; the ordering — every check before the one write — is the
+    # invariant the torn-state tests pin.
+    with duckdb_connection(db_path) as conn:
+        run = fetch_run(conn, imputation_id)
+        if run is None:
+            msg = f"imputation_id {imputation_id} not found"
+            raise RegisterError(msg)
+
+        # PRE-STATE GATE (before any write). Accept only the registerable set
+        # {pending, processing}; refuse {completed, failed} with no override.
+        # Mirrors :func:`_validate_for_import`'s accept-set without a ``--force``
+        # escape hatch: idempotence is "refuse already-completed", so no COALESCE
+        # re-stamp of ``submitted_at`` / ``completed_at`` can happen on re-run.
+        status_before = run.status
+        if status_before == "completed":
+            msg = f"imputation_id {imputation_id} is already completed; nothing to register."
+            raise RegisterError(msg)
+        if status_before == "failed":
+            msg = (
+                f"imputation_id {imputation_id} is in status 'failed'; refusing to "
+                f"launder a failed run into 'completed'. Re-run `genome imputation "
+                f"run {imputation_id}` to re-impute the failed chromosome(s)."
+            )
+            raise RegisterError(msg)
+
+        # All read-only validation lives in the pure helper (no DB, no writes), so
+        # every refusal below fires strictly before the single write. On success
+        # the run is ALL-OR-NOTHING complete, so the validated set == the expected
+        # set (the helper raises on any per-chromosome shortfall).
+        expected = _validate_preserved_result_tree(archive, imputation_id)
+
+        # HAPPY PATH — every read-only check passed; this is the single write.
+        # finding-007 Fix3 COALESCE stamping fills ``submitted_at`` /
+        # ``completed_at`` only when NULL (so a ``processing`` run keeps its
+        # existing ``submitted_at``).
+        update_status(
+            conn,
+            imputation_id,
+            status="completed",
+            set_submitted=True,
+            set_completed=True,
+        )
+        stamped = fetch_run(conn, imputation_id)
+        submitted_at = stamped.submitted_at if stamped is not None else None
+        completed_at = stamped.completed_at if stamped is not None else None
+
+    log.info(
+        "imputation.register.complete",
+        status_before=status_before,
+        chromosomes_expected=len(expected),
+        chromosomes_validated=len(expected),
+    )
+    return RegisterResult(
+        imputation_id=imputation_id,
+        status_before=status_before,
+        status_after="completed",
+        chromosomes_expected=expected,
+        chromosomes_validated=expected,
+        submitted_at=submitted_at,
+        completed_at=completed_at,
     )
 
 

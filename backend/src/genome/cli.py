@@ -27,12 +27,14 @@ from genome.imputation import (
     PANEL_CHROMOSOMES,
     DryRunResult,
     ReferencePanel,
+    RegisterError,
     import_result,
     install_panel,
     list_runs,
     normalize_imputed_rsids,
     parse_chromosomes_filter,
     prepare_run,
+    register_existing_result,
     run_imputation,
     validate_panel,
 )
@@ -815,6 +817,43 @@ def imputation_run(  # noqa: PLR0913 — one CLI flag per operational control
             "Next step: `genome imputation import <id>` to load the imputed "
             "VCFs into genotype_calls and variants_master.",
         )
+
+
+@imputation_app.command("register-existing-result")
+def imputation_register_existing_result(
+    imputation_id: Annotated[int, typer.Argument(help="Run ID.")],
+) -> None:
+    """Register a preserved Beagle result tree without re-running imputation.
+
+    The JVM-free rebuild fast path (finding-008, RM-7fba363): validates that the
+    on-disk ``archive/imputation/run_<id>/result/`` tree is complete and
+    non-truncated, then flips the run's status to ``completed`` so
+    ``genome imputation import`` can proceed. Use it after a schema rebuild
+    re-creates the run at ``pending`` while the preserved result tree survives —
+    instead of ``run``, which would boot Beagle just to skip every chromosome.
+
+    Fail-closed: a missing, truncated, or silently-empty result VCF, an absent
+    manifest, or a run already ``completed`` / ``failed`` is refused with a
+    non-zero exit and the run's status left unchanged.
+    """
+    try:
+        result = register_existing_result(imputation_id)
+    except RegisterError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(
+        f"imputation_id={result.imputation_id} "
+        f"status={result.status_before}->{result.status_after} "
+        f"chromosomes_validated={len(result.chromosomes_validated)}"
+        f"/{len(result.chromosomes_expected)} "
+        f"submitted={result.submitted_at or '-'} "
+        f"completed={result.completed_at or '-'}",
+    )
+    typer.echo(
+        f"Next step: `genome imputation import {imputation_id}` to load the "
+        "validated imputed VCFs into genotype_calls and variants_master.",
+    )
 
 
 @imputation_app.command("chrx-loo")

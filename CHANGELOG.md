@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`genome imputation register-existing-result <id>` — JVM-free rebuild fast path**
+  (`RM-7fba363`, PR 11, finding-008). Validates a preserved Beagle `result/` tree against the
+  prepare `MANIFEST.json` and flips `imputation_runs.status` straight to `completed` (stamping
+  `submitted_at` / `completed_at`) so `genome imputation import` can proceed — collapsing the
+  full-archive-preserved rebuild that previously had to boot Beagle via `run` just to skip
+  every already-imputed chromosome. Status-only (no `genotype_calls`) and fail-closed: the
+  single status write fires only after every read-only check passes, and validation is
+  truncation-aware (finding-008 #2) over the manifest ∩ reference-panel chromosome set (chrY
+  excluded; chrX via the top-level concat), so a missing / truncated / silently-empty result
+  VCF, an unmanifested on-disk result VCF, an absent manifest, or a `completed` / `failed` run
+  is refused with the run left byte-unchanged.
+
 ### Fixed
 - **Version-label correctness for the ClinVar / GWAS Catalog loaders** (`RM-9f3c52c`, PR 10,
   finding-043). Two label-integrity defects, both fault-triggered and invisible on a normal
