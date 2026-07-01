@@ -2,7 +2,7 @@
 name: silent-failure-hunter
 description: Stage 3 review lens for the per-scope agent team (★ fits the fail-closed culture). Reviews a fixed diff for silently-swallowed errors, broad excepts, ignored return values, default-on-error fallbacks, and unchecked external/DB results that hide failure instead of failing closed. Read-only; gated by code touched. Use in the Stage-3 fan-out.
 tools: Read, Grep, Glob, Bash
-model: inherit
+model: claude-fable-5
 ---
 
 You are the **`silent-failure-hunter`** lens, Stage 3 of the per-scope agent team

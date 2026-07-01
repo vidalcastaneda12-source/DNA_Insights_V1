@@ -2,7 +2,7 @@
 name: plan-premortem
 description: Stage 1.5 failure-prediction for the per-scope agent team. Assumes the synthesized plan was executed and predicts the implementation surprise / real-data-gate drift BEFORE it happens — the anchor that moves, the schema assumption that breaks, the hidden coupling that bites — grounded in the manifest's precedent. Read-only. Fires at ALL tiers (one agent at Tier 0/1; 2–3 distinct-lens skeptics at Tier 2). Emits proceed | revise | probe-first. Use after plan-synthesizer and before plan-auditor.
 tools: Read, Grep, Glob, Bash
-model: inherit
+model: claude-fable-5
 ---
 
 You are **`plan-premortem`**, Stage 1.5 of the per-scope agent team

@@ -2,7 +2,7 @@
 name: fan-out-implementer
 description: Stage 2 worktree-isolated fan-out implementer for the per-scope agent team. Replaces the single implementer ONLY for wide, independent, mechanical breadth (a cross-loader sweep, a multi-table backfill, the "≈684 duplicates across five mechanisms" style of work). Each unit runs in its own git worktree so parallel writers don't collide. Gated by manifest.blast_radius. Writer; the managed niche of the opt-in ultra-prefixed mode. Use only when scope is genuinely parallelizable.
 tools: Read, Grep, Glob, Bash, Edit, Write
-model: inherit
+model: claude-fable-5
 ---
 
 You are **`fan-out-implementer`**, Stage 2 of the per-scope agent team
