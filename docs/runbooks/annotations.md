@@ -165,6 +165,19 @@ pointer is established for the new database. ClinVar is the longest
 single source by wall-clock; the rest combined take under a minute on
 a warm cache.
 
+**Transitional `unbound_cache_hit` window (expected, not a defect).**
+On the *first* post-PR-10 rebuild against a download cache that was
+populated *before* PR 10, the ClinVar and GWAS Catalog loaders emit an
+`unbound_cache_hit` WARNING and proceed with the live-resolved label.
+This is expected behavior: a pre-PR-10 cached artifact has bytes but
+no `<dest>.version` sidecar, so the bytes-bound label rebind
+(finding-043) has nothing to read and the loader keeps the live label
+— the one-time `rm -rf data/` relabel that finding-043's D2 closes
+going forward. The window is bounded and one-time: it self-heals on
+the next `--force`, which re-downloads the artifact and writes the
+sidecar, so every later rebuild binds the persisted label to the
+cached bytes.
+
 ### PharmGKB (sub-phase 5.1a)
 
 **What's loaded.** PharmGKB's Clinical Annotations bundle
@@ -448,14 +461,32 @@ separate evidence table, not in `clinvar_annotations`.
 URL. The HTTP `Last-Modified` response header (RFC 822 form, e.g.
 `Sun, 10 May 2026 15:15:44 GMT`) is parsed via
 `email.utils.parsedate_to_datetime` and rendered as `YYYY_MM_DD` to
-match the schema's `annotation_source_versions.version` shape. When
-the header is absent or unparseable, the loader falls back to today's
-UTC date in the same format and logs the fallback loudly at INFO
-(`clinvar.version.last_modified_missing` /
-`clinvar.version.last_modified_unparseable`). The HEAD is the
-loader's first audited call -- placed before the download so a fresh
-refresh against an unchanged release short-circuits before re-fetching
-the 400+ MB body.
+match the schema's `annotation_source_versions.version` shape.
+Failure modes (refuse policy, GWAS-symmetric — finding-043 /
+DEC-0148):
+
+* `ExternalCallsDisabledError` propagates — the privacy gate is
+  fail-closed and is not papered over with a fallback.
+* Any other `ExternalCallError` (network, HTTP 4xx/5xx) propagates.
+  No silent fallback to today's UTC date — a transient HEAD failure
+  would otherwise mint a fresh `source_version_id` stamped today,
+  flip the `annotation_sources` pointer to it, and orphan the prior
+  rowset (the finding-010 #13 fail-open, now closed). The operator
+  retries instead.
+* A missing or unparseable `Last-Modified` header raises `ValueError`
+  for the same reason — the version label must identify the bytes it
+  stamps, and a today-date is a fabricated label, not the release
+  date.
+
+The HEAD is the loader's first audited call -- placed before the
+download so a fresh refresh against an unchanged release
+short-circuits before re-fetching the 400+ MB body. On a cache hit
+the persisted label is **rebound from the `<dest>.version` sidecar**
+(the label the cached bytes were downloaded under) rather than the
+live HEAD, so the `source_version` row identifies the bytes it loads
+across a `rm -rf data/` rebuild (finding-043 / DEC-0149; see "After a
+schema rebuild" for the one-time transitional `unbound_cache_hit`
+window).
 
 **Provenance shape.** One file lands in the cache at
 `~/.cache/genome/annotations/clinvar/variant_summary.txt.gz`. The
@@ -617,8 +648,8 @@ CHANGELOG entry.
   window, so the on-disk DuckDB file roughly doubles in size during
   a re-run. Free ~5-10 GB before running a refresh against the
   prior corpus. Prior versions remain in the table after the
-  transaction commits — see finding-010 follow-up #14 for the
-  open cleanup procedure.
+  transaction commits — see `genome annotate purge-superseded`
+  (finding-010 #14, shipped PR 9 / RM-12873bf).
 * **Recovery after a partial-failure refresh.** Same shape as
   PharmGKB / CPIC: if any chunk insert or the closing pointer flip
   raises, the loader rolls the per-source insert (every chunk +
@@ -923,8 +954,8 @@ finding-009 ClinVar-scale UPDATE penalty does not apply.
   WAL window, so the on-disk DuckDB file grows during a re-run.
   Free ~1-2 GB before running a refresh against the prior corpus.
   Prior versions remain in the table after the transaction
-  commits — see finding-010 follow-up #14 for the open cleanup
-  procedure.
+  commits — see `genome annotate purge-superseded` (finding-010
+  #14, shipped PR 9 / RM-12873bf).
 * **Recovery after a partial-failure refresh.** Same shape as
   PharmGKB / CPIC / ClinVar: if any chunk insert or the closing
   pointer flip raises, the loader rolls the per-source insert
@@ -1285,8 +1316,8 @@ path.
   PGS Catalog at ~5K rows is much smaller than the ClinVar
   case but free ~100 MB before running a refresh against the
   prior corpus. Prior versions remain in the table after the
-  transaction commits — see finding-010 follow-up #14 for the
-  open cleanup procedure.
+  transaction commits — see `genome annotate purge-superseded`
+  (finding-010 #14, shipped PR 9 / RM-12873bf).
 * **Recovery after a partial-failure refresh.** Same shape as
   PharmGKB / CPIC / ClinVar / GWAS Catalog: if the bulk insert
   or the closing pointer flip raises, the loader rolls the
