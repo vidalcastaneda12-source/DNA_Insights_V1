@@ -27,48 +27,55 @@ Every stage is in-loop; both gates are out-of-loop and human. The team produces 
 Stages 0–1 + all read-only review members produce analysis, not code. The **writers**
 (`Edit`/`Write`) are confined to Stage 2 + the lone Stage-5 durable-doc writer.
 
+> **Model & effort (2026-07-01).** Every member now sets `model: inherit`, so the whole
+> team tracks the **main session's model and effort** instead of a per-member tier. The
+> `Model` columns below therefore all read `inherit`; the earlier split (cheap mechanical
+> members on a small model, hard-reasoning members on a large one) was retired at the
+> operator's request. To restore a per-member split, set an explicit `model:` (and
+> optionally `effort:`) in that member's frontmatter.
+
 **Stage 0–1 · Plan** (all read-only)
 
 | File | Stage | Role | Model |
 |---|---|---|---|
-| `scope-dispatcher.md` | 0 | Reads one ROADMAP slot → the **scope manifest** (change_class, blast_radius, anchors, precedent, **risk_tier**, review_lenses, freshness_flags) | sonnet |
-| `planner.md` | 1 | One 8-section plan per the CLAUDE.md contract, from an assigned **angle** (run ×N) | opus |
-| `plan-judges.md` | 1 | Per-axis scorecard over all candidates (run one per **axis**) | opus |
-| `plan-synthesizer.md` | 1 | New plan = winning skeleton + best-of-breed grafts; divergence + merged riskiest-assumptions | opus |
-| `plan-premortem.md` | 1.5 | Predicts the implementation/gate surprise (fires at **all tiers**); `proceed`/`revise`/`probe-first` | opus |
-| `plan-auditor.md` | 1 | Adversarial contract-compliance grade; independent instance; `ready`/`revise`/`escalate` | opus |
+| `scope-dispatcher.md` | 0 | Reads one ROADMAP slot → the **scope manifest** (change_class, blast_radius, anchors, precedent, **risk_tier**, review_lenses, freshness_flags) | inherit |
+| `planner.md` | 1 | One 8-section plan per the CLAUDE.md contract, from an assigned **angle** (run ×N) | inherit |
+| `plan-judges.md` | 1 | Per-axis scorecard over all candidates (run one per **axis**) | inherit |
+| `plan-synthesizer.md` | 1 | New plan = winning skeleton + best-of-breed grafts; divergence + merged riskiest-assumptions | inherit |
+| `plan-premortem.md` | 1.5 | Predicts the implementation/gate surprise (fires at **all tiers**); `proceed`/`revise`/`probe-first` | inherit |
+| `plan-auditor.md` | 1 | Adversarial contract-compliance grade; independent instance; `ready`/`revise`/`escalate` | inherit |
 
 **Stage 2 · Implement** (`implementer`, `test-author`, `schema-change-executor`,
 `fan-out-implementer` are **writers**; the rest read-only)
 
 | File | Role | Model |
 |---|---|---|
-| `implementer.md` | Executes approved §4 mechanically; drives blind tests green; STOP+escalate on any surprise | opus |
-| `test-author.md` | **Plan-blind** §5 tests from spec + frozen interface; writes only `backend/tests/`; `test→spec` provenance | opus |
-| `plan-adherence-sentinel.md` | Write-phase analogue of plan-auditor; flags diff-vs-plan drift; PAUSE+escalate | opus |
-| `green-keeper.md` | Holds the dev-loop green; escalates vs weakening a test / touching schema | sonnet |
-| `test-triage.md` | Classifies a red test (real/flaky/env/needs-update) + routes | sonnet |
-| `deep-debugger.md` | On-demand root-cause for gnarly domain breakages; never weakens a test | opus |
-| `schema-change-executor.md` | Rare writer; drives the documented schema-rebuild protocol; FTS5 rule | opus |
-| `fan-out-implementer.md` | Worktree-isolated writer for wide independent mechanical breadth only | opus |
+| `implementer.md` | Executes approved §4 mechanically; drives blind tests green; STOP+escalate on any surprise | inherit |
+| `test-author.md` | **Plan-blind** §5 tests from spec + frozen interface; writes only `backend/tests/`; `test→spec` provenance | inherit |
+| `plan-adherence-sentinel.md` | Write-phase analogue of plan-auditor; flags diff-vs-plan drift; PAUSE+escalate | inherit |
+| `green-keeper.md` | Holds the dev-loop green; escalates vs weakening a test / touching schema | inherit |
+| `test-triage.md` | Classifies a red test (real/flaky/env/needs-update) + routes | inherit |
+| `deep-debugger.md` | On-demand root-cause for gnarly domain breakages; never weakens a test | inherit |
+| `schema-change-executor.md` | Rare writer; drives the documented schema-rebuild protocol; FTS5 rule | inherit |
+| `fan-out-implementer.md` | Worktree-isolated writer for wide independent mechanical breadth only | inherit |
 
 **Stage 3 · Review** (all read-only; `/code-review` + `/security-review` skills composed
 as additional lenses)
 
 | File | Role | Model |
 |---|---|---|
-| `convention-compliance.md` · `phi-pii-guardian.md` · `test-integrity.md` · `regression-hunter.md` · `silent-failure-hunter.md` · `type-design-analyzer.md` · `pr-test-analyzer.md` · `comment-analyzer.md` · `architect-reviewer.md` | Parallel review lenses on the fixed diff; each returns falsifiable findings (`refutable_claim`) | opus / sonnet |
-| `finding-verifier.md` | **Refute-by-default** adversarial verifier; severity-scaled (blocker→2–3 skeptics) | opus |
-| `review-synthesizer.md` | Verified survivors → pre-gate package + anchors-to-watch(expected) + go/fix-first | opus |
-| `completeness-critic.md` | Tier 1+ meta-reviewer; gates loop-until-dry on lens/verify/hunk gaps | opus |
+| `convention-compliance.md` · `phi-pii-guardian.md` · `test-integrity.md` · `regression-hunter.md` · `silent-failure-hunter.md` · `type-design-analyzer.md` · `pr-test-analyzer.md` · `comment-analyzer.md` · `architect-reviewer.md` | Parallel review lenses on the fixed diff; each returns falsifiable findings (`refutable_claim`) | inherit |
+| `finding-verifier.md` | **Refute-by-default** adversarial verifier; severity-scaled (blocker→2–3 skeptics) | inherit |
+| `review-synthesizer.md` | Verified survivors → pre-gate package + anchors-to-watch(expected) + go/fix-first | inherit |
+| `completeness-critic.md` | Tier 1+ meta-reviewer; gates loop-until-dry on lens/verify/hunk gaps | inherit |
 
 **Stage 4–5 + cross-cutting**
 
 | File | Stage | Role | Model |
 |---|---|---|---|
-| `handoff-assembler.md` | 4 | Wraps `/handoff`+`/changelog`+`/new-finding`; appends the pre-gate package (read-only) | sonnet |
-| `knowledge-curator.md` | 5 | **The lone durable-doc writer**: re-locks gate-confirmed anchors post-merge, via reviewable change | opus |
-| `repo-sweep.md` | x | Staleness detector (finder, never fixer); dispatcher freshness slice + standalone backlog | sonnet |
+| `handoff-assembler.md` | 4 | Wraps `/handoff`+`/changelog`+`/new-finding`; appends the pre-gate package (read-only) | inherit |
+| `knowledge-curator.md` | 5 | **The lone durable-doc writer**: re-locks gate-confirmed anchors post-merge, via reviewable change | inherit |
+| `repo-sweep.md` | x | Staleness detector (finder, never fixer); dispatcher freshness slice + standalone backlog | inherit |
 
 Variant members are **one file run N times** with the variant (`angle` / `axis` /
 `lens`) passed in the prompt — the `×N` pattern from finding-034.

@@ -2,7 +2,7 @@
 name: pr-test-analyzer
 description: Stage 3 review lens for the per-scope agent team. Reviews a fixed diff for test ADEQUACY (distinct from test-integrity's honesty check) — does every behavior change have a test, are edge cases and the §6 anchors covered, are fixtures realistic per finding-013, is any new code path untested. Read-only; gated by code touched. Use in the Stage-3 fan-out.
 tools: Read, Grep, Glob, Bash
-model: sonnet
+model: inherit
 ---
 
 You are the **`pr-test-analyzer`** lens, Stage 3 of the per-scope agent team

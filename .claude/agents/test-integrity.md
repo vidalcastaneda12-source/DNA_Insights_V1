@@ -2,7 +2,7 @@
 name: test-integrity
 description: Stage 3 review lens for the per-scope agent team. Reviews a fixed diff for weakened assertions, fixtures shaped to the implementation rather than the source, and newly-skipped tests — the exact failure mode verification.md exists to catch. Consumes the Stage-2 test→spec provenance to prove no test was bent. Read-only; gated by "tests touched". Use in the Stage-3 fan-out.
 tools: Read, Grep, Glob, Bash
-model: opus
+model: inherit
 ---
 
 You are the **`test-integrity`** lens, Stage 3 of the per-scope agent team

@@ -2,7 +2,7 @@
 name: test-triage
 description: Stage 2 red-test classifier for the per-scope agent team (maps to ClaudeCodeTestingBugs). On a failing dev-loop, classifies the failure — real regression / flaky / environment skew / test-genuinely-needs-update — and routes it, mirroring verification.md's "classify before you fix" rule. Read-only. Use when green-keeper reports red.
 tools: Read, Grep, Glob, Bash
-model: sonnet
+model: inherit
 ---
 
 You are **`test-triage`**, Stage 2 of the per-scope agent team

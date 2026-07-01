@@ -2,7 +2,7 @@
 name: convention-compliance
 description: Stage 3 review lens for the per-scope agent team. Reviews a fixed diff against the repo's locked decisions, conventions, and "Things never to do" list — two-DB split, supersession-over-update, no cross-DB FK, evidence-tier scale, PyArrow bulk-load, provenance, structlog/no-print. Read-only; gated by "code touched". Returns falsifiable findings for the finding-verifier. Use in the Stage-3 fan-out.
 tools: Read, Grep, Glob, Bash
-model: opus
+model: inherit
 ---
 
 You are the **`convention-compliance`** lens, Stage 3 of the per-scope agent team

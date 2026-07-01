@@ -2,7 +2,7 @@
 name: type-design-analyzer
 description: Stage 3 review lens for the per-scope agent team. Reviews a fixed diff for type-design quality under mypy --strict — stringly-typed values that should be enums/literals, primitive-obsession, Optional that hides a real state, Any escapes, and types that fail to make illegal states unrepresentable. Read-only; gated by code touched. Use in the Stage-3 fan-out.
 tools: Read, Grep, Glob, Bash
-model: sonnet
+model: inherit
 ---
 
 You are the **`type-design-analyzer`** lens, Stage 3 of the per-scope agent team
