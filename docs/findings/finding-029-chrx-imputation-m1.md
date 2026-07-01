@@ -341,7 +341,8 @@ The Task 0 probe passed, so M3-physical was built and the M1 *code* deleted
 - Persist `--sex` to `sample_qc.sex_expected` (the sex-edge remedy) when an
   all-ambiguous profile actually needs it — not required for this user.
 - chrY stays skipped (the panel has no Y); `pos_grch37` recoalesce
-  (`finding-005` #9) and `register-existing-result` (PR 11) remain out of scope.
+  (`finding-005` #9, RM-b9043cd) remains the lone out-of-scope item —
+  `register-existing-result` shipped as RM-7fba363 / PR 11 (#139).
 
 ## Correction (PR 5a QC layer — see finding-031)
 

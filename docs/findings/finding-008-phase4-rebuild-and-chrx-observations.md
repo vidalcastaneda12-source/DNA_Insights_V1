@@ -142,7 +142,7 @@ chrX failure under "Troubleshooting" so a user hitting the
 `IllegalArgumentException` knows it is expected pending one of the
 fixes below.
 
-### chrX fix options (deferred)
+### chrX fix options (deferred → resolved by PR #74)
 
 Two fixes are known; both are deferred to a later session:
 
@@ -188,9 +188,11 @@ validate-and-flip that skips the Beagle boot entirely — truncation-aware
 
 ## Follow-up
 
-- Pick one of fix options (a), (b), or the temporary (c) (silently
-  skip chrX) in a future session. This finding's job is to capture
-  the mechanism and the option space; no implementation in this PR.
+- **Resolved by PR #74** — none of fix options (a), (b), or the temporary
+  (c) (silently skip chrX) was taken; the M3-physical region split
+  (sex-aware PAR1 / non-PAR / PAR2) superseded the entire (a)/(b)/(c)
+  option space. See finding-029 / finding-031 / finding-033. This
+  finding's job was to capture the mechanism and the option space.
 - The `register-existing-result` command is now tracked as
   `RM-7fba363` (PR 11) and implemented here — the JVM-free
   validate-and-flip described above (truncation-aware, manifest-driven,

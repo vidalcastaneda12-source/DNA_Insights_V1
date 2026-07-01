@@ -50,6 +50,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   #135–#136 (DEC-0150/DEC-0151); noted the transitional `unbound_cache_hit` window in the
   "After a schema rebuild" runbook section. Drains 4 repo-sweep candidates; no behavior/schema
   change.
+- **Docs hygiene: fast-follow drain of 5 doc-residual candidates + one authorized ROADMAP
+  capture.** Refreshed the stale "next PR" pointers (ROADMAP header L5 + L93-94, README Status)
+  from "PRs 1–9 landed; PR 10 next" to "PRs 1–11 landed; PR 12 next" (PR 10 #136 / PR 11 #139
+  both merged); backfilled MEMORY.md per-PR DEC rows #137–#139 (DEC-0152…0154); marked
+  finding-008's chrX fix-options section + follow-up resolved by PR #74 (the M3-physical split
+  superseded the (a)/(b)/(c) option space); dropped the shipped `register-existing-result` from
+  finding-029's out-of-scope list. Captured the PR 11 Stage-3 review residuals as new ROADMAP
+  slot RM-42bb7df. Docs only; no behavior/schema change.
 
 ## [0.5.0] — 2026-06-30
 - **General superseded-row purge — `genome annotate purge-superseded`** (`RM-12873bf`,

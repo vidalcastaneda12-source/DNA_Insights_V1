@@ -2,7 +2,7 @@
 
 Phases are sequential. Do not start phase N+1 until phase N's verification passes.
 
-**Current phase:** Phase 5 closed; executing the pre-Phase-6 cleanup sequence (PRs 1–9 landed — PR 7 closed-as-moot against the live DB, no FK-safe gnomAD orphan exists; PR 10 next) before Phase 6 begins. PR 6 (minimal `genes` seed, #88) cleared the Phase-6 FK gate.
+**Current phase:** Phase 5 closed; executing the pre-Phase-6 cleanup sequence (PRs 1–11 landed — PR 7 closed-as-moot against the live DB, no FK-safe gnomAD orphan exists; PR 12 next) before Phase 6 begins. PR 6 (minimal `genes` seed, #88) cleared the Phase-6 FK gate.
 
 ## Phase 1 — Foundation (this is the bootstrap)
 
@@ -90,8 +90,8 @@ pattern (finding-010 #15), is tracked under "Deliberately deferred" in that sequ
 
 ## Pre-Phase-6 sequence
 
-**Status:** in progress — PRs 1–9 landed (#63, #64, #65, #70, #74, #88, #131, #133); PR 7
-closed-as-moot (2026-06-26 — the live DB has no FK-safe gnomAD orphan); PR 10 is next.
+**Status:** in progress — PRs 1–11 landed (#63, #64, #65, #70, #74, #88, #131, #133, #136, #139); PR 7
+closed-as-moot (2026-06-26 — the live DB has no FK-safe gnomAD orphan); PR 12 is next.
 
 A 14-PR run that clears every dbSNP-dependent backfill, deferred-cleanup item,
 and FK blocker before the Phase 6 analyses begin, so Phase 6 starts with no open
@@ -220,6 +220,7 @@ finding-016 #8):
     Fold into a future `imputation prepare` / re-impute PR.
   - finding-021: recover chip-probe IDs to canonical rsIDs (`kgp`→`rs`, unwrap `acom_rs…`) —
     alias-format normalization that PR 4's merged-rsID resolution (finding-025) did not cover.
+- [ ] RM-42bb7df — PR 11 register-existing-result review residuals: (silent-1) make the manifest count-coercion fail-closed so a chrom with a malformed variants_per_chrom count AND an absent result VCF is refused, not silently dropped — scope the strictness to the register consumer to avoid regressing import's shared use of _load_manifest_variants_per_chrom; (ptest-2) add a test for the expected_count==0 branch in _result_vcf_incomplete_reason. (Surfaced by the PR 11 Stage-3 review; captured via /fast-follow.)
 
 **Out-of-sequence fix that landed mid-run** (not a numbered slot):
 
