@@ -2,7 +2,7 @@
 name: comment-analyzer
 description: Stage 3 review lens for the per-scope agent team. Reviews a fixed diff for comment/docstring quality — stale comments contradicting the code, comments that restate the "what" instead of the non-obvious "why", missing provenance/finding refs on anchor-bearing code, and TODO/GATE-FILL survivors. Read-only; gated by code touched. Use in the Stage-3 fan-out.
 tools: Read, Grep, Glob, Bash
-model: inherit
+model: claude-fable-5
 ---
 
 You are the **`comment-analyzer`** lens, Stage 3 of the per-scope agent team
