@@ -385,7 +385,7 @@ FROM variant_annotations_index;
 ```
 
 Any movement in block 5 means the seed did more than seed `genes` — STOP. See
-CLAUDE.md obs #7, ROADMAP "Pre-Phase-6 sequence" PR 6, and
+CLAUDE.md obs #7, ROADMAP Phase 6 → Prerequisites (RM-8094752, PR 6), and
 [`finding-020`](../findings/finding-020-canonical-refalt-backfill.md) "Out of scope"
 amendment.
 
@@ -449,7 +449,7 @@ guard mis-fired" is `orphan_candidates` (**0** here) together with the per-sourc
 sets. Any non-zero `orphan_candidates` / non-empty `deletable` on a re-run against the same
 corpus + same active versions is the regression signal.
 
-See CLAUDE.md "Real-data observations" **#8**, ROADMAP "Pre-Phase-6 sequence" PR 9
+See CLAUDE.md "Real-data observations" **#8**, ROADMAP Phase 5 → Follow-ups, PR 9
 (RM-12873bf), [`finding-010`](../findings/finding-010-version-pointer-supersession-pattern.md)
 #14, and `MEMORY.md` DEC-0126 / DEC-0127.
 
@@ -533,7 +533,7 @@ The `weakened_or_removed_test` review lens: the 3 `test_resolve_version_falls_ba
 opposite assertion), each provenance-stamped `# spec: finding-043 / plan §5`. This is a 1:1
 rename, net +10 tests / 0 removed — not a weakening. See CLAUDE.md is **not** amended (empty-anchor),
 [`finding-043`](../findings/finding-043-head-failure-version-label-policy.md), ROADMAP
-"Pre-Phase-6 sequence" PR 10 (RM-9f3c52c), and `MEMORY.md` DEC-0148 / DEC-0149.
+Phase 5 → Follow-ups, PR 10 (RM-9f3c52c), and `MEMORY.md` DEC-0148 / DEC-0149.
 
 ### PR 11 register-existing-result gate (JVM-free validate-and-flip / finding-008)
 
@@ -628,7 +628,7 @@ is already populated, so a bare `import 2` RAISES `already imported. Use --force
 `pending`), `variants_master` is **chip-only** at register-time and reaches 3,160,364 only *after*
 Arm 1's `import` + `merge`. Either way the **before == after** equality above is the invariant.
 
-See CLAUDE.md "Real-data observations" **#3**, ROADMAP "Pre-Phase-6 sequence"
+See CLAUDE.md "Real-data observations" **#3**, ROADMAP Phase 4 → Follow-ups,
 PR 11 (RM-7fba363), and
 [`finding-008`](../findings/finding-008-phase4-rebuild-and-chrx-observations.md).
 
@@ -725,8 +725,8 @@ node --test .claude/workflows/__tests__/*.test.mjs
 ```
 
 The single skip is the **intentional Phase-2 reversal-gate placeholder** in `drift.test.mjs`
-(the Python-CLI reversal-gate is Phase 2 — see ROADMAP "Sub Project C2+D — Workflow-Engine
-Migration"). `0 fail` is the bar. (C2+D Phase 2 PR 2 **un-skips** this — post-Phase-2 the harness
+(the Python-CLI reversal-gate is Phase 2 — see ROADMAP Phase 5 → Follow-ups → Development
+process & tooling). `0 fail` is the bar. (C2+D Phase 2 PR 2 **un-skips** this — post-Phase-2 the harness
 is **87 pass · 0 skip**; see the "C2+D Phase 2 gate" block below.)
 
 **EC4 — dev-loop byte-unchanged (negative control).** No Python / DDL / schema file moved:
@@ -759,7 +759,7 @@ manifests, live-engine RUN semantics not yet validated — and the `arch-1` drif
 seam-coverage gap was latent/backlogged. **Both shipped in C2+D Phase 2 PR 3 (#123)** — D7
 live-engine validation + `arch-1` harness coverage (see the "C2+D Phase 2 gate" section below).
 See [`finding-034`](../findings/finding-034-agent-team-plan-phase.md) "C2D-Phase1 residual risk"
-and ROADMAP "Sub Project C2+D" Phase 2.
+and ROADMAP Phase 5 → Follow-ups → Development process & tooling (C2+D Phase 2).
 
 ## C2+D Phase 2 gate (reversal-gate + engine-primary CLI)
 

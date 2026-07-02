@@ -203,7 +203,7 @@ superseded_by: []
     exists and is verified, but the live corpus has no orphan to delete yet — the no-op is
     conditional on the corpus, not structural. See CLAUDE.md "Real-data observations" #8,
     [`verification.md`](../runbooks/verification.md) "PR 9 purge gate", ROADMAP
-    "Pre-Phase-6 sequence" PR 9, and `MEMORY.md` DEC-0126 / DEC-0127.
+    Phase 5 → Follow-ups, PR 9 (RM-12873bf), and `MEMORY.md` DEC-0126 / DEC-0127.
 
 15. **Cross-source generalization opportunity.** The pattern as
     implemented is generic: a `_sources(source_db PK,

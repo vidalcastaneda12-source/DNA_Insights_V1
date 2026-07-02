@@ -8,7 +8,7 @@ superseded_by: []
 ---
 # Finding 043 — HEAD-failure refuse + bytes-bound version label (version-label correctness policy)
 
-PR 10 (`RM-9f3c52c`, ROADMAP pre-Phase-6 sequence) closes two **atomic label-integrity
+PR 10 (`RM-9f3c52c`, ROADMAP Phase 5 → Follow-ups) closes two **atomic label-integrity
 defects** in the ClinVar / GWAS Catalog loaders. Both are fault-triggered and invisible on a
 normal run, both were already *described* but never *fixed*, and both violate locked decision
 #7's premise that the `annotation_source_versions.version` string must identify the bytes in
