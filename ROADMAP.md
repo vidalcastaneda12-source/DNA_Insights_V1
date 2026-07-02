@@ -203,8 +203,8 @@ finding-016 #8):
     RM-25072d2 (still open, below).
 - [x] RM-7fba363 (PR 11) — finding-008: `register-existing-result` CLI command, collapsing
   the full-archive rebuild workflow.
-- [ ] RM-c5bcb2d (PR 12) — Top-level CLI test module for `init` / `status` / `config get|set` /
-  `version` (audit item 3.2; currently uncovered).
+- [x] RM-c5bcb2d (PR 12) — Top-level CLI test module for `init` / `status` / `config get|set` /
+  `version` (audit item 3.2; currently uncovered). (#144)
 - [ ] RM-3973250 (PR 13) — gnomAD total-reopen drift sentinel on the `gnomad.refresh.complete`
   event (finding-012 #12).
 - [ ] RM-b9043cd (PR 14) — Deferred pipeline / imputation residuals (surfaced by the 2026-06-26 repo
@@ -234,6 +234,10 @@ hasn't arrived, tracked in findings for when it does:
 
 - [ ] RM-4f5df57 — Cross-source generalization of the version-pointer pattern (finding-010 #15)
 - [ ] RM-25072d2 — Generalize the hash-match fallback into a shared helper
+- [ ] RM-e95c4a0 — Wire the dead `genome --version` eager flag into the `_main` callback (or remove
+  it): `cli.py:1131-1139` defines `_VersionFlag` / `_print_version_and_exit`, but neither is
+  referenced by the parameter-less `_main` callback, so `genome --version` is a no-op today (only the
+  `genome version` subcommand prints the version). Surfaced by PR 12 / RM-c5bcb2d intake.
 - [ ] RM-fd3f213 — Sidecar write/read atomicity hardening (finding-043 follow-up): temp-file+atomic-rename (or unlink-before-write) for the version sidecar so a swallowed write failure degrades to ABSENT not STALE; narrow `_read_version_sidecar` to FileNotFoundError + warn on other OSError. Adversarial-only today (single-user 0700/0600 cache); on-theme label-correctness hardening.
 - [ ] RM-b2a34d9 — Hash-as-canonical-identity refactor
 - [ ] RM-597e9fc — `annotate inspect --source URL` schema-inspection helper

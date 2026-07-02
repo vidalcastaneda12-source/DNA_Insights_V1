@@ -210,11 +210,12 @@ back-pointer; `DEC-0002` is the live decision.
 | DEC-0152 | tactical | 2026-07-01 | active | — | VSC-User, ClaudeCodeDevelopment | PR #137 | docs(fast-follow): drain 4 RM-9f3c52c doc residuals | https://github.com/vidalcastaneda12-source/DNA_Insights_V1/pull/137 |
 | DEC-0153 | tactical | 2026-07-01 | active | — | VSC-User, ClaudeCodeDevelopment | PR #138 | chore(agents): inherit main-session model across per-scope team | https://github.com/vidalcastaneda12-source/DNA_Insights_V1/pull/138 |
 | DEC-0154 | tactical | 2026-07-01 | active | — | VSC-User, ClaudeCodeDevelopment | PR #139 | feat(imputation): register-existing-result CLI command (RM-7fba363 / PR 11) | https://github.com/vidalcastaneda12-source/DNA_Insights_V1/pull/139 |
+| DEC-0155 | tactical | 2026-07-02 | active | — | VSC-User, ClaudeCodeDevelopment | PR #144 | test(cli): top-level CLI test module for init/status/version (RM-c5bcb2d / PR 12) | https://github.com/vidalcastaneda12-source/DNA_Insights_V1/pull/144 |
 
 <!-- END decision-ledger -->
 
 _**Backfill status:** `DEC-0001 … DEC-0021` are the curated decision-finding rows (every
-`type: decision`/`both` finding). `DEC-0022 … DEC-0084`, `DEC-0100 … DEC-0118`, `DEC-0128 … DEC-0147`, and `DEC-0150 … DEC-0154` are the **per-PR-history retrospective** —
+`type: decision`/`both` finding). `DEC-0022 … DEC-0084`, `DEC-0100 … DEC-0118`, `DEC-0128 … DEC-0147`, and `DEC-0150 … DEC-0155` are the **per-PR-history retrospective** —
 one row per merged PR in `main`'s history, the squash-merge subject git-verbatim as the decision
 (`DEC-0085 … DEC-0099`, `DEC-0119 … DEC-0127`, and `DEC-0148 … DEC-0149` in between are decision-finding rows, not per-PR history).
 **Declared complete: PRs #19 … #139** (107 PR-referenced commits, the full PR history
