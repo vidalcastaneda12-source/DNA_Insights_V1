@@ -2,7 +2,7 @@
 
 Phases are sequential. Do not start phase N+1 until phase N's verification passes.
 
-**Current phase:** Phase 5 closed; executing the pre-Phase-6 cleanup sequence (PRs 1–12 landed — PR 7 closed-as-moot against the live DB, no FK-safe gnomAD orphan exists; PR 13 next) before Phase 6 begins. PR 6 (minimal `genes` seed, #88) cleared the Phase-6 FK gate.
+**Current phase:** Phase 5 closed; executing the pre-Phase-6 cleanup sequence (PRs 1–13 landed — PR 7 closed-as-moot against the live DB, no FK-safe gnomAD orphan exists; PR 14 next) before Phase 6 begins. PR 6 (minimal `genes` seed, #88) cleared the Phase-6 FK gate.
 
 ## Phase 1 — Foundation (this is the bootstrap)
 
@@ -90,8 +90,8 @@ pattern (finding-010 #15), is tracked under "Deliberately deferred" in that sequ
 
 ## Pre-Phase-6 sequence
 
-**Status:** in progress — PRs 1–12 landed (#63, #64, #65, #70, #74, #88, #131, #133, #136, #139, #144); PR 7
-closed-as-moot (2026-06-26 — the live DB has no FK-safe gnomAD orphan); PR 13 is next.
+**Status:** in progress — PRs 1–13 landed (#63, #64, #65, #70, #74, #88, #131, #133, #136, #139, #144, #147); PR 7
+closed-as-moot (2026-06-26 — the live DB has no FK-safe gnomAD orphan); PR 14 is next.
 
 A 14-PR run that clears every dbSNP-dependent backfill, deferred-cleanup item,
 and FK blocker before the Phase 6 analyses begin, so Phase 6 starts with no open
@@ -205,8 +205,22 @@ finding-016 #8):
   the full-archive rebuild workflow.
 - [x] RM-c5bcb2d (PR 12) — Top-level CLI test module for `init` / `status` / `config get|set` /
   `version` (audit item 3.2; currently uncovered). (#144)
-- [ ] RM-3973250 (PR 13) — gnomAD total-reopen drift sentinel on the `gnomad.refresh.complete`
-  event (finding-012 #12).
+- [x] RM-3973250 (PR 13) — gnomAD **+ dbSNP** total-reopen drift sentinel on the
+  `gnomad.refresh.complete` **and `dbsnp.refresh.complete`** events (finding-012 #12).
+  **Landed #147 / `11da3f6` (2026-07-02); evidence-gated verify-and-merge GREEN — `change_class=core`,
+  N/A anchors: this PR runs no refresh / no `refresh-index`, so the negative-control data anchors of
+  CLAUDE.md obs #3/#4 held unchanged by construction; tests 1796 → 1818 (+22).** Surfaces the
+  run-total htslib HTTP/2 reopen count as `reopens_total` on both `GnomadLoadResult` /
+  `gnomad.refresh.complete` (parallel + sequential) and `DbsnpLoadResult` / `dbsnp.refresh.complete`
+  (sequential-only), via a shared `remote_tabix.RemoteReadStats` out-param accumulator — the
+  finding-012 #11 shared-machinery extraction now serves both loaders. `reopens_total` is
+  **tolerance-banded network telemetry, not a re-lockable anchor** (fenced out of the byte-exact
+  table; finding-012 #5; `0` healthy, record-the-value, never byte-match); on a failed run the gnomAD
+  parallel path under-reports a dead spawn worker's unrecoverable partial — a documented
+  accepted-limitation asymmetry (dbSNP is sequential-only). Folding the dbSNP mirror **in-scope**
+  (rather than deferring it) meant **no separate dbSNP-mirror `RM-` slot was minted**. See CLAUDE.md obs #4,
+  [`verification.md`](docs/runbooks/verification.md) "PR 13 gnomAD + dbSNP reopen-sentinel gate",
+  finding-012 #10–#12, `MEMORY.md` DEC-0161.
 - [ ] RM-b9043cd (PR 14) — Deferred pipeline / imputation residuals (surfaced by the 2026-06-26 repo
   sweep — each was a deferral whose original fold target landed without absorbing it, so it had
   no slot):
@@ -221,6 +235,14 @@ finding-016 #8):
   - finding-021: recover chip-probe IDs to canonical rsIDs (`kgp`→`rs`, unwrap `acom_rs…`) —
     alias-format normalization that PR 4's merged-rsID resolution (finding-025) did not cover.
 - [ ] RM-42bb7df — PR 11 register-existing-result review residuals: (silent-1) make the manifest count-coercion fail-closed so a chrom with a malformed variants_per_chrom count AND an absent result VCF is refused, not silently dropped — scope the strictness to the register consumer to avoid regressing import's shared use of _load_manifest_variants_per_chrom; (ptest-2) add a test for the expected_count==0 branch in _result_vcf_incomplete_reason. (Surfaced by the PR 11 Stage-3 review; captured via /fast-follow.)
+- [ ] RM-fdbeb64 (ptest-1) — Optional loader-grain regression guard asserting the documented
+  `reopens_total` failure-path asymmetry: a dead gnomAD parallel (`spawn`) worker contributes 0
+  (its partial reopens are unrecoverable) while the sequential path — and all of dbSNP — surfaces a
+  failed chromosome's partial. (Surfaced by the RM-3973250 / PR 13 Stage-3 review; finding-012 #12.)
+- [ ] RM-a3b5d24 — **Pre-existing / optional** (NOT introduced by PR 13): tighten
+  `_ChromResult.status` in `backend/src/genome/annotate/loaders/gnomad.py` from `status: str`
+  (values `{"ok","failed"}`) to `Literal["ok","failed"]`. (Surfaced by the RM-3973250 / PR 13
+  Stage-3 review.)
 
 **Out-of-sequence fix that landed mid-run** (not a numbered slot):
 
