@@ -114,6 +114,12 @@ superseded_by: []
     `gnomad.py` for the same reasons; dbSNP's bucket is on a
     different CDN but the htslib + libcurl stack is identical.
 
+    **RM-3973250 (PR 13)** also mirrors the run-total `reopens_total`
+    sentinel (see #12) onto the dbSNP loader — `dbsnp.refresh.complete`
+    and `DbsnpLoadResult` now carry it. dbSNP is sequential-only, so
+    there is no parallel-failure under-count (a failed chromosome's
+    partial is always surfaced).
+
 11. **Other remote-tabix sources.** Any future external annotation
     source that uses remote tabix (variant catalogs, population
     databases, etc.) should inherit the same coalesce-distance
@@ -124,6 +130,13 @@ superseded_by: []
     `genome.annotate.remote_tabix` (or similar) becomes worthwhile.
     Until then the inline implementation is fine.
 
+    **Resolved / extended by RM-3973250 (PR 13):** the shared
+    `remote_tabix` module (extracted in sub-phase 5.6) now also owns the
+    `RemoteReadStats` reopen accumulator — a single out-param seam that
+    both the gnomAD and dbSNP loaders thread through
+    `iter_remote_vcf_regions`, so the run-total sentinel of #12 needs no
+    per-loader reopen plumbing.
+
 12. **Optional: drift sentinel on reopens.** A
     `gnomad.refresh.complete` event field reporting the total
     reopen count across a run would surface a network-degradation
@@ -131,3 +144,17 @@ superseded_by: []
     events carry the data but a downstream consumer would have to
     aggregate them out of structlog. Worth adding when the gnomAD
     loader next gets touched.
+
+    **Resolved by RM-3973250 (PR 13):** `load` now aggregates the
+    per-reopen counts into a run-total `reopens_total` field on both
+    `gnomad.refresh.complete` / `GnomadLoadResult` and
+    `dbsnp.refresh.complete` / `DbsnpLoadResult`, via the shared
+    `RemoteReadStats` out-param accumulator (#11). It is a
+    **tolerance-banded network signal, not a byte-exact drift anchor**
+    (`0` is the healthy floor; a differing value on a re-run is expected,
+    per #5 — never byte-match it). It is a success-path run total: the
+    gnomAD parallel path under-reports on a failed run because a dead
+    spawn worker's partial reopens cannot be recovered (documented
+    accepted limitation on the `GnomadLoadResult.reopens_total`
+    docstring); the sequential path — and all of dbSNP — surfaces the
+    failed chromosome's partial.

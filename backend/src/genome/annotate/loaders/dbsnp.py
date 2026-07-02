@@ -69,6 +69,7 @@ import structlog
 from genome.annotate.filter_set import build_filter_set
 from genome.annotate.registry import RefreshResult, register_loader
 from genome.annotate.remote_tabix import (
+    RemoteReadStats,
     RemoteTabixLibcurlMissingError,
     audited_head,
     coalesce_positions,
@@ -232,6 +233,13 @@ class DbsnpLoadResult:
     (per-chrom row counts, filter-set composition, match rate vs
     ``variants_master``, the ``variant_class`` distribution, the gene-symbol
     and multi-allelic and clinical counts) plus the operational status.
+
+    ``reopens_total`` is the run-total htslib-reopen count (finding-012 #12) —
+    a tolerance-banded network signal, NOT a byte-exact drift anchor. dbSNP is
+    sequential-only (one accumulator threaded through the chrom loop), so unlike
+    gnomAD there is no parallel-failure under-count: a failed chromosome's
+    partial is still surfaced (it is mutated at the reopen site before the
+    raise).
     """
 
     version_label: str
@@ -248,6 +256,7 @@ class DbsnpLoadResult:
     chromosomes_succeeded: tuple[str, ...]
     chromosomes_failed: tuple[str, ...]
     wall_clock_seconds: float
+    reopens_total: int
 
 
 # ---------------------------------------------------------------------------
@@ -524,6 +533,8 @@ def _load_chromosome(  # noqa: PLR0913 — irreducible per-chrom configuration
     source_version_id: int,
     retrieval_datetime: datetime,
     batch_size: int,
+    *,
+    reopen_stats: RemoteReadStats | None = None,
 ) -> int:
     """Stream the dbSNP VCF for ``chrom`` and insert filtered rows.
 
@@ -593,6 +604,7 @@ def _load_chromosome(  # noqa: PLR0913 — irreducible per-chrom configuration
         event_prefix=SOURCE_DB,
         log_context={"chrom": chrom},
         log=logger,
+        reopen_stats=reopen_stats,
     ):
         _consume_record(record)
 
@@ -845,6 +857,7 @@ def load(  # noqa: C901, PLR0912, PLR0913, PLR0915 — single entry point; per-s
             chromosomes_succeeded=(),
             chromosomes_failed=(),
             wall_clock_seconds=wall,
+            reopens_total=0,
         )
 
     # 3. Source-version id (fresh or in-flight resume).
@@ -892,6 +905,11 @@ def load(  # noqa: C901, PLR0912, PLR0913, PLR0915 — single entry point; per-s
     succeeded: list[str] = []
     failed: list[str] = []
     capture_failure: BaseException | None = None
+    # One run-level reopen accumulator threaded through every chromosome
+    # (finding-012 #12). dbSNP is sequential-only, so this always surfaces a
+    # failed chromosome's partial — it is mutated at the reopen site before
+    # any raise, so it survives a mid-loop break.
+    run_stats = RemoteReadStats()
 
     # 6. Per-chromosome load.
     for chrom in requested:
@@ -913,6 +931,7 @@ def load(  # noqa: C901, PLR0912, PLR0913, PLR0915 — single entry point; per-s
                 source_version_id,
                 retrieval_datetime,
                 batch_size,
+                reopen_stats=run_stats,
             )
             conn.commit()
             elapsed = time.monotonic() - chrom_started
@@ -1025,6 +1044,7 @@ def load(  # noqa: C901, PLR0912, PLR0913, PLR0915 — single entry point; per-s
         chromosomes_succeeded=tuple(succeeded),
         chromosomes_failed=tuple(failed),
         wall_clock_seconds=round(wall, 1),
+        reopens_total=run_stats.reopens,
     )
 
     if capture_failure is not None:
@@ -1045,6 +1065,7 @@ def load(  # noqa: C901, PLR0912, PLR0913, PLR0915 — single entry point; per-s
         chromosomes_succeeded=tuple(succeeded),
         chromosomes_failed=tuple(failed),
         wall_clock_seconds=wall,
+        reopens_total=run_stats.reopens,
     )
 
 

@@ -1450,7 +1450,10 @@ Capture from the `gnomad.refresh.complete` structlog line:
 `distinct_variants_per_chrom`, `match_rate`,
 `af_buckets_user_overlap`, `mean_af_user_overlap`,
 `pop_af_presence`, plus `chromosomes_succeeded` /
-`chromosomes_failed` and wall-clock.
+`chromosomes_failed`, wall-clock, and `reopens_total` (the run-total
+htslib-reopen drift sentinel, finding-012 #12 / RM-3973250 — a
+tolerance-banded network signal; see the fenced note under the locked
+table below, **not** a byte-exact anchor).
 
 #### Locked `user_only` numbers (PR C, gate-captured 2026-06-22)
 
@@ -1468,8 +1471,27 @@ PGS-comparison reference). Drift on a re-run against the same corpus + gnomAD
 | `filter_set_composition` (`user` = `union_total`) | 3,144,800 |
 | `mean_af_user_overlap` | 0.2288 |
 | `chromosomes_succeeded` / `failed` | 23 / 0 |
-| htslib recovers | 2 |
 | Wall-clock (`--jobs 8`) | ~7 h 14 m (26,034 s) |
+
+> **`reopens_total` is NOT a drift anchor — deliberately kept out of the
+> byte-exact table above.** The `gnomad.refresh.complete` event now emits
+> `reopens_total` (finding-012 #12 / RM-3973250), the run-total count of htslib
+> HTTP/2 close+reopens across the run. Unlike every row in the table above, it
+> is a **tolerance-banded network signal, not a locked number** — it is
+> *network-condition-dependent* per finding-012 #5 and differs on every run:
+> **630+** at a 1 kb coalesce gap on chr1 alone, **<30** across the full
+> three-way run, and **2** at this PR-C `--jobs 8` capture. Its expected range
+> is **0 to ~30**, and **`0` is the healthy floor** — not a broken sentinel:
+> finding-012 #7 drove reopens toward 0 by widening the coalesce gap to 50 kb,
+> so a clean network legitimately yields 0. **Record the emitted value as an
+> observation; never byte-match it against `2`** (or any prior value). A
+> differing `reopens_total` on a re-run is **expected, not a regression** — the
+> exact opposite of the byte-exact contract the table above carries. It is a
+> success-path run total; on a *failed* parallel run it under-reports, because a
+> dead spawn worker's partial reopens cannot be recovered (documented accepted
+> limitation on the `GnomadLoadResult.reopens_total` docstring). The
+> sequential path — and all of dbSNP (`dbsnp.refresh.complete.reopens_total`,
+> sequential-only) — surfaces a failed chromosome's partial.
 
 AF buckets on the user-variant overlap:
 
@@ -1759,7 +1781,10 @@ Capture from the `dbsnp.refresh.complete` structlog line: `rows_loaded`,
 `filter_set_composition`, `distinct_variants_per_chrom`, `match_rate` (vs
 `variants_master`), `variant_class_distribution`, `gene_symbols_present`,
 `multiallelic_rows`, `is_clinical_rows`, plus `chromosomes_succeeded` /
-`chromosomes_failed` and wall-clock.
+`chromosomes_failed`, wall-clock, and `reopens_total` (the run-total
+htslib-reopen drift sentinel, finding-012 #12 / RM-3973250 — a
+tolerance-banded network signal, not a byte-exact anchor; see the
+`htslib HTTP/2 reopens` row note in the locked table below).
 
 Filter-set composition (`user_only`, distinct `(chrom, pos_grch38)`;
 verified 2026-05-25 against the post-rebuild chip-only `variants_master`):
@@ -1782,7 +1807,7 @@ chromosomes under one `source_version_id`):
 | `multiallelic_rows` (`len(alt_alleles) > 1`) | 435,064 |
 | `is_clinical_rows` (`CLNSIG` present) | 46,935 |
 | `gene_symbols_present` | 623,616 |
-| htslib HTTP/2 reopens | 0 (at `--coalesce-distance 50000`) |
+| htslib HTTP/2 reopens (emitted as `reopens_total`) | 0 (at `--coalesce-distance 50000`) — **tolerance-banded**, not a byte-exact anchor: network-condition-dependent per finding-012 #5 (expected 0–~30, `0` the healthy floor); record the emitted value, never byte-match |
 | First-load wall-clock | ~101 min (6,070 s) |
 
 Per chromosome — user positions queried (the filter set) and dbSNP rows

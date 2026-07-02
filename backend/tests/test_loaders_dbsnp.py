@@ -18,6 +18,7 @@ so the tests touch neither the network nor the 29 GB source.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -562,6 +563,9 @@ def test_short_circuit_already_current(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.source_version_id == sv_id
     assert result.pointer_flipped is False
     assert result.rows_loaded == 0
+    # from: plan §4 T7 item 27 — the short-circuit runs no I/O, so reopens_total
+    # is 0 (the no-default field must still be set on this construction site).
+    assert result.reopens_total == 0
     assert factory.openings == []  # no iteration ran
 
 
@@ -922,3 +926,263 @@ def test_cli_dbsnp_force_and_chromosomes(monkeypatch: pytest.MonkeyPatch) -> Non
         row = conn.execute(f"SELECT COUNT(*) FROM {dbsnp_loader._TARGET_TABLE}").fetchone()  # noqa: SLF001, S608
     assert row is not None
     assert row[0] >= 1
+
+
+# ---------------------------------------------------------------------------
+# RemoteReadStats reopen sentinel — reopens_total on dbSNP (RM-3973250 / PR 13)
+# ---------------------------------------------------------------------------
+# Blind-authored from the plan's §5 (dbSNP items d1-d4) + §6 + the frozen
+# interface: DbsnpLoadResult gains a no-default ``reopens_total: int``,
+# _load_chromosome gains keyword-only ``reopen_stats: RemoteReadStats | None =
+# None`` (after ``batch_size``), and the dbsnp.refresh.complete event carries a
+# ``reopens_total`` kwarg. dbSNP is sequential-only, so one run-level accumulator
+# threads the whole chromosome loop — no parallel-failure asymmetry (the clean
+# case). Asserted against the spec, never the implementation body.
+
+# Real htslib BGZF / libcurl HTTP/2 framing error lines, written to fd 2 so the
+# loader's real _StderrTap corruption detector trips exactly as in production.
+_HTSLIB_TOKENS: bytes = (
+    b"[E::easy_errno] Libcurl reported error 16 (Error in the HTTP2 framing layer)\n"
+    b"[E::hts_itr_next] Failed to seek to offset 100: Illegal seek\n"
+)
+
+
+@dataclass
+class _LatchingCorruptVCF:
+    """FakeVCF that corrupts ``factory.corrupt_region`` once, then streams clean.
+
+    Models test_remote_tabix.py::_Factory's fd-2 htslib-token injection. The
+    one-shot latch lives on the shared factory so a specific chromosome's region
+    trips exactly one reopen even though dbSNP opens its single whole-genome URL
+    once per chromosome; after the first corruption the reopen recovers.
+    """
+
+    records: list[FakeVariant]
+    factory: _CorruptOnceFactory
+    raw_header: str = _FULL_HEADER
+
+    def __call__(self, region: str) -> Iterable[FakeVariant]:
+        if region == self.factory.corrupt_region and not self.factory.fired:
+            self.factory.fired = True
+            os.write(2, _HTSLIB_TOKENS)
+            return iter(())
+        match = re.match(r"(NC_\d+\.\d+):(\d+)-(\d+)", region)
+        if match is None:
+            return iter(())
+        accession, start, end = match.group(1), int(match.group(2)), int(match.group(3))
+        return (r for r in self.records if accession == r.CHROM and start <= r.POS <= end)
+
+    def close(self) -> None:
+        return
+
+
+class _CorruptOnceFactory:
+    """dbSNP cyvcf2.VCF factory that trips exactly one htslib reopen.
+
+    Keys the corruption on the region string (not open order) so one chromosome's
+    region fails once while the others stream clean; ``fired`` latches after the
+    first corruption so the reopen recovers. ``corrupt_region=None`` never
+    corrupts (the clean baseline).
+    """
+
+    def __init__(
+        self,
+        records: list[FakeVariant],
+        *,
+        corrupt_region: str | None = None,
+    ) -> None:
+        self.records = records
+        self.corrupt_region = corrupt_region
+        self.fired = False
+        self.openings: list[str] = []
+
+    def __call__(self, url: str) -> _LatchingCorruptVCF:
+        self.openings.append(url)
+        return _LatchingCorruptVCF(records=list(self.records), factory=self)
+
+
+def test_dbsnp_load_chromosome_threads_reopen_stats_on_reopen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """from: plan §5 dbSNP (d1) — _load_chromosome threads the run-level
+    RemoteReadStats: one forced reopen -> run_stats.reopens == 1.
+
+    Calls _load_chromosome directly with an injected RemoteReadStats so the seam
+    threading is observed at the chromosome grain (the accumulator load() creates
+    once and passes into every chromosome).
+    """
+    from genome.annotate.loaders.dbsnp import _load_chromosome  # noqa: PLC0415 — test-local
+    from genome.annotate.remote_tabix import RemoteReadStats  # noqa: PLC0415 — lands with the impl
+
+    init_databases()
+    _enable_external_calls()
+    accession = _CHROM_TO_ACC["22"]
+    records = [_snv("rs100", "22", 1000, "A", "C"), _snv("rs200", "22", 2000, "G", "T")]
+    factory = _CorruptOnceFactory(records, corrupt_region=f"{accession}:1000-2000")
+    import cyvcf2  # noqa: PLC0415 — test fixture local import
+
+    monkeypatch.setattr(cyvcf2, "VCF", factory)
+    run_stats = RemoteReadStats()
+    with duckdb_connection() as conn:
+        _seed_user_variants(conn, [("22", 1000), ("22", 2000)])
+        sv_id = insert_source_version(
+            conn,
+            source_db=dbsnp_loader.SOURCE_DB,
+            version=DBSNP_VERSION,
+            source_url=DBSNP_VCF_URL,
+            source_file_hash="d" * 64,
+            source_file_size=1,
+            record_count=0,
+        )
+        audited, http = _mock_audited_client()
+        try:
+            landed = _load_chromosome(
+                conn,
+                audited,
+                "22",
+                [(1000, 2000)],
+                frozenset({1000, 2000}),
+                sv_id,
+                datetime(2026, 5, 19, tzinfo=UTC),
+                50_000,
+                reopen_stats=run_stats,
+            )
+        finally:
+            audited.close()
+            http.close()
+    assert landed == 2
+    assert run_stats.reopens == 1
+    # A reopen means the single URL was opened more than once.
+    assert len(factory.openings) >= 2
+
+
+def test_dbsnp_load_chromosome_reopen_stats_zero_on_clean_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """from: plan §5 dbSNP (d1) — a clean _load_chromosome run leaves reopens == 0."""
+    from genome.annotate.loaders.dbsnp import _load_chromosome  # noqa: PLC0415 — test-local
+    from genome.annotate.remote_tabix import RemoteReadStats  # noqa: PLC0415 — lands with the impl
+
+    init_databases()
+    _enable_external_calls()
+    _patch_cyvcf2(monkeypatch, _VCFFactory(records=[_snv("rs100", "22", 1000, "A", "C")]))
+    run_stats = RemoteReadStats()
+    with duckdb_connection() as conn:
+        _seed_user_variants(conn, [("22", 1000)])
+        sv_id = insert_source_version(
+            conn,
+            source_db=dbsnp_loader.SOURCE_DB,
+            version=DBSNP_VERSION,
+            source_url=DBSNP_VCF_URL,
+            source_file_hash="e" * 64,
+            source_file_size=1,
+            record_count=0,
+        )
+        audited, http = _mock_audited_client()
+        try:
+            landed = _load_chromosome(
+                conn,
+                audited,
+                "22",
+                [(1000, 1000)],
+                frozenset({1000}),
+                sv_id,
+                datetime(2026, 5, 19, tzinfo=UTC),
+                50_000,
+                reopen_stats=run_stats,
+            )
+        finally:
+            audited.close()
+            http.close()
+    assert landed == 1
+    assert run_stats.reopens == 0
+
+
+def test_dbsnp_load_reopens_total_accumulates_across_chroms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """from: plan §5 dbSNP (d2) — load() over >= 2 chroms with a reopen on one ->
+    result.reopens_total == 1 (the single run-level accumulator sums the loop).
+    """
+    init_databases()
+    _enable_external_calls()
+    _patch_check_source(monkeypatch)
+    accession22 = _CHROM_TO_ACC["22"]
+    records = [_snv("rs21", "21", 500, "A", "C"), _snv("rs22", "22", 1000, "G", "T")]
+    factory = _CorruptOnceFactory(records, corrupt_region=f"{accession22}:1000-1000")
+    import cyvcf2  # noqa: PLC0415 — test fixture local import
+
+    monkeypatch.setattr(cyvcf2, "VCF", factory)
+    with duckdb_connection() as conn:
+        _seed_user_variants(conn, [("21", 500), ("22", 1000)])
+        audited, http = _mock_audited_client()
+        try:
+            result = load(conn, audited, force=True, chromosomes=["21", "22"])
+        finally:
+            audited.close()
+            http.close()
+    assert result.rows_loaded == 2
+    assert result.reopens_total == 1
+
+
+def test_dbsnp_refresh_complete_event_carries_reopens_total_on_reopen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """from: plan §5 dbSNP (d3) — the dbsnp.refresh.complete EVENT dict carries the
+    run total (== 1) on a reopen run.
+
+    Same rationale as gnomAD test #8: structlog kwargs are un-typed, so only an
+    assertion on the captured EVENT dict guards that reopens_total reaches the
+    event (not merely the result).
+    """
+    from structlog.testing import capture_logs  # noqa: PLC0415 — test-local
+
+    init_databases()
+    _enable_external_calls()
+    _patch_check_source(monkeypatch)
+    accession = _CHROM_TO_ACC["22"]
+    records = [_snv("rs22", "22", 1000, "G", "T")]
+    factory = _CorruptOnceFactory(records, corrupt_region=f"{accession}:1000-1000")
+    import cyvcf2  # noqa: PLC0415 — test fixture local import
+
+    monkeypatch.setattr(cyvcf2, "VCF", factory)
+    with duckdb_connection() as conn:
+        _seed_user_variants(conn, [("22", 1000)])
+        audited, http = _mock_audited_client()
+        try:
+            with capture_logs() as logs:
+                result = load(conn, audited, force=True, chromosomes=["22"])
+        finally:
+            audited.close()
+            http.close()
+    events = [e for e in logs if e.get("event") == "dbsnp.refresh.complete"]
+    assert len(events) == 1
+    assert events[0]["reopens_total"] == 1
+    assert result.reopens_total == 1
+
+
+def test_dbsnp_load_reopens_total_zero_on_clean_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """from: plan §5 dbSNP (d4) — a clean load() reports reopens_total == 0 and the
+    field is present on the dbsnp.refresh.complete event.
+    """
+    from structlog.testing import capture_logs  # noqa: PLC0415 — test-local
+
+    init_databases()
+    _enable_external_calls()
+    _patch_check_source(monkeypatch)
+    _patch_cyvcf2(monkeypatch, _VCFFactory(records=[_snv("rs22", "22", 1000, "G", "T")]))
+    with duckdb_connection() as conn:
+        _seed_user_variants(conn, [("22", 1000)])
+        audited, http = _mock_audited_client()
+        try:
+            with capture_logs() as logs:
+                result = load(conn, audited, force=True, chromosomes=["22"])
+        finally:
+            audited.close()
+            http.close()
+    assert result.reopens_total == 0
+    events = [e for e in logs if e.get("event") == "dbsnp.refresh.complete"]
+    assert len(events) == 1
+    assert events[0]["reopens_total"] == 0

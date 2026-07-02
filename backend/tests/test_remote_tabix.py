@@ -258,3 +258,134 @@ def test_iter_remote_vcf_regions_raises_after_max_attempts() -> None:
             ),
         )
     assert factory.opens == MAX_REMOTE_REGION_ATTEMPTS
+
+
+# ---------------------------------------------------------------------------
+# iter_remote_vcf_regions — RemoteReadStats reopen out-param (RM-3973250 / PR 13)
+# ---------------------------------------------------------------------------
+# The shared seam accumulator for the gnomAD + dbSNP total-reopen drift sentinel
+# (finding-012 #12). Blind-authored from the plan's §5 (seam items 1-3) + the
+# frozen interface: RemoteReadStats is a non-frozen dataclass with a mutable int
+# field ``reopens`` (default 0); iter_remote_vcf_regions gains a keyword-only
+# ``reopen_stats: RemoteReadStats | None = None`` that is incremented (``+= 1``)
+# once per htslib reopen AT the reopen site — so a max-attempts failure still
+# banks its partial (MAX_REMOTE_REGION_ATTEMPTS - 1 reopens) before raising, and
+# one instance accumulates across successive calls. Default None is a no-op
+# (backward-compat). Asserted against the spec, never the implementation body.
+
+
+def test_iter_remote_vcf_regions_reopen_stats_counts_single_reopen() -> None:
+    """from: plan §5 seam (1) — one corruption -> one reopen -> stats.reopens == 1."""
+    from genome.annotate.remote_tabix import RemoteReadStats  # noqa: PLC0415 — lands with the impl
+
+    stats = RemoteReadStats()
+    factory = _Factory([_Rec(100), _Rec(200)], corrupt_first={"r:100-200"})
+    out = list(
+        iter_remote_vcf_regions(
+            "https://example/vcf.gz",
+            ["r:100-200"],
+            event_prefix="test",
+            open_fn=factory,
+            reopen_stats=stats,
+        ),
+    )
+    assert [r.pos for r in out] == [100, 200]
+    assert stats.reopens == 1
+
+
+def test_iter_remote_vcf_regions_reopen_stats_zero_on_clean_run() -> None:
+    """from: plan §5 seam (1) — no corruption -> no reopen -> stats.reopens == 0."""
+    from genome.annotate.remote_tabix import RemoteReadStats  # noqa: PLC0415 — lands with the impl
+
+    stats = RemoteReadStats()
+    factory = _Factory([_Rec(100), _Rec(200)])
+    out = list(
+        iter_remote_vcf_regions(
+            "https://example/vcf.gz",
+            ["r:100-200"],
+            event_prefix="test",
+            open_fn=factory,
+            reopen_stats=stats,
+        ),
+    )
+    assert [r.pos for r in out] == [100, 200]
+    assert stats.reopens == 0
+    assert factory.opens == 1
+
+
+def test_iter_remote_vcf_regions_reopen_stats_banks_partial_on_max_attempts() -> None:
+    """from: plan §5 seam (1 failure) — a max-attempts raise still banks MAX-1 reopens.
+
+    Guards the load-bearing edge (plan §3 #1 / premortem): the out-param is
+    incremented at the reopen site BEFORE the possible raise, so a persistently
+    corrupt region banks its partial rather than zeroing on the failure path.
+    The budget is one initial open + (MAX_REMOTE_REGION_ATTEMPTS - 1) reopens
+    (the final attempt does not reopen), so stats.reopens == MAX - 1.
+    """
+    from genome.annotate.remote_tabix import RemoteReadStats  # noqa: PLC0415 — lands with the impl
+
+    stats = RemoteReadStats()
+    factory = _Factory([_Rec(100)], always_corrupt={"r:100-100"})
+    with pytest.raises(RemoteTabixIterationError, match="region"):
+        list(
+            iter_remote_vcf_regions(
+                "https://example/vcf.gz",
+                ["r:100-100"],
+                event_prefix="test",
+                open_fn=factory,
+                reopen_stats=stats,
+            ),
+        )
+    assert stats.reopens == MAX_REMOTE_REGION_ATTEMPTS - 1
+
+
+def test_iter_remote_vcf_regions_reopen_stats_accumulates_across_calls() -> None:
+    """from: plan §5 seam (2) — one RemoteReadStats across two reopening calls -> 2.
+
+    A single instance reused across successive calls (a chromosome's
+    exomes+genomes streams, or a whole sequential run) sums their reopens.
+    """
+    from genome.annotate.remote_tabix import RemoteReadStats  # noqa: PLC0415 — lands with the impl
+
+    stats = RemoteReadStats()
+    first = _Factory([_Rec(100)], corrupt_first={"r:100-100"})
+    list(
+        iter_remote_vcf_regions(
+            "https://example/vcf.gz",
+            ["r:100-100"],
+            event_prefix="test",
+            open_fn=first,
+            reopen_stats=stats,
+        ),
+    )
+    second = _Factory([_Rec(200)], corrupt_first={"r:200-200"})
+    list(
+        iter_remote_vcf_regions(
+            "https://example/vcf.gz",
+            ["r:200-200"],
+            event_prefix="test",
+            open_fn=second,
+            reopen_stats=stats,
+        ),
+    )
+    assert stats.reopens == 2
+
+
+def test_iter_remote_vcf_regions_reopen_stats_default_none_is_no_op() -> None:
+    """from: plan §5 seam (3) — omitting reopen_stats is a backward-compat no-op.
+
+    The default keeps the existing dbsnp.py caller byte-identical: with no
+    reopen_stats the behaviour is unchanged — every record is yielded and a
+    clean run performs exactly one open.
+    """
+    factory = _Factory([_Rec(100), _Rec(200)])
+    out = list(
+        iter_remote_vcf_regions(
+            "https://example/vcf.gz",
+            ["r:100-200"],
+            event_prefix="test",
+            open_fn=factory,
+        ),
+    )
+    assert [r.pos for r in out] == [100, 200]
+    assert factory.opens == 1

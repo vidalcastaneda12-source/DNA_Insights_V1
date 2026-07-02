@@ -36,6 +36,7 @@ import contextlib
 import fcntl
 import os
 import sys
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Protocol, Self, cast
 
 import structlog
@@ -381,6 +382,28 @@ def check_libcurl_available(
 # ---------------------------------------------------------------------------
 
 
+@dataclass(slots=True)
+class RemoteReadStats:
+    """Mutable out-param accumulator for :func:`iter_remote_vcf_regions` reopens.
+
+    An out-param (rather than a return value) because
+    :func:`iter_remote_vcf_regions` is a *generator*: its ``for record in …``
+    consumers drive it by iteration, so a returned scalar count would only
+    reach them via ``StopIteration.value``, which they discard. Mutating a
+    caller-owned instance is how the reopen count gets back out.
+
+    NON-frozen by design — ``.reopens`` is incremented (``+= 1``) in-place at
+    each htslib close+reopen. One instance reused across successive calls sums
+    their reopens (a chromosome's exomes+genomes streams, or a whole sequential
+    run), so the caller aggregates a run-total htslib-reopen drift sentinel
+    (finding-012 #12) without re-plumbing the transient per-reopen events.
+    ``reopen_stats`` defaults to ``None`` on the seam, so an existing caller
+    that passes no accumulator is byte-identical.
+    """
+
+    reopens: int = 0
+
+
 def iter_remote_vcf_regions(  # noqa: PLR0913 — irreducible retry loop + telemetry config
     url: str,
     regions: list[str],
@@ -389,6 +412,7 @@ def iter_remote_vcf_regions(  # noqa: PLR0913 — irreducible retry loop + telem
     log_context: dict[str, object] | None = None,
     open_fn: Callable[[str], _RemoteVCF] | None = None,
     log: structlog.stdlib.BoundLogger | None = None,
+    reopen_stats: RemoteReadStats | None = None,
 ) -> Iterator[object]:
     """Open ``url`` and yield every record across ``regions``, recovering reopens.
 
@@ -424,6 +448,13 @@ def iter_remote_vcf_regions(  # noqa: PLR0913 — irreducible retry loop + telem
     any reopen occurred. ``log_context`` fields (e.g. ``chrom`` /
     ``data_type``) are merged into every event so the names + field sets
     match what gnomAD emitted before the extraction.
+
+    When ``reopen_stats`` is supplied, each reopen also increments
+    ``reopen_stats.reopens`` in place (finding-012 #12) so the caller can
+    aggregate a run-total reopen count that outlives these transient
+    events. Passing one accumulator across successive calls sums their
+    reopens; ``None`` (the default) leaves the call byte-identical for
+    callers that don't want the sentinel.
     """
     ctx = log_context or {}
     out_log = log if log is not None else logger
@@ -465,6 +496,13 @@ def iter_remote_vcf_regions(  # noqa: PLR0913 — irreducible retry loop + telem
                     # region's check starts clean.
                     detector.check()
                     reopens += 1
+                    # Accumulate the run-total reopen sentinel out-param
+                    # (finding-012 #12). Incremented here — at the reopen
+                    # site, before the possible max-attempts raise below —
+                    # so a failed chromosome still surfaces its partial
+                    # reopen count into the caller's run-level accumulator.
+                    if reopen_stats is not None:
+                        reopen_stats.reopens += 1
                     out_log.warning(
                         f"{event_prefix}.chrom.htslib_recover",
                         region=region,
@@ -495,6 +533,7 @@ def iter_remote_vcf_regions(  # noqa: PLR0913 — irreducible retry loop + telem
 
 __all__ = [
     "MAX_REMOTE_REGION_ATTEMPTS",
+    "RemoteReadStats",
     "RemoteTabixIterationError",
     "RemoteTabixLibcurlMissingError",
     "audited_head",
