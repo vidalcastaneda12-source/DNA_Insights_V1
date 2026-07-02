@@ -75,6 +75,7 @@ from genome.annotate.filter_set import FilterSet, build_filter_set
 from genome.annotate.registry import RefreshResult, register_loader
 from genome.annotate.remote_tabix import (
     MAX_REMOTE_REGION_ATTEMPTS,
+    RemoteReadStats,
     RemoteTabixIterationError,
     RemoteTabixLibcurlMissingError,
     _scan_for_htslib_errors,  # noqa: F401 — re-export for the gnomad public surface (tests)
@@ -267,6 +268,18 @@ class GnomadLoadResult:
     on the user-variant overlap, per-population AF presence) plus the
     operational status (which chromosomes succeeded vs failed, whether
     the pointer flipped, wall-clock wall).
+
+    ``reopens_total`` is the success-path htslib-reopen run total
+    (finding-012 #12) — a tolerance-banded network signal, NOT a
+    byte-exact drift anchor (see ``docs/runbooks/annotations.md``). It is
+    authoritative only on a clean run (``chromosomes_failed`` empty); on a
+    failed run it under-reports, because a dead spawn worker's partial
+    reopen count cannot be recovered (the parallel path rebuilds a failed
+    ``_ChromResult`` with ``reopens=0`` — see :func:`_run_workers`). The
+    sequential path does surface a failed chromosome's partial (its
+    run-level accumulator is mutated at the reopen site before the raise).
+    Do not build a threshold-gate on this field without first carrying the
+    dead worker's partial.
     """
 
     version_label: str
@@ -282,6 +295,7 @@ class GnomadLoadResult:
     chromosomes_succeeded: tuple[str, ...]
     chromosomes_failed: tuple[str, ...]
     wall_clock_seconds: float
+    reopens_total: int
 
 
 # ---------------------------------------------------------------------------
@@ -607,6 +621,8 @@ def _load_chromosome(  # noqa: C901, PLR0913 — irreducible per-chrom configura
     source_version_id: int,
     retrieval_datetime: datetime,
     batch_size: int,
+    *,
+    reopen_stats: RemoteReadStats | None = None,
 ) -> int:
     """Iterate gnomAD's remote VCFs for ``chrom`` and insert filtered rows.
 
@@ -685,6 +701,7 @@ def _load_chromosome(  # noqa: C901, PLR0913 — irreducible per-chrom configura
             event_prefix=SOURCE_DB,
             log_context={"chrom": chrom, "data_type": data_type},
             log=logger,
+            reopen_stats=reopen_stats,
         ):
             _consume_record(record)
 
@@ -989,6 +1006,7 @@ class _ChromResult:
     row_count: int
     status: str
     error: BaseException | None = None
+    reopens: int = 0
 
 
 def _stream_chromosome_to_parquet(task: _ChromTask) -> _ChromResult:  # noqa: C901 — irreducible filter+dedup+stream loop (mirrors _load_chromosome)
@@ -1011,6 +1029,10 @@ def _stream_chromosome_to_parquet(task: _ChromTask) -> _ChromResult:  # noqa: C9
     seen_keys: set[tuple[str, int, str, str]] = set()
     pending: list[dict[str, object]] = []
     row_count = 0
+    # One accumulator for the whole worker — allocated OUTSIDE the
+    # ``for data_type`` loop so exomes and genomes reopens both sum into it
+    # (finding-012 #12; the parent aggregates each worker's ``reopens``).
+    stats = RemoteReadStats()
     parquet_path = str(Path(task.staging_dir) / f"gnomad_chr{task.chrom}.parquet")
     writer: pq.ParquetWriter | None = None
 
@@ -1034,6 +1056,7 @@ def _stream_chromosome_to_parquet(task: _ChromTask) -> _ChromResult:  # noqa: C9
                 event_prefix=SOURCE_DB,
                 log_context={"chrom": task.chrom, "data_type": data_type},
                 log=logger,
+                reopen_stats=stats,
             ):
                 row = _record_to_row(record, task.source_version_id, task.retrieval_datetime)
                 if row is None:
@@ -1057,7 +1080,13 @@ def _stream_chromosome_to_parquet(task: _ChromTask) -> _ChromResult:  # noqa: C9
                     _flush()
         _flush()
         if writer is None:
-            return _ChromResult(chrom=task.chrom, parquet_path=None, row_count=0, status="ok")
+            return _ChromResult(
+                chrom=task.chrom,
+                parquet_path=None,
+                row_count=0,
+                status="ok",
+                reopens=stats.reopens,
+            )
         writer.close()  # type: ignore[no-untyped-call]  # pyarrow.parquet untyped
         writer = None
         return _ChromResult(
@@ -1065,6 +1094,7 @@ def _stream_chromosome_to_parquet(task: _ChromTask) -> _ChromResult:  # noqa: C9
             parquet_path=parquet_path,
             row_count=row_count,
             status="ok",
+            reopens=stats.reopens,
         )
     finally:
         if writer is not None:
@@ -1097,6 +1127,11 @@ def _run_workers(tasks: list[_ChromTask], jobs: int) -> list[_ChromResult]:
             try:
                 results.append(future.result())
             except Exception as exc:  # noqa: BLE001 — normalise any worker failure into a result
+                # ``reopens`` defaults to 0 here: a dead worker's partial
+                # reopen count died with its process (its _ChromResult never
+                # reached an ok-return), so GnomadLoadResult.reopens_total
+                # under-reports on a parallel failure. 0 is the honest
+                # unrecoverable value — see the reopens_total docstring caveat.
                 results.append(
                     _ChromResult(
                         chrom=chrom,
@@ -1153,15 +1188,16 @@ def _run_parallel_load(  # noqa: PLR0913 — orchestration config is irreducible
     coalesce_distance: int,
     batch_size: int,
     jobs: int,
-) -> tuple[list[str], list[str], BaseException | None]:
+) -> tuple[list[str], list[str], BaseException | None, int]:
     """Parallel analogue of ``load``'s per-chromosome loop.
 
     Streams chromosomes concurrently (one worker process per chromosome, both
     data types) and merges each staged Parquet file serially into
     ``gnomad_frequencies`` under the single DuckDB writer. Returns the same
-    ``(succeeded, failed, capture_failure)`` triple the sequential loop
-    produces, so ``load``'s downstream pointer-flip / orphan-cleanup / summary
-    steps are shared and unchanged.
+    ``(succeeded, failed, capture_failure, reopens_total)`` tuple the
+    sequential loop produces (``reopens_total`` summed over the workers'
+    per-chromosome ``_ChromResult.reopens``), so ``load``'s downstream
+    pointer-flip / orphan-cleanup / summary steps are shared and unchanged.
 
     Mirrors the sequential semantics: chromosomes with no filter positions
     succeed without a worker; the parent issues the two audited HEADs per
@@ -1210,6 +1246,12 @@ def _run_parallel_load(  # noqa: PLR0913 — orchestration config is irreducible
             staging_dir=staging_dir,
         )
         results = {result.chrom: result for result in _run_workers(tasks, jobs)}
+        # Sum over every worker result present in ``results`` (not re-derived
+        # from ``requested``, not ``max``/last); correct under the loader's
+        # unique-chrom invariant — the same one the merge loop below assumes. A
+        # failed/dead worker contributes reopens=0 (documented accepted
+        # limitation on GnomadLoadResult.reopens_total).
+        total_reopens = sum(r.reopens for r in results.values())
 
         # Merge in canonical (requested) order: deterministic, gap-free freq_id.
         for chrom in requested:
@@ -1237,7 +1279,7 @@ def _run_parallel_load(  # noqa: PLR0913 — orchestration config is irreducible
                 parallel=True,
             )
             succeeded.append(chrom)
-        return succeeded, failed, capture_failure
+        return succeeded, failed, capture_failure, total_reopens
     finally:
         shutil.rmtree(staging_dir, ignore_errors=True)
 
@@ -1253,20 +1295,24 @@ def _run_sequential_load(  # noqa: PLR0913 — orchestration config is irreducib
     coalesce_distance: int,
     batch_size: int,
     log: structlog.stdlib.BoundLogger,
-) -> tuple[list[str], list[str], BaseException | None]:
+) -> tuple[list[str], list[str], BaseException | None, int]:
     """Sequential per-chromosome load — the original ``load`` loop, extracted.
 
     One chromosome at a time, one data type at a time; each chromosome commits
     independently and a failure stops the run (``break``) leaving the
     already-loaded chromosomes under ``source_version_id``. Returns the
-    ``(succeeded, failed, capture_failure)`` triple ``load`` threads into the
-    shared pointer-flip / summary tail. ``jobs <= 1`` routes here, so every
+    ``(succeeded, failed, capture_failure, reopens_total)`` tuple ``load``
+    threads into the shared pointer-flip / summary tail; ``reopens_total`` is
+    the run-level htslib-reopen count (one accumulator threaded through every
+    chromosome, so a failed chromosome's partial is included — it is mutated at
+    the reopen site before the raise). ``jobs <= 1`` routes here, so every
     existing direct-``load`` caller and the registry bare-form run this path
     unchanged.
     """
     succeeded: list[str] = []
     failed: list[str] = []
     capture_failure: BaseException | None = None
+    run_stats = RemoteReadStats()
     for chrom in requested:
         positions = filter_set.positions.get(chrom, [])
         if not positions:
@@ -1286,6 +1332,7 @@ def _run_sequential_load(  # noqa: PLR0913 — orchestration config is irreducib
                 source_version_id,
                 retrieval_datetime,
                 batch_size,
+                reopen_stats=run_stats,
             )
             conn.commit()
             elapsed = time.monotonic() - chrom_started
@@ -1315,7 +1362,7 @@ def _run_sequential_load(  # noqa: PLR0913 — orchestration config is irreducib
             failed.append(chrom)
             capture_failure = exc
             break
-    return succeeded, failed, capture_failure
+    return succeeded, failed, capture_failure, run_stats.reopens
 
 
 # ---------------------------------------------------------------------------
@@ -1417,6 +1464,7 @@ def load(  # noqa: C901, PLR0912, PLR0913, PLR0915 — single entry point; the p
             chromosomes_succeeded=(),
             chromosomes_failed=(),
             wall_clock_seconds=wall,
+            reopens_total=0,
         )
 
     # 3. Source-version id (fresh or in-flight resume).
@@ -1466,9 +1514,10 @@ def load(  # noqa: C901, PLR0912, PLR0913, PLR0915 — single entry point; the p
 
     # 6. Per-chromosome load — parallel across chromosomes when jobs > 1,
     #    else the original sequential loop. Both return the same
-    #    (succeeded, failed, capture_failure) triple the shared tail consumes.
+    #    (succeeded, failed, capture_failure, reopens_total) 4-tuple the
+    #    shared tail consumes.
     if jobs > 1:
-        succeeded, failed, capture_failure = _run_parallel_load(
+        succeeded, failed, capture_failure, reopens_total = _run_parallel_load(
             conn,
             audited_client,
             requested=requested,
@@ -1480,7 +1529,7 @@ def load(  # noqa: C901, PLR0912, PLR0913, PLR0915 — single entry point; the p
             jobs=jobs,
         )
     else:
-        succeeded, failed, capture_failure = _run_sequential_load(
+        succeeded, failed, capture_failure, reopens_total = _run_sequential_load(
             conn,
             audited_client,
             requested=requested,
@@ -1595,6 +1644,7 @@ def load(  # noqa: C901, PLR0912, PLR0913, PLR0915 — single entry point; the p
         chromosomes_succeeded=tuple(succeeded),
         chromosomes_failed=tuple(failed),
         wall_clock_seconds=round(wall, 1),
+        reopens_total=reopens_total,
     )
 
     if capture_failure is not None:
@@ -1617,6 +1667,7 @@ def load(  # noqa: C901, PLR0912, PLR0913, PLR0915 — single entry point; the p
         chromosomes_succeeded=tuple(succeeded),
         chromosomes_failed=tuple(failed),
         wall_clock_seconds=wall,
+        reopens_total=reopens_total,
     )
 
 

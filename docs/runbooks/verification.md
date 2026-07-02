@@ -632,6 +632,56 @@ See CLAUDE.md "Real-data observations" **#3**, ROADMAP "Pre-Phase-6 sequence"
 PR 11 (RM-7fba363), and
 [`finding-008`](../findings/finding-008-phase4-rebuild-and-chrx-observations.md).
 
+### PR 13 gnomAD + dbSNP reopen-sentinel gate (RM-3973250 / finding-012 #12)
+
+PR 13 (`RM-3973250`) adds `reopens_total`, the run-total htslib HTTP/2 close+reopen count, to
+**both** remote-tabix loaders — `gnomad.refresh.complete` / `GnomadLoadResult` (parallel +
+sequential paths) and `dbsnp.refresh.complete` / `DbsnpLoadResult` (sequential-only) — via a
+shared `RemoteReadStats` out-param accumulator in `remote_tabix.iter_remote_vcf_regions`. It is
+**additive telemetry**: no schema/ddl, no new external call, no payload stored (a plain int).
+This PR runs **no refresh and no `refresh-index`**, so it re-locks nothing in CLAUDE.md
+"Real-data observations".
+
+**1. Aggregation correctness is proven by the mocked unit tests — authoritative.** The
+`reopens_total` value (`0` on a clean run, `1` on a single reopen, and the correct **sum**
+across chromosomes on both the sequential and the `spawn`-parallel paths) is verified
+deterministically by the `test_remote_tabix.py` + `test_loaders_gnomad.py` +
+`test_loaders_dbsnp.py` units — reopen-injection fixtures, a real-`spawn` `ProcessPoolExecutor`
+round-trip for the cross-process carry, and `structlog.testing.capture_logs()` asserting the
+field lands on the emitted **event dict** (not merely the result dataclass). No live refresh is
+needed to prove the aggregation.
+
+**2. The real-data reopen count is NOT a re-lockable anchor.** `reopens_total` is network-weather
+noise (finding-012 #5), **not** a byte-exact drift identifier. On the next opportunistic gnomAD
+`--jobs 8` refresh, **record the emitted `reopens_total` as an observation only** — expected
+range **0 to ~30**, with **`0` the healthy floor** (finding-012 #7). A value **≠ 2** (the PR-C
+capture in annotations.md) is **NOT a regression**; never byte-match against `2` or any prior
+value. dbSNP's `reopens_total` is a **brand-new field with no prior locked value** (the dbSNP
+capture historically observed 0 reopens at the 50 kb default) — verify it **emits**; there is
+nothing to re-lock or defer.
+
+**3. Negative control — the five data anchors must be unmoved (structural).** This PR touches
+only telemetry plumbing + docs; it runs no loader and no `refresh-index`, so every gnomAD data
+anchor holds **by construction**:
+
+| Anchor | Locked value (unmoved) |
+|---|---|
+| `rows_loaded` (gnomad) | 4,568,802 |
+| `match_rate` | 0.9957 |
+| `filter_set_composition` | 3,144,800 |
+| `gnomad_matches` (index) | 3,054,426 |
+| `variants_master` | 3,160,364 |
+
+`git diff --name-only` proves no `docs/schemas/` / `ddl/` / `filter_set.py` touched, and no
+gnomAD/dbSNP data hot-path function (`_summarize_run`, `_record_to_row` /
+`_record_to_dbsnp_row`, the dedup loops, `_insert_batch`, `_merge_chromosome_parquet`) changed —
+so the anchors above, and dbSNP's own row/match numbers, cannot move. Any drift means the PR did
+more than add telemetry. STOP.
+
+See CLAUDE.md "Real-data observations" **#3/#4**, ROADMAP "Annotation / loader follow-ups"
+RM-3973250, annotations.md's fenced `reopens_total` note, and
+[`finding-012`](../findings/finding-012-coalesce-distance-and-http2-reliability.md) #12.
+
 ## C2+D Phase 1 gate (engine-dialect workflow port)
 
 This gate covers the Sub Project C2+D Phase 1 change class (PR #109, `866d255`): the port of

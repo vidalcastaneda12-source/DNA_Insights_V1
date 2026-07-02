@@ -636,6 +636,9 @@ def test_short_circuit_already_current_no_force(monkeypatch: pytest.MonkeyPatch)
     assert result.source_version_id == sv_id
     assert result.pointer_flipped is False
     assert result.rows_loaded == 0
+    # from: plan §4 item 15 / §3 edge #4 — the already-current short-circuit runs
+    # no I/O, so the run total is 0 (the no-default field must still be set).
+    assert result.reopens_total == 0
     # Factory was never opened (no chrom iteration ran).
     assert factory.openings == []
 
@@ -2392,6 +2395,9 @@ def test_load_chromosome_recovers_from_htslib_transient_error(
 
     # Both records landed despite the first attempt yielding none.
     assert result.rows_loaded == 2
+    # from: plan §5 gnomad (4) / §6 expected — the single sequential reopen is
+    # aggregated to the run total (load() default jobs=1 -> sequential path).
+    assert result.reopens_total == 1
     # The exomes URL was opened more than once: initial open + at least
     # one reopen triggered by the corruption detector.
     assert factory.openings.count(exomes_url) >= 2, factory.openings
@@ -2561,3 +2567,298 @@ def test_load_chromosome_fails_after_max_attempts(
     # Verifies the reopen budget was actually exhausted, not short-
     # circuited: every attempt corresponds to one VCF open on the URL.
     assert factory.openings.count(exomes_url) == MAX_REMOTE_REGION_ATTEMPTS
+
+
+# ---------------------------------------------------------------------------
+# RemoteReadStats reopen sentinel — reopens_total aggregation (RM-3973250 / PR 13)
+# ---------------------------------------------------------------------------
+# Blind-authored from the plan's §5 (gnomAD items 5-8) + §6 + the frozen
+# interface: _ChromResult gains ``reopens: int = 0``, GnomadLoadResult gains a
+# no-default ``reopens_total: int``, and the gnomad.refresh.complete event
+# carries a ``reopens_total`` kwarg. The per-reopen count is threaded from the
+# seam (RemoteReadStats) through each worker's _ChromResult.reopens up to the
+# run total (sequential: sum across the loop; parallel: sum over results.values()).
+# Every assertion is against the specified value, never the implementation body.
+
+
+def test_stream_chromosome_reopens_counted_on_exomes_corruption(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """from: plan §5 gnomad (5) — a reopened worker surfaces reopens on _ChromResult.
+
+    [premortem #3] The corruption MUST hit the EXOMES region (the FIRST data_type
+    the worker streams), not genomes. This is the guard against allocating the
+    RemoteReadStats INSIDE the per-data_type loop: a fresh accumulator on the
+    later genomes pass would silently drop the exomes reopen, and a genomes-only
+    corruption would pass even with that bug. Corrupting exomes makes reopens==1
+    fail if the exomes count is lost.
+    """
+    exomes_url = GNOMAD_URL_TEMPLATE.format(data_type="exomes", chrom="22")
+    genomes_url = GNOMAD_URL_TEMPLATE.format(data_type="genomes", chrom="22")
+    by_url: dict[str, list[FakeVariant]] = {
+        exomes_url: [_make_record("chr22", 1000, "A", "C", {"AF": 0.1, "AC": 1, "AN": 10})],
+        genomes_url: [],
+    }
+    factory = _ReopenTrackingFactory(
+        by_url=by_url,
+        corrupt_first_on={exomes_url: {"chr22:1-100000"}},
+    )
+    import cyvcf2  # noqa: PLC0415 — test fixture local import
+
+    monkeypatch.setattr(cyvcf2, "VCF", factory)
+    result = _stream_chromosome_to_parquet(_chrom_task("22", {1000}, tmp_path))
+    assert result.status == "ok"
+    assert result.row_count == 1
+    assert result.reopens == 1
+    # Exomes reopened once; genomes (streamed after) never tripped a reopen.
+    assert factory.openings.count(exomes_url) >= 2, factory.openings
+    assert factory.openings.count(genomes_url) == 1, factory.openings
+
+
+def test_stream_chromosome_reopens_zero_on_clean_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """from: plan §5 gnomad (5) — a clean worker run reports reopens == 0."""
+    _patch_cyvcf2(monkeypatch, _build_overlap_factory())
+    result = _stream_chromosome_to_parquet(_chrom_task("22", {1000}, tmp_path))
+    assert result.status == "ok"
+    assert result.row_count == 1
+    assert result.reopens == 0
+
+
+def test_stream_chromosome_reopens_counted_on_zero_row_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """from: plan §5 gnomad (5) zero-row + §4 item 10 — reopens surface on the
+    zero-row ok-return (parquet_path=None) too, not only the row-bearing return.
+
+    The exomes region corrupts and reopens, but the recovered record is filtered
+    out by filter_positions, so the worker returns zero rows; the reopen count
+    must still be carried on that return.
+    """
+    exomes_url = GNOMAD_URL_TEMPLATE.format(data_type="exomes", chrom="22")
+    genomes_url = GNOMAD_URL_TEMPLATE.format(data_type="genomes", chrom="22")
+    by_url: dict[str, list[FakeVariant]] = {
+        exomes_url: [_make_record("chr22", 1000, "A", "C", {"AF": 0.1, "AC": 1, "AN": 10})],
+        genomes_url: [],
+    }
+    factory = _ReopenTrackingFactory(
+        by_url=by_url,
+        corrupt_first_on={exomes_url: {"chr22:1-100000"}},
+    )
+    import cyvcf2  # noqa: PLC0415 — test fixture local import
+
+    monkeypatch.setattr(cyvcf2, "VCF", factory)
+    # filter_positions excludes 1000 -> the reopened record is dropped -> 0 rows.
+    result = _stream_chromosome_to_parquet(_chrom_task("22", {5000}, tmp_path))
+    assert result.status == "ok"
+    assert result.row_count == 0
+    assert result.parquet_path is None
+    assert result.reopens == 1
+
+
+def test_parallel_load_reopens_total_sums_across_workers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """from: plan §5 gnomad (6 KEY) — reopens_total is the SUM across workers.
+
+    [premortem: parallel lost-worker under-count] Two different chromosomes each
+    trip one reopen; the run total must be their SUM (2), asserted as == 2 (NOT
+    >= 1, NOT the max/last worker's count). _run_parallel_load sums
+    results.values(), so a lost or overwritten per-worker count drops below 2.
+    """
+    init_databases()
+    _enable_external_calls()
+    _patch_check_libcurl(monkeypatch)
+    chroms = ["21", "22"]
+    by_url: dict[str, list[FakeVariant]] = {}
+    corrupt_first_on: dict[str, set[str]] = {}
+    for c in chroms:
+        exomes_url = GNOMAD_URL_TEMPLATE.format(data_type="exomes", chrom=c)
+        by_url[exomes_url] = [
+            _make_record(f"chr{c}", 1000, "A", "C", {"AF": 0.1, "AC": 1, "AN": 10}),
+        ]
+        by_url[GNOMAD_URL_TEMPLATE.format(data_type="genomes", chrom=c)] = []
+        corrupt_first_on[exomes_url] = {f"chr{c}:1000-1000"}
+    factory = _ReopenTrackingFactory(by_url=by_url, corrupt_first_on=corrupt_first_on)
+    import cyvcf2  # noqa: PLC0415 — test fixture local import
+
+    monkeypatch.setattr(cyvcf2, "VCF", factory)
+    _patch_serial_workers(monkeypatch)
+    with duckdb_connection() as conn:
+        for c in chroms:
+            _seed_user_variants(conn, [(c, 1000)])
+        audited, http = _mock_audited_client()
+        try:
+            result = load(conn, audited, force=True, chromosomes=chroms, jobs=2)
+        finally:
+            audited.close()
+            http.close()
+    assert result.rows_loaded == 2
+    # Two chromosomes, one reopen each -> the run total is their SUM.
+    assert result.reopens_total == 2
+
+
+def _echo_chrom_result(result: _ChromResult) -> _ChromResult:
+    """Module-level identity target for the spawn round-trip test (picklable)."""
+    return result
+
+
+def test_chrom_result_reopens_survives_spawn_pickle() -> None:
+    """from: plan §5 gnomad (6b) — _ChromResult.reopens survives a real spawn pickle.
+
+    [premortem #1: cross-process mechanism] The parallel path ships each worker's
+    _ChromResult back from a spawned subprocess via pickle. This round-trips a
+    _ChromResult(reopens=N) through a real ProcessPoolExecutor(spawn) — no
+    network, no cyvcf2 — so test #6's aggregation guarantee rests on a true
+    cross-process carry, not only the in-process _patch_serial_workers shim.
+    """
+    from concurrent.futures import ProcessPoolExecutor  # noqa: PLC0415 — test-local
+    from multiprocessing import get_context  # noqa: PLC0415 — test-local
+
+    original = _ChromResult(
+        chrom="22",
+        parquet_path=None,
+        row_count=0,
+        status="ok",
+        error=None,
+        reopens=3,
+    )
+    with ProcessPoolExecutor(max_workers=1, mp_context=get_context("spawn")) as pool:
+        echoed = pool.submit(_echo_chrom_result, original).result()
+    assert echoed.reopens == 3
+
+
+def test_reopens_total_sequential_equals_parallel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """from: plan §5 gnomad (7) — reopens_total is path-independent (seq == parallel).
+
+    The same single-reopen scenario run sequentially (jobs=1) and in parallel
+    (jobs=2, in-process shim) must report the same run total. Mirrors
+    test_parallel_load_reproduces_sequential_rows for the reopen counter.
+    """
+    init_databases()
+    _enable_external_calls()
+    _patch_check_libcurl(monkeypatch)
+    exomes_url = GNOMAD_URL_TEMPLATE.format(data_type="exomes", chrom="22")
+    genomes_url = GNOMAD_URL_TEMPLATE.format(data_type="genomes", chrom="22")
+
+    def _make_factory() -> _ReopenTrackingFactory:
+        return _ReopenTrackingFactory(
+            by_url={
+                exomes_url: [
+                    _make_record("chr22", 1000, "A", "C", {"AF": 0.1, "AC": 1, "AN": 10}),
+                ],
+                genomes_url: [],
+            },
+            corrupt_first_on={exomes_url: {"chr22:1000-1000"}},
+        )
+
+    with duckdb_connection() as conn:
+        _seed_user_variants(conn, [("22", 1000)])
+
+    import cyvcf2  # noqa: PLC0415 — test fixture local import
+
+    # Sequential baseline (jobs=1 -> sequential path, no shim needed).
+    monkeypatch.setattr(cyvcf2, "VCF", _make_factory())
+    with duckdb_connection() as conn:
+        audited, http = _mock_audited_client()
+        try:
+            seq = load(conn, audited, force=True, chromosomes=["22"], jobs=1)
+        finally:
+            audited.close()
+            http.close()
+
+    # Parallel run (jobs=2 -> _run_workers, in-process shim) into a fresh version.
+    monkeypatch.setattr(cyvcf2, "VCF", _make_factory())
+    _patch_serial_workers(monkeypatch)
+    with duckdb_connection() as conn:
+        audited, http = _mock_audited_client()
+        try:
+            par = load(conn, audited, force=True, chromosomes=["22"], jobs=2)
+        finally:
+            audited.close()
+            http.close()
+
+    assert seq.reopens_total == 1
+    assert par.reopens_total == seq.reopens_total
+
+
+def test_refresh_complete_event_carries_reopens_total_clean(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """from: plan §5 gnomad (8) — the gnomad.refresh.complete EVENT dict carries
+    reopens_total (== 0 on a clean run).
+
+    [premortem #3] Asserts the captured EVENT dict, not result.reopens_total:
+    structlog kwargs are un-typed, so mypy cannot catch a forgotten
+    ``reopens_total=`` on the event emission — only this test guards that the
+    field reaches the event (the actual deliverable), not just the result.
+    """
+    from structlog.testing import capture_logs  # noqa: PLC0415 — test-local
+
+    init_databases()
+    _enable_external_calls()
+    _patch_check_libcurl(monkeypatch)
+    exomes_url = GNOMAD_URL_TEMPLATE.format(data_type="exomes", chrom="22")
+    genomes_url = GNOMAD_URL_TEMPLATE.format(data_type="genomes", chrom="22")
+    by_url: dict[str, list[FakeVariant]] = {
+        exomes_url: [_make_record("chr22", 1000, "A", "C", {"AF": 0.1, "AC": 1, "AN": 10})],
+        genomes_url: [],
+    }
+    _patch_cyvcf2(monkeypatch, _VCFFactory(by_url=by_url))
+    with duckdb_connection() as conn:
+        _seed_user_variants(conn, [("22", 1000)])
+        audited, http = _mock_audited_client()
+        try:
+            with capture_logs() as logs:
+                load(conn, audited, force=True, chromosomes=["22"])
+        finally:
+            audited.close()
+            http.close()
+    events = [e for e in logs if e.get("event") == "gnomad.refresh.complete"]
+    assert len(events) == 1
+    assert events[0]["reopens_total"] == 0
+
+
+def test_refresh_complete_event_carries_reopens_total_on_reopen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """from: plan §5 gnomad (8) — the gnomad.refresh.complete EVENT dict carries
+    the non-zero run total (== 1) on a single-reopen run, mirroring the result.
+    """
+    from structlog.testing import capture_logs  # noqa: PLC0415 — test-local
+
+    init_databases()
+    _enable_external_calls()
+    _patch_check_libcurl(monkeypatch)
+    exomes_url = GNOMAD_URL_TEMPLATE.format(data_type="exomes", chrom="22")
+    genomes_url = GNOMAD_URL_TEMPLATE.format(data_type="genomes", chrom="22")
+    factory = _ReopenTrackingFactory(
+        by_url={
+            exomes_url: [_make_record("chr22", 1000, "A", "C", {"AF": 0.1, "AC": 1, "AN": 10})],
+            genomes_url: [],
+        },
+        corrupt_first_on={exomes_url: {"chr22:1000-1000"}},
+    )
+    import cyvcf2  # noqa: PLC0415 — test fixture local import
+
+    monkeypatch.setattr(cyvcf2, "VCF", factory)
+    with duckdb_connection() as conn:
+        _seed_user_variants(conn, [("22", 1000)])
+        audited, http = _mock_audited_client()
+        try:
+            with capture_logs() as logs:
+                result = load(conn, audited, force=True, chromosomes=["22"])
+        finally:
+            audited.close()
+            http.close()
+    events = [e for e in logs if e.get("event") == "gnomad.refresh.complete"]
+    assert len(events) == 1
+    assert events[0]["reopens_total"] == 1
+    # The event mirrors the result field (guards event/result drift, items 16/17).
+    assert result.reopens_total == 1

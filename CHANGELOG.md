@@ -26,6 +26,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   over-report direction — env `true` but seeded pref `false` still reports `False`), and
   `genome version`. Tests-only, no production change; `config get|set` stays covered in
   `test_cli_phase4.py`.
+- **gnomAD + dbSNP htslib-reopen drift sentinel — `reopens_total`** (`RM-3973250`, PR 13,
+  finding-012 #12). Both remote-tabix loaders now surface a run-total count of htslib HTTP/2
+  close+reopens on their completion event and result dataclass — `gnomad.refresh.complete` /
+  `GnomadLoadResult` (parallel + sequential paths, summed over the per-chromosome workers) and
+  `dbsnp.refresh.complete` / `DbsnpLoadResult` (sequential-only) — via a shared `RemoteReadStats`
+  out-param accumulator threaded through `remote_tabix.iter_remote_vcf_regions`. Additive
+  telemetry only: no schema/ddl change, no new external call, no payload stored (a plain int).
+  It is a tolerance-banded network signal (finding-012 #5), **not** a byte-exact anchor — `0` is
+  the healthy floor and a differing value on a re-run is expected; the gnomAD parallel path is a
+  documented success-path total that under-reports on a failed run (a dead worker's partial
+  reopens are unrecoverable).
 
 ### Fixed
 - **Version-label correctness for the ClinVar / GWAS Catalog loaders** (`RM-9f3c52c`, PR 10,
