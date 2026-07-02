@@ -660,9 +660,9 @@ value. dbSNP's `reopens_total` is a **brand-new field with no prior locked value
 capture historically observed 0 reopens at the 50 kb default) — verify it **emits**; there is
 nothing to re-lock or defer.
 
-**3. Negative control — the five data anchors must be unmoved (structural).** This PR touches
-only telemetry plumbing + docs; it runs no loader and no `refresh-index`, so every gnomAD data
-anchor holds **by construction**:
+**3. Negative control — the six data anchors must be unmoved (structural).** This PR touches
+only telemetry plumbing + docs; it runs no loader and no `refresh-index`, so every gnomAD and
+dbSNP data anchor holds **by construction**:
 
 | Anchor | Locked value (unmoved) |
 |---|---|
@@ -671,6 +671,7 @@ anchor holds **by construction**:
 | `filter_set_composition` | 3,144,800 |
 | `gnomad_matches` (index) | 3,054,426 |
 | `variants_master` | 3,160,364 |
+| `rows_loaded` (dbsnp) | 1,002,769 |
 
 `git diff --name-only` proves no `docs/schemas/` / `ddl/` / `filter_set.py` touched, and no
 gnomAD/dbSNP data hot-path function (`_summarize_run`, `_record_to_row` /
