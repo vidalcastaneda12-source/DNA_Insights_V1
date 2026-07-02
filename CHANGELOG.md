@@ -60,6 +60,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generalization stays open as RM-25072d2.
 
 ### Changed
+- **MEMORY.md DEC-ledger backfill — PRs #146 … #151 (docs-only).** Appended the six per-PR-history
+  retrospective rows `DEC-0162 … DEC-0167` covering PRs #146–#151 (each squash-merge subject
+  git-verbatim as the decision text), closing the one-PR-behind gap so the per-PR-history is
+  contiguous through `#19 … #151`. Also folded the previously-unlisted `DEC-0161` (PR 13
+  decision-finding row) into the footer's decision-finding list, so every row `DEC-0001 … DEC-0167`
+  is accounted for, and advanced "Declared complete" to `#19 … #151` (119 rows).
+  `genome docs check` green.
 - **Post-restructure stale cross-reference cleanup (docs + docstrings; `/fast-follow` drain of 6
   candidates).** Repointed navigational references to the ROADMAP section headers the #150
   restructure removed ("Pre-Phase-6 sequence", "Sub Project C2+D — Workflow-Engine Migration") to
