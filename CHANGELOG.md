@@ -60,12 +60,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generalization stays open as RM-25072d2.
 
 ### Changed
-- **MEMORY.md DEC-ledger backfill — PRs #150 / #151 (docs-only).** Appended the per-PR-history
-  retrospective rows `DEC-0162` (#150, ROADMAP restructure) and `DEC-0163` (#151, stale cross-ref
-  cleanup) with each squash-merge subject git-verbatim as the decision text; extended the footer's
-  per-PR-history range list (`+ DEC-0162 … DEC-0163`), folded the previously-unlisted `DEC-0161`
-  into the footer's decision-finding list, and advanced "Declared complete" to `#19 … #145, plus
-  #150 and #151` — with `#146-#149` explicitly noted as the still-pending one-PR-behind backlog.
+- **MEMORY.md DEC-ledger backfill — PRs #146 … #151 (docs-only).** Appended the six per-PR-history
+  retrospective rows `DEC-0162 … DEC-0167` covering PRs #146–#151 (each squash-merge subject
+  git-verbatim as the decision text), closing the one-PR-behind gap so the per-PR-history is
+  contiguous through `#19 … #151`. Also folded the previously-unlisted `DEC-0161` (PR 13
+  decision-finding row) into the footer's decision-finding list, so every row `DEC-0001 … DEC-0167`
+  is accounted for, and advanced "Declared complete" to `#19 … #151` (119 rows).
   `genome docs check` green.
 - **Post-restructure stale cross-reference cleanup (docs + docstrings; `/fast-follow` drain of 6
   candidates).** Repointed navigational references to the ROADMAP section headers the #150
