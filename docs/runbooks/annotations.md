@@ -1420,8 +1420,10 @@ per-chrom counts, `match_rate`, AF buckets, per-pop presence, even
 sequential path exactly; tune `--jobs 4/8/16` to your connection and
 watch the per-chromosome `gnomad.chrom.complete` progress lines and the
 aggregate `gnomad.chrom.htslib_recover` reopen count (concurrency may
-raise reopens). The achieved wall-clock at `--jobs 8` is captured at
-this verification, not pre-stated. dbsnp does not yet parallelize.
+raise reopens; the run total is now surfaced as `reopens_total` on
+`gnomad.refresh.complete` — finding-012 #12 / RM-3973250). The achieved
+wall-clock at `--jobs 8` is captured at this verification, not
+pre-stated. dbsnp does not yet parallelize.
 
 **`TMPDIR` on a big disk.** Each `--jobs` worker stages its filtered rows to a
 per-chromosome Parquet file under a scratch directory created via
