@@ -10,7 +10,7 @@ superseded_by: []
 
 ## Summary
 
-PR 4 (pre-Phase-6 sequence) makes the two rsID-keyed legs of the
+PR 4 (RM-34cb101, Phase 6 → Prerequisites) makes the two rsID-keyed legs of the
 `variant_annotations_index` build (GWAS Catalog, PharmGKB) resolve merged-away
 ("stale") rsIDs through the `variant_aliases` map that PR 2 populated
 (finding-019). Both the user side (`variants_master.rsid`) and the source side

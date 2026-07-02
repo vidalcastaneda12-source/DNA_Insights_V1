@@ -60,6 +60,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generalization stays open as RM-25072d2.
 
 ### Changed
+- **Post-restructure stale cross-reference cleanup (docs + docstrings; `/fast-follow` drain of 6
+  candidates).** Repointed navigational references to the ROADMAP section headers the #150
+  restructure removed ("Pre-Phase-6 sequence", "Sub Project C2+D — Workflow-Engine Migration") to
+  the items' **frozen `RM-` ids + new phase buckets** — the durable form that survives future
+  restructures. Touched `docs/runbooks/verification.md` (6 refs → `RM-8094752` Phase 6 →
+  Prerequisites, `RM-12873bf`/`RM-9f3c52c` Phase 5 → Follow-ups, `RM-7fba363` Phase 4 → Follow-ups,
+  C2+D → Phase 5 → Follow-ups → Development process & tooling), `CLAUDE.md` obs #7/#8,
+  `backend/src/genome/annotate/seed_genes.py` + `backend/tests/test_scope_split_calibration_backtest.py`
+  docstrings (the latter also fixes a pre-existing dangling `sub-project-B2-scope-split.md` link),
+  and findings 034 / 020 / 010 / 025 / 043. Verbatim historical quotes (finding-034 blockquotes,
+  the temporal "built ahead of the pre-Phase-6 sequence" narration) were deliberately left intact.
+  No absorbed `RM-` token was reintroduced; `genome roadmap check` + `genome docs check` stay green.
+  Drains fast-follow candidates `ff-150-verification-md-section-repoint`,
+  `ff-150-claude-md-obs78-section-repoint`, `ff-150-seed-genes-docstring-repoint`,
+  `ff-150-findings-pre6-repoint-a/-b`, `ff-150-calibration-backtest-docstring` (finding-038).
 - **ROADMAP.md restructure — consistent formatting + per-phase three-bucket regroup + targeted
   merges (docs-only).** Reformatted the scope ledger top-to-bottom for consistent indentation
   (2-space continuations / sub-bullets, 4-space sub-bullet continuations) and regrouped every

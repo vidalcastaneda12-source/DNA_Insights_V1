@@ -5,8 +5,10 @@ Spec source: ``sub-project-B2-phase1-deferred-followups.md`` item 2 ("Calibratio
 ROADMAP's 13-PR pre-Phase-6 sequence … to confirm they neither over- nor under-split") +
 ``finding-039`` DECISION 1 (manifest-primary cut + git-grep coupling veto).
 
-The **oracle** is ROADMAP's hand-authored "Pre-Phase-6 sequence" (a 14-PR ordered, dependency-gated
-decomposition; rationale in ``sub-project-B2-scope-split.md`` §1). Its governing principle is
+The **oracle** is ROADMAP's hand-authored (former) "Pre-Phase-6 sequence" (a 14-PR ordered,
+dependency-gated decomposition — folded into the per-phase buckets by the 2026-07-02 restructure,
+but preserved here as the historical back-test oracle; rationale in
+``sub-project-B2-phase1-deferred-followups.md`` §1). Its governing principle is
 *detect separability, not size*: the two biggest/hardest scopes — **PR 3** (canonicalize, S=8) and
 **PR 5a** (chrX, S=7) — were *correctly* shipped as single **atomic** PRs. The detector must
 reproduce that: agree the separable mega-scope splits, and agree each indivisible PR is atomic.

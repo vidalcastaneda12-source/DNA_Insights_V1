@@ -575,7 +575,7 @@ must not be read by Phase-6 consumers during the sequence.
   byte-unchanged: `variants_master`=3,160,364, gnomad pointer `source_version_id`=10,
   obs #4 index counts unchanged (`refresh-index` not run). These are exact /
   deterministic (a static seed), not tolerance-banded. See CLAUDE.md "Real-data
-  observations" **#7**, ROADMAP "Pre-Phase-6 sequence" PR 6, and
+  observations" **#7**, ROADMAP Phase 6 → Prerequisites (RM-8094752, PR 6), and
   [`verification.md`](../runbooks/verification.md) "PR 6 genes seed gate".
 - **Re-running Beagle imputation.** Hom-only recovery enables a *future*
   `genome imputation prepare` to include those rows (the `ref!=alt` filter at

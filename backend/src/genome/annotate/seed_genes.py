@@ -1,6 +1,6 @@
 """``genes`` FK-satisfying seed — ACMG SF v3.3 union in-DB PGx/carrier symbols.
 
-PR 6 (ROADMAP "Pre-Phase-6 sequence"). ``genes`` ships empty, but four Phase-6
+PR 6 / RM-8094752 (ROADMAP Phase 6 → Prerequisites). ``genes`` ships empty, but four Phase-6
 ``derived_*`` tables plus ``pathway_genes`` carry
 ``gene_symbol VARCHAR NOT NULL REFERENCES genes(gene_symbol)``. With ``genes``
 empty every Phase-6 insert into those tables fails the FK. This backfill seeds

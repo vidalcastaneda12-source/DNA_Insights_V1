@@ -13,7 +13,7 @@ superseded_by: []
 **Design-only brainstorm at capture (2026-06-18) — since superseded: the team was
 built ahead of the pre-Phase-6 gate and merged in PR #79 (2026-06-21). See the "Build
 status" callout below; the design text that follows is preserved as the rationale.**
-The document was captured (see `ROADMAP.md` → "Pre-Phase-6 sequence") as the
+The document was captured (see `ROADMAP.md` → Phase 5 → Follow-ups → Development process & tooling) as the
 implementation brief that PR #79 then executed, building the members as
 `.claude/agents/*.md` subagents plus the opt-in orchestration workflows. Captured
 2026-06-18 during a workflow-design session between VSC-User and
@@ -1508,7 +1508,7 @@ close so the next scope item starts from accurate ground:
   exhaustively covered. Latent — no current trigger.
 - **The Python-CLI reversal-gate is Phase 2.** It is the single intentionally-skipped
   `drift.test.mjs` test (EC3's one skip); the engine-primary CLI + the reversal-gate land in
-  Phase 2. Tracked in `ROADMAP.md` "Sub Project C2+D — Workflow-Engine Migration".
+  Phase 2. Tracked in `ROADMAP.md` Phase 5 → Follow-ups → Development process & tooling.
 
 None of these blocks a gate; they are the Stage-5 residual ledger for C2D-Phase1, paired with
 the Phase 2 slot in `ROADMAP.md`.
