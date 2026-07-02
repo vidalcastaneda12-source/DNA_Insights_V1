@@ -56,12 +56,15 @@ manageable. This document tracks them so they aren't forgotten.
 
 4. **Tier-2 rsID matching in merge.** Phase 3 implemented tier-1
    (chrom+pos+ref+alt) and tier-3 (fuzzy strand) but deferred tier-2 (rsID
-   matching with merge resolution via `variant_aliases`). Currently the
-   `variant_aliases` table isn't populated, so tier-2 has nothing to match
-   against. *Recommended fix point:* the post-5.7 backfills slot — populate
-   `variant_aliases` from dbSNP merge records (the dbSNP loader shipped in 5.6
-   but left `variant_aliases` empty per finding-016 #8), then add tier-2 merge
-   logic.
+   matching with merge resolution via `variant_aliases`). *Status (2026-07):*
+   `variant_aliases` is now populated — PR 2 (`RM-5a32d13` / finding-019) loaded
+   it from the dbSNP rs-merge archive (839,413 rows, CLAUDE.md obs #5), so the
+   former "table is empty" blocker is closed. The remaining work is the tier-2
+   merge logic itself, tracked as `RM-2aa5333` (ROADMAP: "Build merge Tier-2 …
+   dependency `variant_aliases` is now loaded"). *Recommended fix point:* add
+   the tier-2 merge logic on top of the now-loaded `variant_aliases` (the dbSNP
+   loader shipped in 5.6 but left it empty per finding-016 #8, which PR 2
+   backfilled).
 
 5. **ACMG SF severity escalation.** Phase 3's discrepancy detection writes
    base severity correctly but doesn't escalate to `critical` for variants

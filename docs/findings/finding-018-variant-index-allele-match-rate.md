@@ -99,16 +99,20 @@ however, attach locus-level evidence to every biallelic split sharing an rsid;
 see the runbook join-model note.
 
 A separate non-issue worth recording: `gene_variant_summary_v.pathogenic_count`
-is 0 on real data because the `genes` dictionary table is empty (deferred to
-Phase 7). The view's `genes ⨝ variants_master` join has no left side; this is
-expected at 5.7 and unrelated to the index build.
+is 0 on real data. The `genes` dictionary now holds the PR 6 (`RM-8094752`)
+FK-satisfying seed (1153 symbols, CLAUDE.md obs #7), so the table is no longer
+empty; the 0 count reflects the still-missing gene↔variant linkage (full
+Phase-7 dictionary + mapping), not an absent join side. Unrelated to the index
+build.
 
 ## Follow-up tracking
 
 - The first-run numbers above are the locked drift identifiers. A re-run against
   the same corpus that deviates is a regression signal.
-- Re-running `refresh-index` after the finding-005 #1 canonical-REF/ALT backfill
-  is expected to materially raise `gnomad_matches` / `clinvar_matches`; capture
-  the new numbers and re-lock at that point.
+- **Fired (PR 3):** the finding-005 #1 canonical-REF/ALT backfill shipped as
+  PR 3 (`RM-8efb0b3` / finding-020) and re-running `refresh-index` re-locked
+  `gnomad_matches` / `clinvar_matches` materially upward — see the finding-020
+  bedrock anchor table and CLAUDE.md obs #4 / obs #6 for the re-locked counts
+  (referenced by pointer; magnitudes not transcribed here).
 - VEP columns + `is_acmg_sf` are filled by Phase 6 (finding-017); `is_curated`
   gains CPIC coverage only when a gene→variant mapping lands (Phase 6/7).

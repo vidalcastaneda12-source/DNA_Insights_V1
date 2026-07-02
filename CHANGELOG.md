@@ -36,6 +36,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generalization stays open as RM-25072d2.
 
 ### Changed
+- **Docs hygiene: fast-follow drain of 4 stale-doc residuals.** Corrected fired/stale prose for
+  already-shipped work: finding-005 #4 (`variant_aliases` is now loaded — PR 2 / `RM-5a32d13` /
+  finding-019; the remaining merge tier-2 stays `RM-2aa5333`), the `genes`-table-empty claims in
+  `docs/runbooks/annotations.md` + finding-018 (superseded by the PR 6 / `RM-8094752` genes seed,
+  CLAUDE.md obs #7), and finding-018's anticipatory `refresh-index` re-lock bullet (fired — the
+  canonical-REF/ALT backfill shipped as PR 3 / `RM-8efb0b3` / finding-020, CLAUDE.md obs #4/#6).
+  Docs-only pointer edits (no anchor magnitudes transcribed). Drains repo-sweep candidates
+  `finding005-4-variant-aliases-populated-stale`, `annotations-genes-empty-stale`,
+  `finding018-genes-empty-stale`, `finding018-refresh-index-relock-fired`.
 - **Agent team pinned to the `claude-fable-5` (Fable 5) model** (PR #141). All 29
   per-scope-team members in `.claude/agents/*.md` moved from `model: inherit` (#138) to an
   explicit `model: claude-fable-5`, so the team runs on Fable 5 regardless of the session
