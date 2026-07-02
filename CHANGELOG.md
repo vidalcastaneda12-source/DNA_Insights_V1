@@ -36,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generalization stays open as RM-25072d2.
 
 ### Changed
+- **Docs hygiene: fast-follow drain of the finding-005 #9 PR-14 back-reference.** Item #9's stale
+  "fold into PR 5" fix-point corrected to a Status line — PR 5/5b (#73) shipped without folding in
+  the GRCh37 re-coalesce, so it is now tracked standalone as `RM-b9043cd` (PR 14), matching its
+  bundled siblings finding-027 / finding-021. Docs-only pointer edit. Drains repo-sweep candidate
+  `finding005-9-pos-grch37-pr14-backref-missed`.
 - **Docs hygiene: fast-follow drain of 4 stale-doc residuals.** Corrected fired/stale prose for
   already-shipped work: finding-005 #4 (`variant_aliases` is now loaded — PR 2 / `RM-5a32d13` /
   finding-019; the remaining merge tier-2 stays `RM-2aa5333`), the `genes`-table-empty claims in
