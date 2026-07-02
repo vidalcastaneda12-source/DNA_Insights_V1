@@ -43,6 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generalization stays open as RM-25072d2.
 
 ### Changed
+- **Close PR 12 (`RM-c5bcb2d`) — flip the ROADMAP slot to done + capture-forward the dead
+  `--version` eager flag.** Stage-5 close for the top-level CLI test module (merged #144): flip
+  `RM-c5bcb2d` (PR 12) to `[x]`, capture the never-wired `genome --version` eager flag
+  (`cli.py:1131-1139` defines `_VersionFlag` / `_print_version_and_exit` but the `_main` callback
+  never references them — only `genome version` prints the version) as new deferred slot
+  `RM-e95c4a0`, and record the per-PR `DEC-0155` ledger row. No anchor re-lock
+  (`applicable_anchors` was empty). Docs-only.
 - **Docs hygiene: fast-follow drain of the finding-005 #9 PR-14 back-reference.** Item #9's stale
   "fold into PR 5" fix-point corrected to a Status line — PR 5/5b (#73) shipped without folding in
   the GRCh37 re-coalesce, so it is now tracked standalone as `RM-b9043cd` (PR 14), matching its
