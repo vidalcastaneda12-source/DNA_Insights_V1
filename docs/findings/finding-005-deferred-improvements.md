@@ -136,9 +136,12 @@ manageable. This document tracks them so they aren't forgotten.
    `(grch38, grch37, liftover-provenance)` triple. The GRCh38 coordinate (the
    project's primary) is unaffected, and `consensus_genotypes` /
    `variant_annotations_index` key on GRCh38; only the alongside-stored GRCh37
-   value is at issue. *Recommended fix point:* a re-liftover pass — fold into
-   PR 5 (strand architecture, which already re-derives `genotype_calls` allele
-   state via supersession) or a dedicated GRCh37-recoalesce step.
+   value is at issue. *Status (2026-07):* PR 5/5b (#73) landed without folding in
+   the GRCh37 re-coalesce, so it had no slot there; it is now tracked standalone
+   as `RM-b9043cd` (PR 14 — the finding-005 #9 leg, bundled in ROADMAP with
+   finding-027 and finding-021). *Recommended fix point:* the `RM-b9043cd` (PR 14)
+   slot — a re-liftover / GRCh37-recoalesce pass (the original "fold into PR 5
+   strand architecture" target shipped without absorbing it).
 
 10. **Loader version label decouples from cached data on a rebuild reload
     (finding-022).** ClinVar and GWAS Catalog resolve their `version` label from a
