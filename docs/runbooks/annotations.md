@@ -1962,9 +1962,11 @@ precedes `refresh-index` in the reload sequence above.
   allele-gated; the lift is the post-5.7 canonical-REF/ALT backfill, not a 5.7
   fix.
 * **`gene_variant_summary_v` returns 0 pathogenic counts.** The `genes`
-  dictionary table is empty (deferred to Phase 7), so the view's
-  `genes ⨝ variants_master` join has no left side. Expected until Phase 7 loads
-  `genes`; unrelated to the index build.
+  dictionary now carries the PR 6 (`RM-8094752`) minimal seed (1153
+  FK-satisfying symbols, CLAUDE.md obs #7), so the table is no longer empty; the
+  0 count reflects the still-missing gene↔variant linkage (the full Phase-7
+  `genes` dictionary + mapping), not an absent join side. Unrelated to the index
+  build.
 * **A source's rows are missing after a refresh.** Confirm its
   `annotation_sources` pointer names the version you loaded (`genome annotate
   status`); the builder reads only current-pointer rows.
