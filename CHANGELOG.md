@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   excluded; chrX via the top-level concat), so a missing / truncated / silently-empty result
   VCF, an unmanifested on-disk result VCF, an absent manifest, or a `completed` / `failed` run
   is refused with the run left byte-unchanged.
+- **`backend/tests/test_cli_top_level.py` — top-level CLI lock tests** (`RM-c5bcb2d`, PR 12,
+  audit item 3.2). Covers the previously-uncovered top-level CLI surface: `genome init`
+  (the created / present-skipped branches), `genome status` (the table/view/profile/preference
+  count branch, the DB-absent fail-closed external-calls branch, and the finding-024
+  over-report direction — env `true` but seeded pref `false` still reports `False`), and
+  `genome version`. Tests-only, no production change; `config get|set` stays covered in
+  `test_cli_phase4.py`.
 
 ### Fixed
 - **Version-label correctness for the ClinVar / GWAS Catalog loaders** (`RM-9f3c52c`, PR 10,
