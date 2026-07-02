@@ -39,6 +39,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reopens are unrecoverable).
 
 ### Fixed
+- **RM-3973250 (PR 13) doc residuals** (fast-follow drain, finding-038). The PR-13
+  `verification.md` negative-control block now lists **six** data anchors — added the
+  `rows_loaded` (dbsnp) = 1,002,769 row (the dbSNP mirror put a sixth negative control in
+  scope) — and the `annotations.md` gnomAD `--jobs` monitoring prose now cross-references the
+  run-total `reopens_total` field on `gnomad.refresh.complete` (finding-012 #12). Docs-only; no
+  behavior change.
 - **Version-label correctness for the ClinVar / GWAS Catalog loaders** (`RM-9f3c52c`, PR 10,
   finding-043). Two label-integrity defects, both fault-triggered and invisible on a normal
   run. **D1 (refuse):** ClinVar's HEAD resolver no longer fabricates today's date on a failure
