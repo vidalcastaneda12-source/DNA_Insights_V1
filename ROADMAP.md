@@ -2,7 +2,7 @@
 
 Phases are sequential. Do not start phase N+1 until phase N's verification passes.
 
-**Current phase:** Phase 5 closed; executing the pre-Phase-6 cleanup sequence (PRs 1–11 landed — PR 7 closed-as-moot against the live DB, no FK-safe gnomAD orphan exists; PR 12 next) before Phase 6 begins. PR 6 (minimal `genes` seed, #88) cleared the Phase-6 FK gate.
+**Current phase:** Phase 5 closed; executing the pre-Phase-6 cleanup sequence (PRs 1–12 landed — PR 7 closed-as-moot against the live DB, no FK-safe gnomAD orphan exists; PR 13 next) before Phase 6 begins. PR 6 (minimal `genes` seed, #88) cleared the Phase-6 FK gate.
 
 ## Phase 1 — Foundation (this is the bootstrap)
 
@@ -90,8 +90,8 @@ pattern (finding-010 #15), is tracked under "Deliberately deferred" in that sequ
 
 ## Pre-Phase-6 sequence
 
-**Status:** in progress — PRs 1–11 landed (#63, #64, #65, #70, #74, #88, #131, #133, #136, #139); PR 7
-closed-as-moot (2026-06-26 — the live DB has no FK-safe gnomAD orphan); PR 12 is next.
+**Status:** in progress — PRs 1–12 landed (#63, #64, #65, #70, #74, #88, #131, #133, #136, #139, #144); PR 7
+closed-as-moot (2026-06-26 — the live DB has no FK-safe gnomAD orphan); PR 13 is next.
 
 A 14-PR run that clears every dbSNP-dependent backfill, deferred-cleanup item,
 and FK blocker before the Phase 6 analyses begin, so Phase 6 starts with no open
@@ -241,8 +241,8 @@ hasn't arrived, tracked in findings for when it does:
 - [ ] RM-fd3f213 — Sidecar write/read atomicity hardening (finding-043 follow-up): temp-file+atomic-rename (or unlink-before-write) for the version sidecar so a swallowed write failure degrades to ABSENT not STALE; narrow `_read_version_sidecar` to FileNotFoundError + warn on other OSError. Adversarial-only today (single-user 0700/0600 cache); on-theme label-correctness hardening.
 - [ ] RM-b2a34d9 — Hash-as-canonical-identity refactor
 - [ ] RM-597e9fc — `annotate inspect --source URL` schema-inspection helper
-- [ ] RM-74c3386 — Gate-1 fail-closed **token core** for `genome.campaign` `approve-plan` — a typed-token authorization mirroring Sub Project A's `verify_gate` `merge` token; the shipped `--approved` flag already suffices (the reducer refuses any GATE_CROSSING absent `external_event`), so this is future hardening, not a correctness gap. Gated on Sub Project C2+D Phase 2. ([`finding-041`](docs/findings/finding-041-campaign-orchestrator.md) "Gate-1 authorization — as taken" / `DEC-0121`)
-- [ ] RM-2e4acd3 — Engine-primary `/campaign-run` conductor — the shipped conductor is **model-driven** (`DEC-0099`); the engine-primary launch path is gated on Sub Project C2+D Phase 2. ([`finding-041`](docs/findings/finding-041-campaign-orchestrator.md) D6 / `DEC-0121`)
+- [ ] RM-74c3386 — Gate-1 fail-closed **token core** for `genome.campaign` `approve-plan` — a typed-token authorization mirroring Sub Project A's `verify_gate` `merge` token; the shipped `--approved` flag already suffices (the reducer refuses any GATE_CROSSING absent `external_event`), so this is future hardening, not a correctness gap. Deferred as optional hardening: the gating Sub Project C2+D Phase 2 has since fired (closed 2026-06-28, `RM-82a7546`), so this is no longer gated on an unfired signal — the shipped `--approved` mechanism suffices. ([`finding-041`](docs/findings/finding-041-campaign-orchestrator.md) "Gate-1 authorization — as taken" / `DEC-0121`)
+- [ ] RM-2e4acd3 — Engine-primary `/campaign-run` conductor — the shipped conductor is **model-driven** (`DEC-0099`); the engine-primary launch path is deferred as optional enhancement — the gating Sub Project C2+D Phase 2 has since fired (closed 2026-06-28, `RM-82a7546`), so no longer gated on an unfired signal; the shipped model-driven conductor suffices. ([`finding-041`](docs/findings/finding-041-campaign-orchestrator.md) D6 / `DEC-0121`)
 
 **Phase 6 entry is gated on:** the minimal `genes` seed (PR 6) — **now landed (#88)**,
 gate-confirmed `genes`=1153 unblocking the five `derived_*` / `pathway_genes` FKs (see

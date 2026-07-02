@@ -43,6 +43,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generalization stays open as RM-25072d2.
 
 ### Changed
+- **Docs hygiene: fast-follow drain batch 1 (Sub Project B, finding-038) — repo-sweep backlog
+  post-`RM-c5bcb2d` close.** Backfilled the five missing per-PR-history `MEMORY.md` decision-ledger
+  rows for #140–#143 + #145 (`DEC-0156`…`DEC-0160`) and advanced the ledger footer high-water
+  (per-PR range → `DEC-0160`, `Declared complete` → PRs #19 … #145, now contiguous); refreshed the
+  stale "PRs 1–11 landed / PR 12 next" header prose to "1–12 landed / PR 13 next" in `ROADMAP.md`
+  (both the Current-phase and Pre-Phase-6-sequence Status lines) + `README.md`; and restated the two
+  "Gated on Sub Project C2+D Phase 2" deferred items (`RM-74c3386`, `RM-2e4acd3`) whose gate fired
+  2026-06-28 (`RM-82a7546`) as still-deferred optional hardening. Docs-only. Drains repo-sweep
+  candidates `ff-dec-backfill-140-143`, `ff-roadmap-narrative-pr12`, `ff-fired-deferred-c2d`.
 - **Close PR 12 (`RM-c5bcb2d`) — flip the ROADMAP slot to done + capture-forward the dead
   `--version` eager flag.** Stage-5 close for the top-level CLI test module (merged #144): flip
   `RM-c5bcb2d` (PR 12) to `[x]`, capture the never-wired `genome --version` eager flag

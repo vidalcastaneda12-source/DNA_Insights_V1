@@ -211,13 +211,18 @@ back-pointer; `DEC-0002` is the live decision.
 | DEC-0153 | tactical | 2026-07-01 | active | — | VSC-User, ClaudeCodeDevelopment | PR #138 | chore(agents): inherit main-session model across per-scope team | https://github.com/vidalcastaneda12-source/DNA_Insights_V1/pull/138 |
 | DEC-0154 | tactical | 2026-07-01 | active | — | VSC-User, ClaudeCodeDevelopment | PR #139 | feat(imputation): register-existing-result CLI command (RM-7fba363 / PR 11) | https://github.com/vidalcastaneda12-source/DNA_Insights_V1/pull/139 |
 | DEC-0155 | tactical | 2026-07-02 | active | — | VSC-User, ClaudeCodeDevelopment | PR #144 | test(cli): top-level CLI test module for init/status/version (RM-c5bcb2d / PR 12) | https://github.com/vidalcastaneda12-source/DNA_Insights_V1/pull/144 |
+| DEC-0156 | tactical | 2026-07-01 | active | — | VSC-User, ClaudeCodeDevelopment | PR #140 | docs(fast-follow): drain 5 PR-10/11 residuals + capture RM-42bb7df | https://github.com/vidalcastaneda12-source/DNA_Insights_V1/pull/140 |
+| DEC-0157 | tactical | 2026-07-01 | active | — | VSC-User, ClaudeCodeDevelopment | PR #141 | chore(agents): pin per-scope team to claude-fable-5 (Fable 5) model | https://github.com/vidalcastaneda12-source/DNA_Insights_V1/pull/141 |
+| DEC-0158 | tactical | 2026-07-01 | active | — | VSC-User, ClaudeCodeDevelopment | PR #142 | docs(fast-follow): drain 4 stale-doc residuals (genes seed, variant_aliases, refresh-index re-lock) | https://github.com/vidalcastaneda12-source/DNA_Insights_V1/pull/142 |
+| DEC-0159 | tactical | 2026-07-01 | active | — | VSC-User, ClaudeCodeDevelopment | PR #143 | docs(fast-follow): drain finding-005 #9 PR-14 back-reference | https://github.com/vidalcastaneda12-source/DNA_Insights_V1/pull/143 |
+| DEC-0160 | tactical | 2026-07-02 | active | — | VSC-User, ClaudeCodeDevelopment | PR #145 | docs(roadmap): close PR 12 — flip RM-c5bcb2d, capture --version flag, record DEC-0155 | https://github.com/vidalcastaneda12-source/DNA_Insights_V1/pull/145 |
 
 <!-- END decision-ledger -->
 
 _**Backfill status:** `DEC-0001 … DEC-0021` are the curated decision-finding rows (every
-`type: decision`/`both` finding). `DEC-0022 … DEC-0084`, `DEC-0100 … DEC-0118`, `DEC-0128 … DEC-0147`, and `DEC-0150 … DEC-0155` are the **per-PR-history retrospective** —
+`type: decision`/`both` finding). `DEC-0022 … DEC-0084`, `DEC-0100 … DEC-0118`, `DEC-0128 … DEC-0147`, and `DEC-0150 … DEC-0160` are the **per-PR-history retrospective** —
 one row per merged PR in `main`'s history, the squash-merge subject git-verbatim as the decision
 (`DEC-0085 … DEC-0099`, `DEC-0119 … DEC-0127`, and `DEC-0148 … DEC-0149` in between are decision-finding rows, not per-PR history).
-**Declared complete: PRs #19 … #139** (107 PR-referenced commits, the full PR history
+**Declared complete: PRs #19 … #145** (113 PR-referenced commits, the full PR history
 in the current `main` lineage; any pre-#19 PRs predate this lineage). New PRs append the next row
 at the `/handoff` or Stage-5 checkpoint._
