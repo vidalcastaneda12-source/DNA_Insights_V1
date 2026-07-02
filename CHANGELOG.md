@@ -60,6 +60,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generalization stays open as RM-25072d2.
 
 ### Changed
+- **`RM-3973250` (PR 13) close (docs-only).** Flipped the ROADMAP slot to `[x]` and widened it
+  to the delivered gnomAD **+ dbSNP** scope; recorded `DEC-0161` (the three Gate-1 decisions:
+  the dbSNP mirror folded in-scope so no separate deferred slot was minted, `reopens_total` is
+  tolerance-banded telemetry not a re-lockable anchor, the parallel failure-path asymmetry as a
+  documented accepted limitation); framed CLAUDE.md obs #4's reopen count as the tolerance-banded
+  `reopens_total` field; refreshed the pre-Phase-6 narrative to "PRs 1–13 landed / PR 14 next"; and
+  captured two Stage-3 review residuals as fresh slots (`RM-fdbeb64` failure-path assertion,
+  `RM-a3b5d24` `_ChromResult.status` Literal).
 - **Docs hygiene: fast-follow drain batch 1 (Sub Project B, finding-038) — repo-sweep backlog
   post-`RM-c5bcb2d` close.** Backfilled the five missing per-PR-history `MEMORY.md` decision-ledger
   rows for #140–#143 + #145 (`DEC-0156`…`DEC-0160`) and advanced the ledger footer high-water
