@@ -48,11 +48,13 @@ def test_roadmap_has_b2_phase1_slot() -> None:
     """from: SYNTHESIZED-PLAN §4 step 1 (bootstrap the B2-Phase1 ROADMAP slot FIRST) + §5
     ("B2-Phase1 slot").
 
-    ROADMAP.md carries the "## Sub Project B2 — scope-split (Phase 1)" section and the
-    B2-Phase1 slot line.
+    ROADMAP.md carries the B2-Phase1 scope-split slot. The 2026-07-02 ROADMAP restructure folded
+    the former top-level "## Sub Project B2 — scope-split (Phase 1)" section into Phase 5
+    Follow-ups → Development process & tooling, so the durable invariant is the slot line itself —
+    its frozen ``RM-`` id + the ``B2-Phase1`` tag — not the incidental (now-removed) section header.
     """
     text = (_repo_root() / "ROADMAP.md").read_text(encoding="utf-8")
-    assert "Sub Project B2 — scope-split (Phase 1)" in text
+    assert "RM-88bafb3" in text  # the frozen B2-Phase1 scope-split detector slot id
     assert "B2-Phase1" in text
 
 

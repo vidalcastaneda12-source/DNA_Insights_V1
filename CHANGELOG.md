@@ -60,6 +60,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generalization stays open as RM-25072d2.
 
 ### Changed
+- **ROADMAP.md restructure — consistent formatting + per-phase three-bucket regroup + targeted
+  merges (docs-only).** Reformatted the scope ledger top-to-bottom for consistent indentation
+  (2-space continuations / sub-bullets, 4-space sub-bullet continuations) and regrouped every
+  phase into **Prerequisites / Deliverables / Follow-ups**, folding the former "Pre-Phase-6
+  sequence", the process/tooling sub-projects (C1 / B2 / C2+D), and the 2026-06-29 cross-cutting
+  audit backlog into the nearest phase (annotation-loader cleanup + dev-process tooling → Phase 5
+  Follow-ups; imputation / merge / CLI residuals → Phase 4 / 3 / 1 Follow-ups; the dbSNP-dependent
+  backfills + FK unblock + `genes` seed → Phase 6 Prerequisites). Three targeted merges of open,
+  zero-citation, ship-together items (net −4 `RM-` ids, 152 → 148): `RM-f098bb5` (next-DB-rebuild
+  schema batch — `dosage_confidence` column, `variant_id_seq` drop, `ingestion_status_enum`
+  expansion), `RM-a26ae82` (enable both CI gates as required status checks — `docs-check` +
+  `workflows-gate`), and `RM-877424d` (finding-034 deferred residuals — candidate cross-examination
+  mode + worktree live-writer verification). Each of the seven absorbed slots becomes a gate-exempt
+  sub-bullet under its umbrella carrying its prior `ex-RM-…` id for traceability; the old ids are
+  intentionally not cited as live tokens (they no longer resolve — the referential-integrity gate
+  would flag them). Every retained item's prose is byte-identical (whitespace-normalized only); the
+  `<!-- B2-SUBSCOPES -->` managed region + sentinels are preserved untouched. `genome roadmap check`
+  + `genome docs check` stay green. Docs-only; no scope content changed.
 - **`RM-3973250` (PR 13) close (docs-only).** Flipped the ROADMAP slot to `[x]` and widened it
   to the delivered gnomAD **+ dbSNP** scope; recorded `DEC-0161` (the three Gate-1 decisions:
   the dbSNP mirror folded in-scope so no separate deferred slot was minted, `reopens_total` is
