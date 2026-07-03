@@ -31,10 +31,11 @@ the remaining open items gate nothing.
 
 - [x] RM-c5bcb2d (PR 12) — Top-level CLI test module for `init` / `status` / `config get|set` /
   `version` (audit item 3.2; currently uncovered). (#144)
-- [x] RM-e95c4a0 — Wire the dead `genome --version` eager flag into the `_main` callback (or remove
-  it): `cli.py:1131-1139` defines `_VersionFlag` / `_print_version_and_exit`, but neither is
-  referenced by the parameter-less `_main` callback, so `genome --version` is a no-op today (only the
-  `genome version` subcommand prints the version). Surfaced by PR 12 / RM-c5bcb2d intake. (#153)
+- [x] RM-e95c4a0 — Wired the dead `genome --version` eager flag into the `_main` callback: the eager
+  `--version` option + `_print_version_and_exit` callback existed but were not referenced by the
+  parameter-less `_main` callback, so `genome --version` was a no-op (only the `genome version`
+  subcommand printed the version). Now inlined on `_main` with `callback=_print_version_and_exit` (the
+  dead `_VersionFlag` alias removed). Surfaced by PR 12 / RM-c5bcb2d intake. (#153)
 
 **Verification:** `genome init` works on a clean checkout; `pytest` green; `mypy --strict` clean.
 

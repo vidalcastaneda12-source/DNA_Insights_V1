@@ -64,6 +64,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generalization stays open as RM-25072d2.
 
 ### Changed
+- **ROADMAP `RM-e95c4a0` prose repoint — drop the now-stale dead-code citation on the closed item
+  (docs-only).** The closed `genome --version` slot still carried its pre-merge problem statement: a
+  `cli.py:1131-1139` line-ref that post-merge points at unrelated chrX-panel code, the deleted
+  `_VersionFlag` symbol, and a present-tense "is a no-op today". Repointed to past tense + the durable
+  symbol-level outcome (`_main` + `callback=_print_version_and_exit`, `_VersionFlag` removed), dropping
+  the brittle line-ref. Surfaced by the Stage-5 `repo-sweep`. `genome roadmap check` + `genome docs check` green.
 - **Close RM-e95c4a0 (`genome --version` eager flag) — flip the ROADMAP slot to done + `DEC-0168`.**
   Stage-5 close for the wired `genome --version` eager flag (merged #153): flip `RM-e95c4a0` (Phase-1
   Follow-up) to `[x]` and record the per-PR `DEC-0168` ledger row (WIRE not REMOVE — the honest REMOVE
