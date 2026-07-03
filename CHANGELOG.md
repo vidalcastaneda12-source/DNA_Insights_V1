@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`genome --version` eager root flag — wired** (`RM-e95c4a0`). The previously-dead
+  `--version` flag is now attached to the `_main` root callback as an eager `typer.Option`
+  with `callback=_print_version_and_exit`, so `genome --version` prints `genome.__version__`
+  and exits 0, complementing the existing `genome version` subcommand.
 - **`genome imputation register-existing-result <id>` — JVM-free rebuild fast path**
   (`RM-7fba363`, PR 11, finding-008). Validates a preserved Beagle `result/` tree against the
   prepare `MANIFEST.json` and flips `imputation_runs.status` straight to `completed` (stamping

@@ -74,6 +74,35 @@ def test_version_prints_package_version(
     assert result.output.strip() == __version__
 
 
+def test_version_flag_prints_package_version(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    result = CliRunner().invoke(app, ["--version"])
+    assert result.exit_code == 0
+    # Sourced from genome.__version__, not hardcoded, so a bump can't drift this.
+    assert result.output.strip() == __version__
+
+
+def test_version_flag_matches_version_subcommand(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    runner = CliRunner()
+    flag_result = runner.invoke(app, ["--version"])
+    subcommand_result = runner.invoke(app, ["version"])
+    assert flag_result.exit_code == 0
+    assert subcommand_result.exit_code == 0
+    # Both surfaces resolve to the single genome.__version__ source.
+    assert flag_result.output.strip() == subcommand_result.output.strip()
+
+
+def test_bare_invocation_does_not_leak_version(
+    isolated_settings: dict[str, str],  # noqa: ARG001
+) -> None:
+    result = CliRunner().invoke(app, [])
+    assert result.exit_code == 2
+    assert __version__ not in result.output
+
+
 def test_root_app_registers_all_top_level_commands(
     isolated_settings: dict[str, str],  # noqa: ARG001
 ) -> None:
