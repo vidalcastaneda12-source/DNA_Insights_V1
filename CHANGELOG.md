@@ -64,6 +64,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generalization stays open as RM-25072d2.
 
 ### Changed
+- **Close RM-e95c4a0 (`genome --version` eager flag) — flip the ROADMAP slot to done + `DEC-0168`.**
+  Stage-5 close for the wired `genome --version` eager flag (merged #153): flip `RM-e95c4a0` (Phase-1
+  Follow-up) to `[x]` and record the per-PR `DEC-0168` ledger row (WIRE not REMOVE — the honest REMOVE
+  alternative was presented at Gate 1 and declined). No anchor re-lock (`applicable_anchors` was empty).
+  Docs-only. `genome roadmap check` + `genome docs check` green.
 - **MEMORY.md DEC-ledger backfill — PRs #146 … #151 (docs-only).** Appended the six per-PR-history
   retrospective rows `DEC-0162 … DEC-0167` covering PRs #146–#151 (each squash-merge subject
   git-verbatim as the decision text), closing the one-PR-behind gap so the per-PR-history is
