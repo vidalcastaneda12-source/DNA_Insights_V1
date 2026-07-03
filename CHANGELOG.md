@@ -64,6 +64,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generalization stays open as RM-25072d2.
 
 ### Changed
+- **New standalone `tmp-janitor` cleanup agent (`.claude/agents/tmp-janitor.md`).** On-demand disk
+  janitor that reclaims space under `/tmp/claude-1000` by deleting stale Claude Code session scratch
+  dirs, guarded by a session-path regex (only `/tmp/claude-1000/<project>/<uuid>` dirs), a 24h
+  deep-mtime protection window, explicit current-session + `bundled-skills/` exclusion, and a single
+  vetted script (no hand-written `rm`). Default executes + reports freed space; "dry run" previews.
+  **Not** a per-scope agent-team member (so it is intentionally absent from the team roster in
+  `.claude/agents/README.md`); pinned `model: claude-fable-5` per the team convention.
 - **ROADMAP `RM-e95c4a0` prose repoint — drop the now-stale dead-code citation on the closed item
   (docs-only).** The closed `genome --version` slot still carried its pre-merge problem statement: a
   `cli.py:1131-1139` line-ref that post-merge points at unrelated chrX-panel code, the deleted
