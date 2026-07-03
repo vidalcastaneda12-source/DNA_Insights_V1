@@ -223,6 +223,7 @@ back-pointer; `DEC-0002` is the live decision.
 | DEC-0165 | tactical | 2026-07-02 | active | — | VSC-User, ClaudeCodeDevelopment | PR #147 | feat(annotate): gnomAD + dbSNP total-reopen drift sentinel (RM-3973250 / PR 13) | https://github.com/vidalcastaneda12-source/DNA_Insights_V1/pull/147 |
 | DEC-0166 | tactical | 2026-07-02 | active | — | VSC-User, ClaudeCodeDevelopment | PR #148 | docs(roadmap): close PR 13 — flip RM-3973250 (gnomAD + dbSNP reopen sentinel), DEC-0161, residuals | https://github.com/vidalcastaneda12-source/DNA_Insights_V1/pull/148 |
 | DEC-0167 | tactical | 2026-07-02 | active | — | VSC-User, ClaudeCodeDevelopment | PR #149 | docs(fast-follow): drain RM-3973250 doc residuals — verification.md 6-anchor count + annotations.md reopens_total xref | https://github.com/vidalcastaneda12-source/DNA_Insights_V1/pull/149 |
+| DEC-0168 | tactical | 2026-07-02 | active | — | VSC-User, ClaudeCodeDevelopment | PR #153 | feat(cli): wire the dead genome --version eager flag into _main — WIRE not REMOVE (honest REMOVE alternative presented at Gate 1 and declined) (RM-e95c4a0) | https://github.com/vidalcastaneda12-source/DNA_Insights_V1/pull/153 |
 
 <!-- END decision-ledger -->
 
