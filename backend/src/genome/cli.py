@@ -122,8 +122,24 @@ def _configure_logging() -> None:
     )
 
 
+def _print_version_and_exit(value: bool) -> None:  # noqa: FBT001
+    if value:
+        typer.echo(__version__)
+        raise typer.Exit
+
+
 @app.callback()
-def _main() -> None:
+def _main(
+    version: Annotated[  # noqa: FBT002, ARG001 — consumed by eager callback
+        bool,
+        typer.Option(
+            "--version",
+            help="Print version and exit",
+            is_eager=True,
+            callback=_print_version_and_exit,
+        ),
+    ] = False,
+) -> None:
     _configure_logging()
 
 
@@ -1126,17 +1142,6 @@ def panel_prepare_chrx(
 def version() -> None:
     """Print the genome package version."""
     typer.echo(__version__)
-
-
-_VersionFlag = Annotated[
-    bool, typer.Option("--version", help="Print version and exit", is_eager=True)
-]
-
-
-def _print_version_and_exit(value: bool) -> None:  # noqa: FBT001
-    if value:
-        typer.echo(__version__)
-        raise typer.Exit
 
 
 if __name__ == "__main__":
